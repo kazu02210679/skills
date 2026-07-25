@@ -17,11 +17,19 @@
 
 ## 1. インストール
 
+SkillOpt はこのリポジトリに取り込まず、バージョンを固定して参照します(方針の詳細は
+[README の「依存の扱い」](README.md#依存の扱い)を参照)。
+
 ```bash
-pip install skillopt
+pip install -r requirements.txt   # skillopt==0.2.0
 ```
 
 これで `skillopt-sleep` コマンドが使えるようになります。
+
+0.2.0 (2026-07-02) で SkillOpt-Sleep 本体と Claude / Codex バックエンドが導入されているため、
+ローカル cron でのスキル定期改善はこのバージョンで完結します。Cursor 対応、`--preferences`、
+Sleep ハンドオフ、OpenAI 互換エンドポイントは 0.2.0 に未収録で、必要になったら main から
+コミットハッシュを固定してソースインストールしてください。
 
 Claude Code / Codex のエージェント内から `/skillopt-sleep` のように直接呼び出したい場合は、
 本体リポジトリのプラグインも追加でインストールできます(任意。cronでの自動実行にはCLIだけで十分です):
