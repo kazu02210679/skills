@@ -1,0 +1,4 @@
+interface:
+  display_name: "Session Handoff"
+  short_description: "Move work to a fresh task without losing intent"
+  default_prompt: "Use $handoff to move this conversation to a fresh task while preserving decisions, constraints, and unresolved work."
