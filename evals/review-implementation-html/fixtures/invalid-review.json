@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "repository": "sample/repository",
+    "base": "main",
+    "head": "WORKTREE",
+    "plan": "docs/plans/sample.md",
+    "planSlug": "sample-change",
+    "generatedAt": "2026-07-26T00:00:00Z"
+  },
+  "summary": {
+    "headline": "Invalid sample",
+    "overview": "This fixture intentionally violates ownership and finding rules."
+  },
+  "verification": [],
+  "intentGroups": [
+    {
+      "id": "first",
+      "title": "First",
+      "summary": "First group.",
+      "risk": "high",
+      "hunkIds": ["hunk-api"],
+      "findingIds": ["finding-bypass"]
+    },
+    {
+      "id": "second",
+      "title": "Second",
+      "summary": "Second group.",
+      "risk": "low",
+      "hunkIds": ["hunk-api"],
+      "findingIds": []
+    }
+  ],
+  "files": [
+    {
+      "path": "src/api.py",
+      "status": "M"
+    }
+  ],
+  "hunks": [
+    {
+      "id": "hunk-api",
+      "file": "src/api.py",
+      "oldStart": 10,
+      "newStart": 10,
+      "diff": "@@ -10 +10 @@",
+      "explanation": "Changes dispatch."
+    }
+  ],
+  "findings": [
+    {
+      "id": "finding-bypass",
+      "severity": "high",
+      "pass": "plan-blind",
+      "intentGroupId": "first",
+      "file": "src/api.py",
+      "line": 11,
+      "title": "Validation can be bypassed",
+      "evidence": "Direct callers still bypass validation.",
+      "impact": "Malformed requests reach the worker.",
+      "recommendedAction": "",
+      "status": "open"
+    }
+  ],
+  "coverage": {
+    "changedFilesReviewed": ["src/api.py"],
+    "intentGroupsReviewed": ["first", "second"],
+    "gaps": []
+  },
+  "result": "changes-requested"
+}
