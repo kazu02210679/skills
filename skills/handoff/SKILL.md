@@ -21,7 +21,7 @@ If the user only says the conversation is long or slow, recommend a handoff and 
 - Use current context when it is sufficient. Recover history only to resolve material gaps in the objective, decisions, state, constraints, failed approaches, artifacts, or next action.
 - Separate facts, inferences, and unknowns. Mark uncertainty rather than filling it with guesses.
 - Reference durable files, commits, PRs, issues, plans, URLs, and test identifiers instead of copying diffs, logs, or transcripts.
-- For every material artifact, include its durable locator when recoverable. If the artifact is known but its locator is not recoverable, list it in `Relevant artifacts` with the locator marked unknown; never invent a locator or silently omit the artifact. Add locating it as a next action when continuation depends on it.
+- For every known material implementation, test, deployment, failed operation, and result, check for a supporting durable artifact and locator. If either the locator or the supporting artifact's existence is not recoverable, list it in `Relevant artifacts` as unknown; never invent an identifier, silently omit it, or present a speculative artifact as fact. Add resolving every material unknown artifact or locator explicitly to `Open questions and next actions`.
 - Include repository state only when it changes the next action.
 
 ## 3. Build the handoff
