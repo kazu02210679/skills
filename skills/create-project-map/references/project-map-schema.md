@@ -95,4 +95,3 @@ Each `nodeIds` and `edgeIds` entry must reference an existing element. Stage nod
 - Place new nodes in the nearest relevant category/Flow region.
 - Avoid identical coordinates.
 - Keep the primary direction left-to-right when the plan does not define another direction.
-

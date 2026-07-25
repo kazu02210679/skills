@@ -82,4 +82,3 @@ Do not commit, push, deploy, or publish unless the user separately requests it. 
 - Unresolved relationship: retain a coverage gap.
 - Missing Cytoscape.js or JSON at runtime: preserve the template's visible recovery message and provide local-server instructions.
 - Browser unavailable: report browser verification as blocked; do not claim the HTML was interactively verified.
-
