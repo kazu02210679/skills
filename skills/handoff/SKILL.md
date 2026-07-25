@@ -21,6 +21,7 @@ If the user only says the conversation is long or slow, recommend a handoff and 
 - Use current context when it is sufficient. Recover history only to resolve material gaps in the objective, decisions, state, constraints, failed approaches, artifacts, or next action.
 - Separate facts, inferences, and unknowns. Mark uncertainty rather than filling it with guesses.
 - Reference durable files, commits, PRs, issues, plans, URLs, and test identifiers instead of copying diffs, logs, or transcripts.
+- For every material artifact, include its durable locator when recoverable. If the artifact is known but its locator is not recoverable, list it in `Relevant artifacts` with the locator marked unknown; never invent a locator or silently omit the artifact. Add locating it as a next action when continuation depends on it.
 - Include repository state only when it changes the next action.
 
 ## 3. Build the handoff
@@ -45,7 +46,7 @@ If the user only says the conversation is long or slow, recommend a handoff and 
 ## First response contract
 ```
 
-In `First response contract`, require the destination's first response to restate: (1) why the task exists; (2) the current objective and state; (3) unresolved points; and (4) the proposed first action. Require it to wait for confirmation before calling tools or continuing work.
+In `First response contract`, require the destination's first response to restate the actual material information in the handoff: why the task exists, the current objective and state, every material decision, correction, prohibition, completed or pending test status, unknown, and the proposed next action. Name those items concretely rather than repeating category labels. Require it to wait for confirmation before calling tools or continuing work.
 
 ## 4. Run the safety pass
 
@@ -62,8 +63,8 @@ In `First response contract`, require the destination's first response to restat
 ## 6. Create a fresh task when possible
 
 - When a suitable task-management capability is available, create a genuinely new task in the same project or local environment. Use section 7 only if that capability is unavailable or the creation attempt fails.
-- Put the complete handoff inline in the destination prompt, including the destination instruction and first-response contract.
-- Verify that direct task creation succeeded before claiming success. Do not substitute a transcript-preserving fork.
+- Construct the complete destination prompt, including the complete inline handoff, destination instruction, and first-response contract, before invoking the capability. Pass that exact full text literally in the capability's prompt or input argument; never use a placeholder, file-only reference, or adjacent block in place of the actual argument.
+- Verify that direct task creation succeeded and identifies a genuinely new non-fork task before claiming success. Do not substitute a transcript-preserving fork.
 
 ## 7. Fall back honestly
 
