@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Create a safe, conversation-centered handoff to a fresh task, thread, session, or chat while preserving the original purpose, changes of direction, decisions, constraints, failed approaches, artifacts, unresolved work, and next action. Use when the user explicitly asks to hand off, transfer, continue in a new task, start fresh without losing context, or says phrases such as "蠑輔″邯吶＞縺ｧ", "蛻･繧ｻ繝・す繝ｧ繝ｳ縺ｫ遘ｻ縺励※", "譁ｰ縺励＞繧ｿ繧ｹ繧ｯ縺ｫ縺励※", or "move this to a fresh chat"; if the user only remarks that the conversation is long or slow without asking to move it, recommend a handoff but do not create one.
+description: Create a safe, conversation-centered handoff to a fresh task, thread, session, or chat while preserving the original purpose, changes of direction, decisions, constraints, failed approaches, artifacts, unresolved work, and next action. Use when the user explicitly asks to hand off, transfer, continue in a new task, start fresh without losing context, or says phrases such as "引き継いで", "別セッションに移して", "新しいタスクにして", or "move this to a fresh chat"; if the user only remarks that the conversation is long or slow without asking to move it, recommend a handoff but do not create one.
 ---
 
 # Handoff
@@ -61,7 +61,7 @@ In `First response contract`, require the destination's first response to restat
 
 ## 6. Create a fresh task when possible
 
-- Prefer a genuinely new task in the same project or local environment.
+- When a suitable task-management capability is available, create a genuinely new task in the same project or local environment. Use section 7 only if that capability is unavailable or the creation attempt fails.
 - Put the complete handoff inline in the destination prompt, including the destination instruction and first-response contract.
 - Verify that direct task creation succeeded before claiming success. Do not substitute a transcript-preserving fork.
 
