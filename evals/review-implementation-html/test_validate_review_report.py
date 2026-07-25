@@ -31,6 +31,24 @@ class ReviewValidationTests(unittest.TestCase):
         errors = MODULE.validate_document(self.load("invalid-review.json"))
         self.assertTrue(any("exactly one intent group" in error for error in errors))
 
+    def test_finding_group_reference_matches_group_ownership(self):
+        document = self.load("valid-review.json")
+        document["intentGroups"].append(
+            {
+                "id": "other",
+                "title": "Other",
+                "summary": "Another intent.",
+                "risk": "low",
+                "hunkIds": [],
+                "findingIds": [],
+            }
+        )
+        document["findings"][0]["intentGroupId"] = "other"
+
+        errors = MODULE.validate_document(document)
+
+        self.assertTrue(any("does not match intent group ownership" in error for error in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

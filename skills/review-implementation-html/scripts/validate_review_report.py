@@ -119,6 +119,7 @@ def validate_document(document: dict) -> list[str]:
     previous_rank = -1
     hunk_owners: Counter[str] = Counter()
     finding_owners: Counter[str] = Counter()
+    finding_group_claims: dict[str, str] = {}
     for index, group in enumerate(groups):
         if not isinstance(group, dict):
             continue
@@ -144,6 +145,8 @@ def validate_document(document: dict) -> list[str]:
             group.get("findingIds", []) if isinstance(group.get("findingIds"), list) else []
         ):
             finding_owners[finding_id] += 1
+            if isinstance(group.get("id"), str):
+                finding_group_claims[finding_id] = group["id"]
             if finding_id not in finding_ids:
                 errors.append(
                     f"intentGroups[{index}] references unknown finding {finding_id!r}"
@@ -210,6 +213,10 @@ def validate_document(document: dict) -> list[str]:
             errors.append(f"findings[{index}].status is invalid")
         if finding.get("intentGroupId") not in group_ids:
             errors.append(f"findings[{index}].intentGroupId is unknown")
+        elif finding_group_claims.get(finding.get("id")) != finding.get("intentGroupId"):
+            errors.append(
+                f"findings[{index}].intentGroupId does not match intent group ownership"
+            )
         if finding.get("file") not in file_paths:
             errors.append(f"findings[{index}].file must reference a changed file")
         if not isinstance(finding.get("line"), int) or finding.get("line", 0) < 1:
