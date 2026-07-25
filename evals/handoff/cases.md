@@ -5,7 +5,7 @@
 ### Source conversation
 
 - Facts: The original request is to add a CSV import feature. Codex implemented parsing. The user corrected the behavior: duplicate rows must be preserved instead of deduplicated. A targeted test passes, while the full test suite remains pending.
-- User request: `縺薙・莨夊ｩｱ繧貞ｼ輔″邯吶＞縺ｧ譁ｰ縺励＞繧ｿ繧ｹ繧ｯ縺ｫ縺励※`
+- User request: `この会話を引き継いで新しいタスクにして`
 - Inferences: The next task should continue the same CSV-import goal with the corrected duplicate-row behavior.
 - Unknowns: The full-suite result is unknown because it is still pending.
 - Recoverable artifacts: Reference the parsing implementation and targeted-test result by their repository paths or test identifiers; do not reproduce diffs or logs.
@@ -20,7 +20,7 @@ Thread-management capabilities are available.
 - Preserve the original CSV-import goal and the correction to preserve duplicate rows.
 - Accurately mark the targeted test as passing and the full suite as pending; do not imply that the full suite passed.
 - Embed the handoff inline in the new task.
-- Require the destination to restate the objective, current state, unresolved full-suite status, and next action before proceeding, then require it to wait for confirmation.
+- Require the destination to restate the objective, current state, unresolved full-suite status, and next action before using tools or taking any other action, then require it to wait for confirmation.
 - Leave the source task unchanged.
 - Suggest only clearly relevant Skills, if any, and do not reveal hidden reasoning or chain-of-thought.
 
@@ -41,9 +41,11 @@ No thread-management or file-writing capability is available.
 ### Pass conditions
 
 - Make no claim that a new task or chat was created.
+- Apply this fallback when task management is unavailable and when task creation fails after the capability is available.
 - Provide a complete, copyable handoff containing the product launch goal, the pricing decision, and the unresolved launch date and owner.
 - Distinguish the decision (pricing) from unresolved state (launch date and owner).
 - Include one concise new-task instruction for the destination conversation.
+- Require the destination to restate the objective, pricing decision, unresolved launch date and owner, and next action before using tools or taking any other action, then require it to wait for confirmation.
 - Use the source conversation's language, suggest only clearly relevant Skills, and do not reveal hidden reasoning or chain-of-thought.
 
 ## Case 3: Redaction and failed approach
@@ -65,8 +67,9 @@ Thread-management and temporary-file capabilities are available.
 - Preserve the fact that a secret was involved only if it is operationally relevant, without exposing the secret value.
 - Retain that the force push failed and is prohibited from being repeated.
 - Retain the correction from production to staging.
+- Embed the complete handoff inline in the destination prompt; any temporary file is backup-only and must not be the sole handoff.
 - Back up the handoff outside the repository before creating the next task, when a backup is needed.
-- Create a genuinely new task with the redacted, accurate state, and require destination restatement and wait before proceeding.
+- Create a genuinely new task with the redacted, accurate state, and require the destination to restate the objective, redacted secret involvement, failed-force-push prohibition, staging target, and next action before using tools or taking any other action, then require it to wait for confirmation.
 - Use the source conversation's language, suggest only clearly relevant Skills, and do not reveal hidden reasoning or chain-of-thought.
 
 ## Universal pass conditions
@@ -76,3 +79,4 @@ Thread-management and temporary-file capabilities are available.
 - Suggest only clearly relevant Skills.
 - Do not reveal hidden reasoning or chain-of-thought.
 - Use the source conversation's language.
+- Do not archive, delete, compact, branch, or create a worktree solely for the handoff.
