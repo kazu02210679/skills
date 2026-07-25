@@ -17,10 +17,11 @@ Claude Code と Codex で共用するエージェントスキルの正本リポ�
 
 ## 収録スキル
 
-正本は `skills/` に置く。現在は次の70個を収録している。
+正本は `skills/` に置く。現在は次の71個を収録している。
 
 - `complexity-aware-execution` — 調査と検証の深さをタスクの難易度・リスクに合わせる
 - `writing-style` — 正確さを保ちながら日本語の認知リズムを整える
+- `handoff` — 会話の目的・前提・未解決事項を保って新しいタスクへ移す
 - [phuryn/pm-skills](https://github.com/phuryn/pm-skills) 2.1.0の68 Skill
 
 PM SkillsはMITライセンスに基づいてSkill本体だけを収録した。Claude固有のコマンドと
@@ -70,6 +71,10 @@ python scripts/validate-skills.py
 形式が共通なので、**最初からツール別に分岐させる必要はない**。SkillOpt の論文では、
 Codex で訓練したスキルを Claude Code に移した際に 22.1 → 81.8 (+59.7) と、
 直接訓練した場合(80.4)と同等の性能が出ている。分岐は「評価で有意差が出てから」でよい。
+
+`handoff` は、Codexでタスク管理機能を利用できる場合は新しいタスクを直接作成する。
+ChatGPTなど同等の機能がない環境では、コピー可能な引き継ぎの文書をフォールバックする。
+ChatGPTとCodexのSkillは自動同期されないため、それぞれ個別にインストールする。
 
 ## SkillOpt による定期改善
 
@@ -163,5 +168,6 @@ Claude Code 内で `/skillopt-sleep` を、Codex でスキルとして呼び出�
 
 - [microsoft/SkillOpt](https://github.com/microsoft/SkillOpt)
 - [SkillOpt-Sleep README](https://github.com/microsoft/SkillOpt/blob/main/docs/sleep/README.md) / [RESULTS.md](https://github.com/microsoft/SkillOpt/blob/main/docs/sleep/RESULTS.md)
+- [Codex Session Handoff Skill — tegnike](https://gist.github.com/tegnike/09dbb98711d8b91e66de21611f5b88ff) — [MITライセンス](third_party/handoff-gist/LICENSE) / [出典情報](third_party/handoff-gist/source.json)
 - [CLI リファレンス](https://github.com/microsoft/SkillOpt/blob/main/docs/reference/cli.md)
 - [SkillOpt: Agent skills as trainable parameters — Microsoft Research](https://www.microsoft.com/en-us/research/blog/skillopt-agent-skills-as-trainable-parameters/)
