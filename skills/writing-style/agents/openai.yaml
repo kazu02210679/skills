@@ -1,0 +1,4 @@
+interface:
+  display_name: "日本語ライティングスタイル"
+  short_description: "正確さを保ちながら日本語の認知リズムを整える"
+  default_prompt: "Use $writing-style to revise this Japanese draft for clarity, rhythm, and factual fidelity."

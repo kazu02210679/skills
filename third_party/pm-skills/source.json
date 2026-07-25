@@ -1,0 +1,10 @@
+{
+  "name": "pm-skills",
+  "source": "https://github.com/phuryn/pm-skills",
+  "version": "2.1.0",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 Pawel Huryn",
+  "imported_skill_count": 68,
+  "imported_on": "2026-07-26",
+  "notes": "Imported from the locally installed Codex plugin cache. Commands and plugin manifests are not redistributed."
+}

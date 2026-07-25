@@ -15,14 +15,57 @@ Claude Code と Codex で共用するエージェントスキルの正本リポ�
 資産はスキルそのものであって、最適化ツールではない。SkillOpt は交換可能な道具として
 外部参照にとどめる(→ [依存の扱い](#依存の扱い))。
 
-## スキルの配置先
+## 収録スキル
 
-`SKILL.md` 形式は Claude Code と Codex で共通で、そのまま移植できる。
+正本は `skills/` に置く。現在は次の70個を収録している。
+
+- `complexity-aware-execution` — 調査と検証の深さをタスクの難易度・リスクに合わせる
+- `writing-style` — 正確さを保ちながら日本語の認知リズムを整える
+- [phuryn/pm-skills](https://github.com/phuryn/pm-skills) 2.1.0の68 Skill
+
+PM SkillsはMITライセンスに基づいてSkill本体だけを収録した。Claude固有のコマンドと
+プラグイン定義は含めていない。出典とライセンスは
+`third_party/pm-skills/source.json` と `third_party/pm-skills/LICENSE` に固定している。
+
+## Codex / Claude Codeから使う
+
+`SKILL.md` 形式は両者で共通だ。違うのは、ユーザー領域へインストールするときの置き場所だけになる。
 
 | ツール | プロジェクト用 | 個人用 |
 |---|---|---|
 | Claude Code | `.claude/skills/` | `~/.claude/skills/` |
 | Codex | `.agents/skills/` | `~/.agents/skills/` |
+
+このリポジトリを開いて作業する場合、Codexは `AGENTS.md`、Claude Codeは `CLAUDE.md` から
+`skills/` を正本として参照する。別のプロジェクトでも自動発見させる場合は、同期スクリプトを使う。
+
+Windows PowerShell:
+
+```powershell
+# 個人用としてCodexとClaude Codeの両方へ同期
+powershell -ExecutionPolicy Bypass -File .\scripts\install-skills.ps1 -Agent both -Scope user
+
+# 特定プロジェクトへ同期
+powershell -ExecutionPolicy Bypass -File .\scripts\install-skills.ps1 `
+  -Agent both -Scope project -ProjectRoot C:\path\to\project
+```
+
+macOS / Linux:
+
+```bash
+# 個人用としてCodexとClaude Codeの両方へ同期
+./scripts/install-skills.sh --agent both --scope user
+
+# 特定プロジェクトへ同期
+./scripts/install-skills.sh --agent both --scope project --project-root /path/to/project
+```
+
+同期先は配布物であり、編集元ではない。改善するときは `skills/<skill-name>/SKILL.md` を変更し、
+検証後にもう一度同期する。
+
+```bash
+python scripts/validate-skills.py
+```
 
 形式が共通なので、**最初からツール別に分岐させる必要はない**。SkillOpt の論文では、
 Codex で訓練したスキルを Claude Code に移した際に 22.1 → 81.8 (+59.7) と、

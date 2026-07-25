@@ -1,0 +1,4 @@
+interface:
+  display_name: "Complexity-Aware Execution"
+  short_description: "Match investigation and verification effort to task risk"
+  default_prompt: "Use $complexity-aware-execution to make this change with proportionate investigation and verification."
