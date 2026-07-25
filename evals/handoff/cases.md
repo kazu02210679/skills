@@ -5,7 +5,7 @@
 ### Source conversation
 
 - Facts: The original request is to add a CSV import feature. Codex implemented parsing. The user corrected the behavior: duplicate rows must be preserved instead of deduplicated. A targeted test passes, while the full test suite remains pending.
-- User request: `この会話を引き継いで新しいタスクにして`
+- User request in Japanese: `この会話を引き継いで新しいタスクにして`
 - Inferences: The next task should continue the same CSV-import goal with the corrected duplicate-row behavior.
 - Unknowns: The full-suite result is unknown because it is still pending.
 - Recoverable artifacts: Reference the parsing implementation and targeted-test result by their repository paths or test identifiers; do not reproduce diffs or logs.
@@ -24,7 +24,7 @@ Thread-management capabilities are available.
 - Leave the source task unchanged.
 - Suggest only clearly relevant Skills, if any, and do not reveal hidden reasoning or chain-of-thought.
 
-## Case 2: No task-management capability
+## Case 2: No task-management capability or failed creation
 
 ### Source conversation
 
@@ -36,12 +36,13 @@ Thread-management capabilities are available.
 
 ### Environment
 
-No thread-management or file-writing capability is available.
+- Variant A: No thread-management or file-writing capability is available.
+- Variant B: Thread-management capability is available, but the attempt to create the new task fails.
 
 ### Pass conditions
 
 - Make no claim that a new task or chat was created.
-- Apply this fallback when task management is unavailable and when task creation fails after the capability is available.
+- In both variants, apply this fallback and make no false creation claim.
 - Provide a complete, copyable handoff containing the product launch goal, the pricing decision, and the unresolved launch date and owner.
 - Distinguish the decision (pricing) from unresolved state (launch date and owner).
 - Include one concise new-task instruction for the destination conversation.
