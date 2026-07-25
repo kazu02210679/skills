@@ -1,85 +1,85 @@
 ---
 name: create-project-map
-description: [TODO: Complete and informative explanation of what the skill does and when to use it. Include WHEN to use this skill - specific scenarios, file types, or tasks that trigger it.]
+description: Create or update a living interactive project architecture map as architecture-map.html plus machine-readable architecture-map.json. Use after a plan or specification is approved, or when the user asks for a project map, architecture map, dependency map, implementation map, module map, system flow visualization, or reusable visual context for later agents.
 ---
 
 # Create Project Map
 
-## Overview
+Build one living map for the repository. Update existing artifacts instead of creating a map per plan.
 
-[TODO: 1-2 sentences explaining what this skill enables]
+## Required Inputs
 
-## Structuring This Skill
+- An approved plan or specification.
+- The target repository root.
+- Repository evidence sufficient to distinguish planned and implemented components.
 
-[TODO: Choose the structure that best fits this skill's purpose. Common patterns:
+Stop and request the plan when it cannot be found or identified. Do not infer an architecture from filenames alone.
 
-**1. Workflow-Based** (best for sequential processes)
-- Works well when there are clear step-by-step procedures
-- Example: DOCX skill with "Workflow Decision Tree" -> "Reading" -> "Creating" -> "Editing"
-- Structure: ## Overview -> ## Workflow Decision Tree -> ## Step 1 -> ## Step 2...
+## Workflow
 
-**2. Task-Based** (best for tool collections)
-- Works well when the skill offers different operations/capabilities
-- Example: PDF skill with "Quick Start" -> "Merge PDFs" -> "Split PDFs" -> "Extract Text"
-- Structure: ## Overview -> ## Quick Start -> ## Task Category 1 -> ## Task Category 2...
+1. Resolve the repository root and approved plan.
+2. Read relevant README, AGENTS.md, plan sections, source paths, tests, and build/runtime evidence. Do not inventory unrelated files.
+3. If `architecture-map.json` exists, run `scripts/validate_project_map.py` before editing it. Stop on invalid data and preserve the original file.
+4. Read [project-map-schema.md](references/project-map-schema.md).
+5. Merge the project model:
+   - match nodes and flows by stable ID;
+   - preserve positions for retained node IDs;
+   - add plan-only elements as `planned`;
+   - promote to `implemented` only with inspected code, test, build, or runtime evidence;
+   - mark removed plan elements `deprecated` before deleting them;
+   - record repository-relative evidence and explicit coverage gaps.
+6. Write `architecture-map.json` at the repository root.
+7. Copy `assets/project-map-template.html` only through the renderer:
 
-**3. Reference/Guidelines** (best for standards or specifications)
-- Works well for brand guidelines, coding standards, or requirements
-- Example: Brand styling with "Brand Guidelines" -> "Colors" -> "Typography" -> "Features"
-- Structure: ## Overview -> ## Guidelines -> ## Specifications -> ## Usage...
+   ```bash
+   python <skill-dir>/scripts/build_project_map.py \
+     --data <repo>/architecture-map.json \
+     --template <skill-dir>/assets/project-map-template.html \
+     --output <repo>/architecture-map.html
+   ```
 
-**4. Capabilities-Based** (best for integrated systems)
-- Works well when the skill provides multiple interrelated features
-- Example: Product Management with "Core Capabilities" -> numbered capability list
-- Structure: ## Overview -> ## Core Capabilities -> ### 1. Feature -> ### 2. Feature...
+8. Validate both artifacts:
 
-Patterns can be mixed and matched as needed. Most skills combine patterns (e.g., start with task-based, add workflow for complex operations).
+   ```bash
+   python <skill-dir>/scripts/validate_project_map.py \
+     <repo>/architecture-map.json \
+     --html <repo>/architecture-map.html
+   ```
 
-Delete this entire "Structuring This Skill" section when done - it's just guidance.]
+9. Serve the repository over HTTP. Browser-check:
+   - initial all-relationships view;
+   - search;
+   - each Flow selection and automatic detail scroll;
+   - node selection and relationship navigation;
+   - fit, pan, and zoom;
+   - desktop and mobile layout;
+   - browser console errors.
+10. Report the artifact paths, validation result, evidence-backed status changes, and remaining coverage gaps.
 
-## [TODO: Replace with the first main section based on chosen structure]
+## Merge Rules
 
-[TODO: Add content here. See examples in existing skills:
-- Code samples for technical skills
-- Decision trees for complex workflows
-- Concrete examples with realistic user requests
-- References to scripts/templates/references as needed]
+- Use lower-case hyphenated stable IDs.
+- Keep manually adjusted coordinates unless the node is new.
+- Keep directed relationships explicit; do not invent an edge when the contract is unknown.
+- Prefer one Flow per meaningful user, system, training, evaluation, or delivery path.
+- Keep Flow descriptions short enough for navigation cards.
+- Treat generated file paths from a plan as planned evidence, not implementation evidence.
+- Never remove malformed existing JSON, product code, or unrelated user changes.
 
-## Resources (optional)
+## Output Boundary
 
-Create only the resource directories this skill actually needs. Delete this section if no resources are required.
+The skill may write only:
 
-### scripts/
-Executable code (Python/Bash/etc.) that can be run directly to perform specific operations.
+- `<repo>/architecture-map.json`
+- `<repo>/architecture-map.html`
 
-**Examples from other skills:**
-- PDF skill: `fill_fillable_fields.py`, `extract_form_field_info.py` - utilities for PDF manipulation
-- DOCX skill: `document.py`, `utilities.py` - Python modules for document processing
+Do not commit, push, deploy, or publish unless the user separately requests it. Warn that GitHub Pages publication makes the map publicly reachable.
 
-**Appropriate for:** Python scripts, shell scripts, or any executable code that performs automation, data processing, or specific operations.
+## Failure Handling
 
-**Note:** Scripts may be executed without loading into context, but can still be read by Codex for patching or environment adjustments.
+- Missing plan: stop and request it.
+- Invalid existing JSON: report validator errors and do not overwrite.
+- Unresolved relationship: retain a coverage gap.
+- Missing Cytoscape.js or JSON at runtime: preserve the template's visible recovery message and provide local-server instructions.
+- Browser unavailable: report browser verification as blocked; do not claim the HTML was interactively verified.
 
-### references/
-Documentation and reference material intended to be loaded into context to inform Codex's process and thinking.
-
-**Examples from other skills:**
-- Product management: `communication.md`, `context_building.md` - detailed workflow guides
-- BigQuery: API reference documentation and query examples
-- Finance: Schema documentation, company policies
-
-**Appropriate for:** In-depth documentation, API references, database schemas, comprehensive guides, or any detailed information that Codex should reference while working.
-
-### assets/
-Files not intended to be loaded into context, but rather used within the output Codex produces.
-
-**Examples from other skills:**
-- Brand styling: PowerPoint template files (.pptx), logo files
-- Frontend builder: HTML/React boilerplate project directories
-- Typography: Font files (.ttf, .woff2)
-
-**Appropriate for:** Templates, boilerplate code, document templates, images, icons, fonts, or any files meant to be copied or used in the final output.
-
----
-
-**Not every skill requires all three types of resources.**
