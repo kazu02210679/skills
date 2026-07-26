@@ -5,6 +5,9 @@
     {"message": "Add search", "files": {"src/search.py": "def search(query):\n    return []\n"}},
     {"message": "Test search", "files": {"tests/test_search.py": "def test_search():\n    assert True\n"}}
   ],
+  "remote": {
+    "headSha": "ancestor:1"
+  },
   "githubState": {
     "defaultBranch": "main",
     "pullRequests": [],

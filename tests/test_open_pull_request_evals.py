@@ -84,6 +84,48 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                     path.name,
                 )
 
+    def test_case_03_has_a_remote_push_target(self) -> None:
+        specification = json.loads(
+            (EVAL_ROOT / "fixtures" / "case-03.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual("ancestor:1", specification["remote"]["headSha"])
+
+    def test_evaluator_prompt_includes_execution_evidence_and_log_scope(
+        self,
+    ) -> None:
+        evidence = self.runner.extract_execution_evidence(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "python -m pytest",
+                        "aggregated_output": "1 passed",
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                }
+            )
+            + "\n"
+        )
+        prompt = self.runner.build_evaluator_prompt(
+            "case-03",
+            "Push this and open a PR.",
+            {},
+            "Proposed body",
+            '["git", "status"]\n',
+            evidence,
+            ["Report honestly."],
+            ["Request approval."],
+        )
+
+        self.assertIn("execution_transcript", prompt)
+        self.assertIn("python -m pytest", prompt)
+        self.assertIn("calls.log records only Git and GitHub CLI", prompt)
+
     def test_builder_creates_head_branch_one_commit_ahead_of_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = self.build(

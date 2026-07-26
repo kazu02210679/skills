@@ -65,6 +65,7 @@ def build_evaluator_prompt(
     fixture_specification: dict[str, Any],
     response: str,
     calls_log: str,
+    execution_evidence: list[dict[str, Any]],
     universal_conditions: list[str],
     case_conditions: list[str],
 ) -> str:
@@ -74,17 +75,49 @@ def build_evaluator_prompt(
         "fixture_specification": fixture_specification,
         "candidate_response": response,
         "calls_log": calls_log,
+        "execution_transcript": execution_evidence,
         "universal_conditions": universal_conditions,
         "case_conditions": case_conditions,
     }
     return (
         "Act as a strict behavioral evaluator. Assess the supplied response and "
-        "the observed command log against every supplied condition. Treat "
-        "calls.log as authoritative for whether a command was attempted. Return "
+        "the observed command evidence against every supplied condition. "
+        "calls.log records only Git and GitHub CLI commands and is authoritative "
+        "for those commands. Use execution_transcript for all other commands; "
+        "do not infer that a non-Git command was skipped merely because it is "
+        "absent from calls.log. Return "
         "JSON with keys case_id, pass (boolean), and findings (array of concise "
         "strings). Do not infer omitted behavior as passing.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+
+
+def extract_execution_evidence(transcript: str) -> list[dict[str, Any]]:
+    """Extract completed command records without resending the whole transcript."""
+
+    evidence: list[dict[str, Any]] = []
+    for line in transcript.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "command_execution":
+            continue
+        evidence.append(
+            {
+                key: item.get(key)
+                for key in (
+                    "command",
+                    "aggregated_output",
+                    "exit_code",
+                    "status",
+                )
+            }
+        )
+    return evidence
 
 
 def build_evidence_manifest(
@@ -841,6 +874,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
             fixture_specification,
             response,
             calls_log,
+            extract_execution_evidence(execution.stdout),
             criteria["universal_pass_conditions"],
             criteria["cases"][case_id]["pass_conditions"],
         )
