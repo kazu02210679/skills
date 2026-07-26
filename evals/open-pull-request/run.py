@@ -1,0 +1,630 @@
+#!/usr/bin/env python3
+"""Run blind, candidate-pinned evaluations for the open-pull-request Skill."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+EVAL_ROOT = Path(__file__).resolve().parent
+REPOSITORY_ROOT = EVAL_ROOT.parents[1]
+CANDIDATE_ROOT = REPOSITORY_ROOT / "skills" / "open-pull-request"
+CANDIDATE_SKILL_PATH = CANDIDATE_ROOT / "SKILL.md"
+CANDIDATE_SCRIPTS_PATH = CANDIDATE_ROOT / "scripts"
+BUILDER_PATH = EVAL_ROOT / "fixtures" / "build_repository.py"
+
+
+def _load_builder():
+    specification = importlib.util.spec_from_file_location(
+        "open_pull_request_fixture_builder",
+        BUILDER_PATH,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError(f"Unable to load fixture builder: {BUILDER_PATH}")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module.build_repository
+
+
+build_repository = _load_builder()
+
+
+def build_execution_prompt(candidate_path: Path, input_path: Path) -> str:
+    """Build the criteria-free prompt used in an isolated Git workspace."""
+
+    return (
+        "Follow the candidate Skill to handle the user's pull request request.\n"
+        f"Read {candidate_path.as_posix()} completely, then read "
+        f"{input_path.as_posix()}.\n"
+        "The real Git fixture is the repository/ directory in this workspace. "
+        "Run the Skill's inspector and any other commands it calls for against "
+        "that repository, and produce the complete response to the user. "
+        "Do not inspect files outside candidate/, inputs/, and repository/. "
+        "Do not discuss evaluation rules."
+    )
+
+
+def build_evaluator_prompt(
+    case_id: str,
+    raw_input: str,
+    fixture_specification: dict[str, Any],
+    response: str,
+    calls_log: str,
+    universal_conditions: list[str],
+    case_conditions: list[str],
+) -> str:
+    payload = {
+        "case_id": case_id,
+        "raw_input": raw_input,
+        "fixture_specification": fixture_specification,
+        "candidate_response": response,
+        "calls_log": calls_log,
+        "universal_conditions": universal_conditions,
+        "case_conditions": case_conditions,
+    }
+    return (
+        "Act as a strict behavioral evaluator. Assess the supplied response and "
+        "the observed command log against every supplied condition. Treat "
+        "calls.log as authoritative for whether a command was attempted. Return "
+        "JSON with keys case_id, pass (boolean), and findings (array of concise "
+        "strings). Do not infer omitted behavior as passing.\n\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+
+
+def build_evidence_manifest(
+    *,
+    candidate_commit: str,
+    candidate_files_sha256: dict[str, str],
+    codex_version: str,
+    model: str,
+    execution_prompts: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "candidate": {
+            "commit": candidate_commit,
+            "files_sha256": candidate_files_sha256,
+        },
+        "runtime": {
+            "codex_version": codex_version,
+            "model": model,
+        },
+        "execution_prompts": execution_prompts,
+        "cases": {},
+    }
+
+def write_command_shims(
+    directory: Path,
+    github_state: dict[str, Any],
+) -> Path:
+    """Write cross-platform Git and GitHub CLI wrappers into ``directory``."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    configuration = {
+        "githubState": github_state,
+        "realExecutables": {
+            "git": shutil.which("git"),
+            "gh": shutil.which("gh") or shutil.which("gh.exe"),
+        },
+    }
+    (directory / "shim-config.json").write_text(
+        json.dumps(configuration, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    shim_program = r'''#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+directory = Path(__file__).resolve().parent
+configuration = json.loads(
+    (directory / "shim-config.json").read_text(encoding="utf-8")
+)
+tool, *arguments = sys.argv[1:]
+with (directory / "calls.log").open("a", encoding="utf-8", newline="\n") as log:
+    log.write(json.dumps([tool, *arguments], ensure_ascii=False) + "\n")
+
+state = configuration["githubState"]
+is_git_push = tool == "git" and "push" in arguments
+is_gh_mutation = tool == "gh" and any(
+    arguments[index:index + 2] in (
+        ["pr", "create"],
+        ["pr", "edit"],
+        ["pr", "ready"],
+        ["pr", "reopen"],
+    )
+    for index in range(max(0, len(arguments) - 1))
+)
+if (is_git_push or is_gh_mutation) and not state.get("allowMutations", False):
+    print(
+        f"{tool} mutation blocked by open-pull-request evaluation shim",
+        file=sys.stderr,
+    )
+    raise SystemExit(97)
+
+if tool == "gh" and arguments[:2] in (["pr", "list"], ["pr", "view"]):
+    print(json.dumps(state.get("pullRequests", []), ensure_ascii=False))
+    raise SystemExit(0)
+if tool == "gh" and arguments[:2] == ["repo", "view"]:
+    print(
+        json.dumps(
+            {
+                "defaultBranchRef": {
+                    "name": state.get("defaultBranch", "main")
+                }
+            },
+            ensure_ascii=False,
+        )
+    )
+    raise SystemExit(0)
+if (
+    tool == "gh"
+    and arguments[:2] == ["pr", "create"]
+    and state.get("failCreate", False)
+):
+    print("gh pr create forced to fail by evaluation fixture", file=sys.stderr)
+    raise SystemExit(98)
+
+executable = configuration["realExecutables"].get(tool)
+if not executable:
+    print(f"real {tool} executable was not found", file=sys.stderr)
+    raise SystemExit(127)
+completed = subprocess.run([executable, *arguments], check=False)
+raise SystemExit(completed.returncode)
+'''
+    script_path = directory / "command_shim.py"
+    script_path.write_text(shim_program, encoding="utf-8", newline="\n")
+
+    quoted_python = shlex.quote(sys.executable)
+    quoted_script = shlex.quote(str(script_path))
+    for tool in ("git", "gh"):
+        shell_wrapper = directory / tool
+        shell_wrapper.write_text(
+            "#!/bin/sh\n"
+            f"exec {quoted_python} {quoted_script} {tool} \"$@\"\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        shell_wrapper.chmod(0o755)
+        # cmd.exe reads a batch file in the OEM code page, not UTF-8, so any
+        # non-ASCII byte in it is mis-decoded and the interpreter path fails to
+        # resolve. Keep the file pure ASCII: %~dp0 is expanded by cmd itself at
+        # run time, and `python` is resolved from PATH, so neither the script
+        # path nor the interpreter path is ever written into the file.
+        command_wrapper = directory / f"{tool}.cmd"
+        command_wrapper.write_text(
+            f'@python "%~dp0{script_path.name}" {tool} %*\n',
+            encoding="ascii",
+            newline="\r\n",
+        )
+    (directory / "calls.log").touch()
+    return directory
+
+
+def _run(
+    command: list[str],
+    *,
+    cwd: Path,
+    input_text: str | None = None,
+    environment: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        env=environment,
+        input=input_text,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+def _git_bytes(arguments: list[str], *, step: str) -> bytes:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=REPOSITORY_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"Unable to {step}: {detail}")
+    return result.stdout
+
+
+def _read_committed_candidate(commit: str) -> tuple[str, dict[str, bytes]]:
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise ValueError("--candidate-commit must be a full 40-hex commit ID.")
+    resolved_commit = _git_bytes(
+        ["rev-parse", f"{commit}^{{commit}}"],
+        step="resolve candidate commit",
+    ).decode("ascii").strip().lower()
+    if resolved_commit != commit.lower():
+        raise ValueError(
+            f"Candidate commit resolved to unexpected ID {resolved_commit}."
+        )
+
+    prefix = "skills/open-pull-request"
+    listed = _git_bytes(
+        [
+            "ls-tree",
+            "-r",
+            "--name-only",
+            resolved_commit,
+            f"{prefix}/SKILL.md",
+            f"{prefix}/scripts",
+        ],
+        step="list candidate files",
+    ).decode("utf-8").splitlines()
+    expected_skill = f"{prefix}/SKILL.md"
+    if expected_skill not in listed:
+        raise ValueError(
+            "Candidate commit does not contain skills/open-pull-request/SKILL.md."
+        )
+    files = {
+        path: _git_bytes(
+            ["show", f"{resolved_commit}:{path}"],
+            step=f"read {path} from candidate commit",
+        )
+        for path in listed
+    }
+    return resolved_commit, files
+
+
+def assert_candidate_content(committed_files: dict[str, bytes]) -> dict[str, str]:
+    """Return file digests or reject a dirty/different candidate checkout."""
+
+    checkout_files = {
+        relative_path: REPOSITORY_ROOT / relative_path
+        for relative_path in committed_files
+    }
+    digests: dict[str, str] = {}
+    for relative_path, committed_content in committed_files.items():
+        checkout_path = checkout_files[relative_path]
+        if not checkout_path.is_file():
+            raise ValueError(
+                f"Candidate checkout is missing {relative_path}."
+            )
+        checkout_content = checkout_path.read_bytes()
+        committed_digest = hashlib.sha256(committed_content).hexdigest()
+        checkout_digest = hashlib.sha256(checkout_content).hexdigest()
+        if checkout_digest != committed_digest:
+            raise ValueError(
+                f"Candidate {relative_path} does not match the recorded commit "
+                f"({checkout_digest} != {committed_digest})."
+            )
+        digests[relative_path] = checkout_digest
+    return digests
+
+
+def _codex_command(
+    codex: str,
+    output_file: Path,
+    *,
+    model: str | None,
+) -> list[str]:
+    command = [
+        codex,
+        "exec",
+        "--ephemeral",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--skip-git-repo-check",
+        "-o",
+        str(output_file),
+    ]
+    if model:
+        command.extend(["--model", model])
+    command.append("-")
+    return command
+
+
+def _safe_output_directory(output_directory: Path) -> Path:
+    resolved = output_directory.resolve()
+    repository = REPOSITORY_ROOT.resolve()
+    try:
+        relative = resolved.relative_to(repository)
+    except ValueError:
+        return resolved
+    if not relative.parts or relative.parts[0] != ".superpowers":
+        raise ValueError(
+            "Output must be outside the repository or under ignored .superpowers/."
+        )
+    return resolved
+
+
+def _selected_case_ids(
+    criteria: dict[str, Any],
+    requested_cases: str | None,
+) -> list[str]:
+    available = set(criteria["cases"])
+    if requested_cases is None:
+        return sorted(available)
+    selected = [
+        case_id.strip()
+        for case_id in requested_cases.split(",")
+        if case_id.strip()
+    ]
+    if not selected:
+        raise ValueError("--cases must name at least one case.")
+    unknown = sorted(set(selected) - available)
+    if unknown:
+        raise ValueError("Unknown case ID(s): " + ", ".join(unknown))
+    return list(dict.fromkeys(selected))
+
+
+def _parse_assessment(text: str, case_id: str) -> dict[str, Any]:
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.split("\n", 1)[1].rsplit("```", 1)[0]
+    try:
+        assessment = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        return {
+            "case_id": case_id,
+            "pass": False,
+            "findings": [f"Evaluator returned invalid JSON: {exc}"],
+            "raw": text,
+        }
+    if (
+        not isinstance(assessment, dict)
+        or assessment.get("case_id") != case_id
+        or not isinstance(assessment.get("pass"), bool)
+        or not isinstance(assessment.get("findings"), list)
+    ):
+        return {
+            "case_id": case_id,
+            "pass": False,
+            "findings": ["Evaluator JSON did not match the required schema."],
+            "raw": text,
+        }
+    return assessment
+
+
+def run_evaluation(args: argparse.Namespace) -> int:
+    output_directory = _safe_output_directory(Path(args.output_dir))
+    if output_directory.exists() and any(output_directory.iterdir()):
+        raise ValueError(f"Output directory is not empty: {output_directory}")
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    codex = args.codex or shutil.which("codex") or shutil.which("codex.cmd")
+    if not codex:
+        raise RuntimeError("Codex CLI was not found; pass --codex PATH.")
+    version_result = _run([codex, "--version"], cwd=REPOSITORY_ROOT)
+    if version_result.returncode != 0:
+        raise RuntimeError(
+            "Unable to read Codex version: " + version_result.stderr.strip()
+        )
+
+    criteria = yaml.safe_load(
+        (EVAL_ROOT / "criteria.yaml").read_text(encoding="utf-8")
+    )
+    case_ids = _selected_case_ids(criteria, args.cases)
+    prompts = {
+        case_id: build_execution_prompt(
+            Path("candidate/SKILL.md"),
+            Path(f"inputs/{case_id}.md"),
+        )
+        for case_id in case_ids
+    }
+    candidate_commit, committed_files = _read_committed_candidate(
+        args.candidate_commit
+    )
+    candidate_digests = assert_candidate_content(committed_files)
+    manifest = build_evidence_manifest(
+        candidate_commit=candidate_commit,
+        candidate_files_sha256=candidate_digests,
+        codex_version=version_result.stdout.strip(),
+        model=args.model or "codex-default",
+        execution_prompts=prompts,
+    )
+
+    for case_id in case_ids:
+        case_output = output_directory / case_id
+        case_output.mkdir()
+        raw_input = (EVAL_ROOT / "inputs" / f"{case_id}.md").read_text(
+            encoding="utf-8"
+        )
+        fixture_specification = json.loads(
+            (EVAL_ROOT / "fixtures" / f"{case_id}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        (case_output / "input.md").write_text(raw_input, encoding="utf-8")
+        (case_output / "fixture.json").write_text(
+            json.dumps(fixture_specification, ensure_ascii=False, indent=2)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with tempfile.TemporaryDirectory(
+            prefix=f"open-pull-request-eval-{case_id}-"
+        ) as temporary_directory:
+            workspace = Path(temporary_directory)
+            candidate_directory = workspace / "candidate"
+            input_directory = workspace / "inputs"
+            candidate_directory.mkdir()
+            input_directory.mkdir()
+            candidate_prefix = Path("skills/open-pull-request")
+            for relative_path in committed_files:
+                source = REPOSITORY_ROOT / relative_path
+                relative_candidate_path = Path(relative_path).relative_to(
+                    candidate_prefix
+                )
+                target = candidate_directory / relative_candidate_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            (input_directory / f"{case_id}.md").write_text(
+                raw_input,
+                encoding="utf-8",
+            )
+            build_repository(fixture_specification, workspace / "repository")
+            shim_directory = write_command_shims(
+                workspace / "shims",
+                fixture_specification.get("githubState", {}),
+            )
+            candidate_environment = os.environ.copy()
+            candidate_environment["PATH"] = (
+                str(shim_directory)
+                + os.pathsep
+                + candidate_environment.get("PATH", "")
+            )
+
+            execution_prompt = prompts[case_id]
+            (case_output / "execution-prompt.txt").write_text(
+                execution_prompt,
+                encoding="utf-8",
+            )
+            response_path = case_output / "response.md"
+            execution_command = _codex_command(
+                codex,
+                response_path,
+                model=args.model,
+            )
+            execution = _run(
+                execution_command,
+                cwd=workspace,
+                input_text=execution_prompt,
+                environment=candidate_environment,
+            )
+            (case_output / "execution-transcript.jsonl").write_text(
+                execution.stdout,
+                encoding="utf-8",
+            )
+            (case_output / "execution-stderr.txt").write_text(
+                execution.stderr,
+                encoding="utf-8",
+            )
+            shutil.copy2(shim_directory / "calls.log", case_output / "calls.log")
+            if execution.returncode != 0:
+                raise RuntimeError(
+                    f"{case_id} execution failed ({execution.returncode}); "
+                    f"see {case_output}"
+                )
+
+        response = response_path.read_text(encoding="utf-8")
+        calls_log = (case_output / "calls.log").read_text(encoding="utf-8")
+        evaluator_prompt = build_evaluator_prompt(
+            case_id,
+            raw_input,
+            fixture_specification,
+            response,
+            calls_log,
+            criteria["universal_pass_conditions"],
+            criteria["cases"][case_id]["pass_conditions"],
+        )
+        (case_output / "evaluator-prompt.txt").write_text(
+            evaluator_prompt,
+            encoding="utf-8",
+        )
+        evaluator_output = case_output / "assessment-raw.json"
+        evaluator_command = _codex_command(
+            codex,
+            evaluator_output,
+            model=args.model,
+        )
+        evaluation = _run(
+            evaluator_command,
+            cwd=output_directory,
+            input_text=evaluator_prompt,
+        )
+        (case_output / "evaluator-transcript.jsonl").write_text(
+            evaluation.stdout,
+            encoding="utf-8",
+        )
+        (case_output / "evaluator-stderr.txt").write_text(
+            evaluation.stderr,
+            encoding="utf-8",
+        )
+        if evaluation.returncode != 0:
+            raise RuntimeError(
+                f"{case_id} evaluator failed ({evaluation.returncode}); "
+                f"see {case_output}"
+            )
+        assessment = _parse_assessment(
+            evaluator_output.read_text(encoding="utf-8"),
+            case_id,
+        )
+        (case_output / "assessment.json").write_text(
+            json.dumps(assessment, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        manifest["cases"][case_id] = {
+            "pass": assessment["pass"],
+            "findings": assessment["findings"],
+            "execution_command": execution_command,
+            "evaluator_prompt": evaluator_prompt,
+            "evaluator_command": evaluator_command,
+            "artifacts": {
+                "input": f"{case_id}/input.md",
+                "fixture": f"{case_id}/fixture.json",
+                "calls_log": f"{case_id}/calls.log",
+                "execution_transcript": f"{case_id}/execution-transcript.jsonl",
+                "response": f"{case_id}/response.md",
+                "evaluator_transcript": f"{case_id}/evaluator-transcript.jsonl",
+                "assessment": f"{case_id}/assessment.json",
+            },
+        }
+
+    passed = sum(
+        1 for result in manifest["cases"].values() if result["pass"]
+    )
+    manifest["summary"] = {"passed": passed, "total": len(case_ids)}
+    (output_directory / "evidence.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Open pull request evaluation: {passed}/{len(case_ids)} passed.")
+    print(f"Evidence: {output_directory}")
+    return 0 if passed == len(case_ids) else 1
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--candidate-commit", required=True)
+    parser.add_argument("--model")
+    parser.add_argument("--codex")
+    parser.add_argument(
+        "--cases",
+        help="Comma-separated case IDs to run (default: every case).",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    try:
+        return run_evaluation(parse_args())
+    except (OSError, RuntimeError, ValueError, yaml.YAMLError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
