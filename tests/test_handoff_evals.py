@@ -49,12 +49,35 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
             "pass_conditions",
             "universal_pass_conditions",
             "genuinely new non-fork task",
+            "Facts:",
+            "Inferences:",
+            "Unknowns:",
+            "Recoverable artifacts:",
+            "do not reproduce diffs or logs",
+            "Show the complete",
+            "Show the user-facing result",
         )
         for input_path in (EVAL_ROOT / "inputs").glob("*.md"):
             text = input_path.read_text(encoding="utf-8")
             with self.subTest(input=input_path.name):
                 for marker in criteria_only_markers:
                     self.assertNotIn(marker, text)
+
+    def test_evaluator_criteria_accept_absent_locators_and_mock_evidence(
+        self,
+    ) -> None:
+        conditions = "\n".join(
+            self.criteria["universal_pass_conditions"]
+            + [
+                condition
+                for case in self.criteria["cases"].values()
+                for condition in case["pass_conditions"]
+            ]
+        ).lower()
+        self.assertIn("absent from the source", conditions)
+        self.assertIn("unknown", conditions)
+        self.assertIn("simulated capability invocation/result", conditions)
+        self.assertIn("not a forbidden", conditions)
 
     def test_execution_prompts_do_not_include_evaluator_criteria(self) -> None:
         criteria_text = (EVAL_ROOT / "criteria.yaml").read_text(encoding="utf-8")
@@ -69,6 +92,8 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                 self.assertNotIn("pass_conditions", prompt)
                 self.assertNotRegex(prompt, r"[A-Za-z]:\\Users\\")
                 self.assertFalse(prompt.startswith("/"))
+                self.assertIn("Do not emit debug or tool logs", prompt)
+                self.assertIn("observable mock capability action/result", prompt)
 
     def test_evidence_manifest_records_candidate_and_exact_prompts(self) -> None:
         prompts = {
@@ -143,6 +168,7 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
             head
         )
         received_prompts: list[str] = []
+        execution_inputs: dict[str, str] = {}
 
         def fake_run(
             command: list[str],
@@ -150,7 +176,6 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
             cwd: Path,
             input_text: str | None = None,
         ):
-            del cwd
             if command[-1] == "--version":
                 self.assertIsNone(input_text)
                 return subprocess.CompletedProcess(
@@ -179,6 +204,11 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             else:
+                input_files = list((cwd / "inputs").glob("*.md"))
+                self.assertEqual(1, len(input_files))
+                execution_inputs[input_files[0].stem] = input_files[0].read_text(
+                    encoding="utf-8"
+                )
                 output_path.write_text(
                     "Simulated candidate response.\n",
                     encoding="utf-8",
@@ -235,6 +265,22 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                 set(self.criteria["cases"]),
                 set(evidence["execution_prompts"]),
             )
+            case_three = evidence["cases"]["case-3"]
+            self.assertIn("environment", case_three)
+            os_temp_directory = str(Path(tempfile.gettempdir()).resolve())
+            self.assertEqual(
+                os_temp_directory,
+                case_three["environment"]["os_temp_directory"],
+            )
+            self.assertIn(os_temp_directory, execution_inputs["case-3"])
+            self.assertNotIn(
+                "{{OS_TEMP_DIRECTORY}}",
+                execution_inputs["case-3"],
+            )
+            effective_input = (
+                output_directory / case_three["artifacts"]["input"]
+            ).read_text(encoding="utf-8")
+            self.assertEqual(execution_inputs["case-3"], effective_input)
             for index, case_id in enumerate(sorted(self.criteria["cases"])):
                 with self.subTest(case_id=case_id):
                     case_evidence = evidence["cases"][case_id]
@@ -260,6 +306,20 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                             / case_evidence["artifacts"]["response"]
                         ).is_file()
                     )
+
+    def test_backup_retention_requires_destination_acknowledgment(self) -> None:
+        skill_text = (
+            REPOSITORY_ROOT / "skills" / "handoff" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "destination has received and acknowledged the handoff",
+            skill_text,
+        )
+        self.assertIn("explicit user request", skill_text)
+        self.assertNotIn(
+            "source task confirms that the handoff is current",
+            skill_text,
+        )
 
     def test_tracked_eval_files_have_no_machine_specific_paths(self) -> None:
         for path in EVAL_ROOT.rglob("*"):

@@ -21,6 +21,7 @@ import yaml
 EVAL_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = EVAL_ROOT.parents[1]
 CANDIDATE_PATH = REPOSITORY_ROOT / "skills" / "handoff" / "SKILL.md"
+OS_TEMP_PLACEHOLDER = "{{OS_TEMP_DIRECTORY}}"
 
 
 def build_execution_prompt(candidate_path: Path, input_path: Path) -> str:
@@ -31,8 +32,9 @@ def build_execution_prompt(candidate_path: Path, input_path: Path) -> str:
         f"Read {candidate_path.as_posix()} completely, then read "
         f"{input_path.as_posix()}.\n"
         "Treat environment declarations in the input as authoritative simulated "
-        "capabilities. Produce the complete response, destination payload, and "
-        "mock capability action/result needed to show what the Skill would do. "
+        "capabilities. Produce the complete response and destination payload, "
+        "plus only the concise observable mock capability action/result needed "
+        "to show what the Skill would do. Do not emit debug or tool logs. "
         "Do not inspect any other files. Do not discuss evaluation rules."
     )
 
@@ -98,6 +100,25 @@ def assert_candidate_content(
             f"({checkout_digest} != {committed_digest})."
         )
     return checkout_digest
+
+
+def materialize_case_input(
+    case_id: str,
+    source_input: str,
+    os_temp_directory: Path,
+) -> str:
+    """Inject runtime-only environment values into a raw case input."""
+
+    if case_id != "case-3":
+        return source_input
+    if OS_TEMP_PLACEHOLDER not in source_input:
+        raise ValueError(
+            f"{case_id} input is missing {OS_TEMP_PLACEHOLDER}."
+        )
+    return source_input.replace(
+        OS_TEMP_PLACEHOLDER,
+        str(os_temp_directory.resolve()),
+    )
 
 
 def _run(
@@ -259,10 +280,21 @@ def run_evaluation(args: argparse.Namespace) -> int:
         model=args.model or "codex-default",
         execution_prompts=prompts,
     )
+    os_temp_directory = Path(tempfile.gettempdir()).resolve()
 
     for case_id in case_ids:
         case_output = output_directory / case_id
         case_output.mkdir()
+        source_input_path = EVAL_ROOT / "inputs" / f"{case_id}.md"
+        raw_input = materialize_case_input(
+            case_id,
+            source_input_path.read_text(encoding="utf-8"),
+            os_temp_directory,
+        )
+        (case_output / "input.md").write_text(
+            raw_input,
+            encoding="utf-8",
+        )
         with tempfile.TemporaryDirectory(
             prefix=f"handoff-eval-{case_id}-"
         ) as temporary_directory:
@@ -272,8 +304,11 @@ def run_evaluation(args: argparse.Namespace) -> int:
             candidate_directory.mkdir()
             input_directory.mkdir()
             shutil.copy2(CANDIDATE_PATH, candidate_directory / "SKILL.md")
-            raw_input_path = EVAL_ROOT / "inputs" / f"{case_id}.md"
-            shutil.copy2(raw_input_path, input_directory / raw_input_path.name)
+            effective_input_path = input_directory / f"{case_id}.md"
+            effective_input_path.write_text(
+                raw_input,
+                encoding="utf-8",
+            )
 
             execution_prompt = prompts[case_id]
             (case_output / "execution-prompt.txt").write_text(
@@ -307,7 +342,6 @@ def run_evaluation(args: argparse.Namespace) -> int:
                 )
 
         response = response_path.read_text(encoding="utf-8")
-        raw_input = raw_input_path.read_text(encoding="utf-8")
         evaluator_prompt = build_evaluator_prompt(
             case_id,
             raw_input,
@@ -350,19 +384,25 @@ def run_evaluation(args: argparse.Namespace) -> int:
             json.dumps(assessment, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        manifest["cases"][case_id] = {
+        case_evidence = {
             "pass": assessment["pass"],
             "findings": assessment["findings"],
             "execution_command": execution_command,
             "evaluator_prompt": evaluator_prompt,
             "evaluator_command": evaluator_command,
             "artifacts": {
+                "input": f"{case_id}/input.md",
                 "execution_transcript": f"{case_id}/execution-transcript.jsonl",
                 "response": f"{case_id}/response.md",
                 "evaluator_transcript": f"{case_id}/evaluator-transcript.jsonl",
                 "assessment": f"{case_id}/assessment.json",
             },
         }
+        if case_id == "case-3":
+            case_evidence["environment"] = {
+                "os_temp_directory": str(os_temp_directory),
+            }
+        manifest["cases"][case_id] = case_evidence
 
     passed = sum(
         1 for result in manifest["cases"].values() if result["pass"]

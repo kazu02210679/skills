@@ -1,20 +1,18 @@
 # Case 2
 
-## Source conversation
+## Conversation
 
-- Facts: The task is product launch planning. Pricing is decided. The launch
-  date and owner remain unresolved.
-- User request: `Move this to a fresh chat without losing context.`
-- Inferences: The user wants a new conversation to continue launch planning.
-- Unknowns: The launch date and owner are not yet known.
-- Recoverable artifacts: Reference the launch plan or decision record if one
-  exists; do not reproduce diffs or logs.
+**User:** We are planning a product launch.
 
-## Environment
+**Assistant:** Pricing has been decided. The launch date and owner have not
+been decided.
 
-Run both variants in one response:
+**User:** `Move this to a fresh chat without losing context.`
 
-- Variant A: No thread-management or file-writing capability is available.
-- Variant B: Thread-management is available, but creating the new task fails.
+## Simulated environments
 
-Show the user-facing result for each simulated variant.
+This conversation is exercised under two separate capability states:
+
+- Variant A has no task-management or file-writing capability.
+- Variant B has task management but no file writing. Its attempt to create a
+  new task returns a failure.

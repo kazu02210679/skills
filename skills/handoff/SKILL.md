@@ -59,7 +59,7 @@ In `First response contract`, require the destination's first response to restat
 - When file creation is available, create a uniquely named `.md` file in the operating system's temporary directory, never inside the repository, and write the complete redacted handoff there.
 - Re-read the backup after writing it. Verify that the file exists and that its contents exactly match the complete redacted handoff. Report the verified backup path only after both checks pass.
 - Treat the file as backup only. Keep the complete handoff inline in every destination prompt; never make continuation depend on the file.
-- Retain the backup until the destination confirms receipt or the source task confirms that the handoff is current, then delete it. The user may delete it sooner. Never make continuation or recovery depend on retaining the backup.
+- Retain the backup until the destination has received and acknowledged the handoff; after acknowledgment, delete it when cleanup is available. Delete it earlier only on explicit user request. Never make continuation or recovery depend on retaining the backup.
 - If backup creation, verification, or cleanup is unavailable or fails, say so honestly and continue with the complete copyable handoff.
 
 ## 6. Create a fresh task when possible
