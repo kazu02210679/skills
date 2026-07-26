@@ -198,6 +198,16 @@ def _publish_remote(
             cwd=repository,
             step="fetch upstream tracking references",
         )
+    # Without this the branch has no configured upstream, and the Skill's
+    # inspector tries `@{upstream}` before falling back to origin/HEAD — so
+    # every case would exercise the fallback and never the preferred path.
+    # A published branch that git considers untracked is also not what
+    # `headSha: equal | ancestor:N` is meant to model.
+    _run_git(
+        ["branch", "--set-upstream-to", f"origin/{head_branch}", head_branch],
+        cwd=repository,
+        step="configure upstream tracking for the head branch",
+    )
 
 
 def build_repository(

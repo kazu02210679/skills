@@ -270,6 +270,31 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 self.runner.assert_shims_intercept(shim_directory, environment)
             self.assertIn("did not intercept", str(raised.exception))
 
+    def test_remote_fixture_configures_upstream_tracking(self) -> None:
+        # The skill's inspector resolves the base from @{upstream} first and
+        # only then from origin/HEAD. Without tracking, every case would
+        # silently exercise the fallback instead of the preferred path.
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.build(
+                Path(directory),
+                {
+                    "headBranch": "feature",
+                    "commits": [
+                        {"message": "Add feature", "files": {"a.txt": "a\n"}}
+                    ],
+                    "remote": {"headSha": "ancestor:1"},
+                },
+            )
+            upstream = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "feature@{upstream}"],
+                cwd=repository,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, upstream.returncode, upstream.stderr)
+            self.assertEqual("origin/feature", upstream.stdout.strip())
+
     def test_gh_shim_refuses_commands_the_fixture_does_not_model(self) -> None:
         # An unmodelled gh command must never reach the operator's real,
         # authenticated gh — `gh pr merge` and `gh api -X POST` are outside the
