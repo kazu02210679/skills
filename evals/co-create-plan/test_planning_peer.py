@@ -22,6 +22,37 @@ assert SPEC and SPEC.loader
 planning_peer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(planning_peer)
 
+VALID_PEER_RESPONSE = """## Position
+Proceed with the bounded change.
+## Agreements
+The scope is clear.
+## Challenges
+None.
+## Proposed plan changes
+None.
+## Open decisions
+None.
+## Vote
+AGREE"""
+
+VALID_BRIEF = """# Planning brief
+## Objective
+Plan a safe change.
+## Requirements
+- Preserve behavior.
+## Constraints
+- Planning only.
+## In scope
+- The requested change.
+## Out of scope
+- Unrequested features.
+## Evidence and assumptions
+- Repository evidence must be checked.
+## Open decisions
+- None.
+## Acceptance signals
+- The implementation checks pass."""
+
 
 class PlanningPeerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -38,7 +69,7 @@ class PlanningPeerTests(unittest.TestCase):
 
     def _codex_start_result(self, command, **kwargs):
         output = Path(command[command.index("--output-last-message") + 1])
-        output.write_text("## Vote\nAGREE_WITH_CHANGES\n", encoding="utf-8")
+        output.write_text(VALID_PEER_RESPONSE + "\n", encoding="utf-8")
         return CompletedProcess(
             command,
             0,
@@ -71,6 +102,9 @@ class PlanningPeerTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("--sandbox", command)
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("--ignore-rules", command)
+        self.assertIn("mcp_servers={}", command)
         self.assertEqual(run.call_args.kwargs["timeout"], 900)
         self.assertEqual(response, self.outdir / "round-01-peer.md")
         state = json.loads((self.outdir / "state.json").read_text(encoding="utf-8"))
@@ -104,7 +138,7 @@ class PlanningPeerTests(unittest.TestCase):
 
         def reply_result(command, **kwargs):
             output = Path(command[command.index("--output-last-message") + 1])
-            output.write_text("## Vote\nAGREE\n", encoding="utf-8")
+            output.write_text(VALID_PEER_RESPONSE + "\n", encoding="utf-8")
             return CompletedProcess(command, 0, stdout="{}\n", stderr="")
 
         reply_args = Namespace(
@@ -125,6 +159,10 @@ class PlanningPeerTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("thread-123", command)
         self.assertNotIn("--last", command)
+        self.assertIn("--ignore-user-config", command)
+        self.assertIn("--ignore-rules", command)
+        self.assertIn("sandbox_mode=\"read-only\"", command)
+        self.assertIn("mcp_servers={}", command)
         state = json.loads((self.outdir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["round"], 2)
 
@@ -143,7 +181,7 @@ class PlanningPeerTests(unittest.TestCase):
         payload = json.dumps(
             {
                 "session_id": "claude-session-1",
-                "result": "## Vote\nBLOCK",
+                "result": VALID_PEER_RESPONSE,
             }
         )
         with (
@@ -162,7 +200,9 @@ class PlanningPeerTests(unittest.TestCase):
         self.assertIn("--safe-mode", command)
         self.assertIn("--strict-mcp-config", command)
         self.assertEqual(command[command.index("--mcp-config") + 1], "{}")
-        self.assertEqual(response.read_text(encoding="utf-8"), "## Vote\nBLOCK\n")
+        self.assertEqual(
+            response.read_text(encoding="utf-8"), VALID_PEER_RESPONSE + "\n"
+        )
 
     def test_existing_state_is_not_overwritten(self) -> None:
         self.outdir.mkdir(parents=True)
@@ -254,7 +294,7 @@ class PlanningPeerTests(unittest.TestCase):
             max_rounds=3,
         )
         start_payload = json.dumps(
-            {"session_id": "claude-session-1", "result": "## Vote\nBLOCK"}
+            {"session_id": "claude-session-1", "result": VALID_PEER_RESPONSE}
         )
         with (
             patch.object(planning_peer, "_resolve_cli", return_value="claude"),
@@ -271,7 +311,7 @@ class PlanningPeerTests(unittest.TestCase):
         message = self.outdir / "round-01-host.md"
         message.write_text("Address the blocker.\n", encoding="utf-8")
         mismatch_payload = json.dumps(
-            {"session_id": "different-session", "result": "## Vote\nAGREE"}
+            {"session_id": "different-session", "result": VALID_PEER_RESPONSE}
         )
         reply_args = Namespace(
             state=str(self.outdir / "state.json"),
@@ -311,7 +351,7 @@ class PlanningPeerTests(unittest.TestCase):
             max_rounds=3,
         )
         start_payload = json.dumps(
-            {"session_id": "claude-session-1", "result": "## Vote\nBLOCK"}
+            {"session_id": "claude-session-1", "result": VALID_PEER_RESPONSE}
         )
         with (
             patch.object(planning_peer, "_resolve_cli", return_value="claude"),
@@ -328,7 +368,7 @@ class PlanningPeerTests(unittest.TestCase):
         message = self.outdir / "round-01-host.md"
         message.write_text("Address the blocker.\n", encoding="utf-8")
         reply_payload = json.dumps(
-            {"session_id": "claude-session-1", "result": "## Vote\nAGREE"}
+            {"session_id": "claude-session-1", "result": VALID_PEER_RESPONSE}
         )
         reply_args = Namespace(
             state=str(self.outdir / "state.json"),
@@ -349,7 +389,9 @@ class PlanningPeerTests(unittest.TestCase):
         ):
             response = planning_peer.run_reply(reply_args)
 
-        self.assertEqual(response.read_text(encoding="utf-8"), "## Vote\nAGREE\n")
+        self.assertEqual(
+            response.read_text(encoding="utf-8"), VALID_PEER_RESPONSE + "\n"
+        )
         state = json.loads((self.outdir / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["round"], 2)
 
@@ -394,7 +436,7 @@ class PlanningPeerTests(unittest.TestCase):
 
         def successful_retry(command, **kwargs):
             output = Path(command[command.index("--output-last-message") + 1])
-            output.write_text("## Vote\nAGREE\n", encoding="utf-8")
+            output.write_text(VALID_PEER_RESPONSE + "\n", encoding="utf-8")
             return CompletedProcess(command, 0, stdout="{}\n", stderr="")
 
         retry_reply = Namespace(
@@ -557,6 +599,194 @@ class PlanningPeerTests(unittest.TestCase):
         )
         text = path.read_text(encoding="utf-8")
         self.assertIn("Co-create Plan", text)
+
+    def test_start_rejects_outdir_outside_repo_planning_root(self) -> None:
+        args = Namespace(
+            peer="codex",
+            repo=str(self.repo),
+            brief=str(self.brief),
+            outdir=str(self.root / "outside"),
+            model=None,
+            cli=None,
+            retry=False,
+            timeout_seconds=900,
+            max_rounds=3,
+        )
+        with self.assertRaisesRegex(
+            planning_peer.PlanningPeerError, r"\.ai-planning"
+        ):
+            planning_peer.run_start(args)
+        self.assertFalse((self.root / "outside").exists())
+
+    def test_reply_rejects_state_outside_repo_planning_root(self) -> None:
+        unsafe_outdir = self.repo / "product-config"
+        unsafe_outdir.mkdir()
+        state = {
+            "version": planning_peer.STATE_VERSION,
+            "peer": "codex",
+            "peer_cli": "codex",
+            "model": None,
+            "repo": str(self.repo),
+            "brief": str(self.brief),
+            "outdir": str(unsafe_outdir),
+            "session_id": "thread-123",
+            "timeout_seconds": 900,
+            "max_rounds": 3,
+            "round": 1,
+            "turns": [],
+        }
+        state_path = unsafe_outdir / "state.json"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        message = unsafe_outdir / "round-01-host.md"
+        message.write_text("Continue.\n", encoding="utf-8")
+        args = Namespace(
+            state=str(state_path),
+            message=str(message),
+            cli=None,
+            retry=False,
+            timeout_seconds=None,
+        )
+        with self.assertRaisesRegex(
+            planning_peer.PlanningPeerError, r"\.ai-planning"
+        ):
+            planning_peer.run_reply(args)
+
+    def test_malformed_peer_response_does_not_create_state(self) -> None:
+        args = Namespace(
+            peer="codex",
+            repo=str(self.repo),
+            brief=str(self.brief),
+            outdir=str(self.outdir),
+            model=None,
+            cli=None,
+            retry=False,
+            timeout_seconds=900,
+            max_rounds=3,
+        )
+
+        def malformed_result(command, **kwargs):
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_text("A response without the protocol.\n", encoding="utf-8")
+            return CompletedProcess(
+                command,
+                0,
+                stdout='{"type":"thread.started","thread_id":"thread-123"}\n',
+                stderr="",
+            )
+
+        with (
+            patch.object(planning_peer, "_resolve_cli", return_value="codex"),
+            patch.object(
+                planning_peer.subprocess, "run", side_effect=malformed_result
+            ),
+            self.assertRaisesRegex(
+                planning_peer.PlanningPeerError, "required sections"
+            ),
+        ):
+            planning_peer.run_start(args)
+
+        self.assertFalse((self.outdir / "state.json").exists())
+        self.assertEqual(
+            (self.outdir / "round-01-peer.md").read_text(encoding="utf-8"),
+            "A response without the protocol.\n",
+        )
+
+    def test_claude_brief_generates_structured_requirements_without_state(self) -> None:
+        request = self.outdir / "request.md"
+        self.outdir.mkdir(parents=True)
+        request.write_text("Add a safe feature.\n", encoding="utf-8")
+        args = Namespace(
+            repo=str(self.repo),
+            request=str(request),
+            outdir=str(self.outdir),
+            model=None,
+            cli=None,
+            retry=False,
+            timeout_seconds=900,
+        )
+        payload = json.dumps({"result": VALID_BRIEF})
+        with (
+            patch.object(planning_peer, "_resolve_cli", return_value="claude"),
+            patch.object(
+                planning_peer.subprocess,
+                "run",
+                return_value=CompletedProcess([], 0, stdout=payload, stderr=""),
+            ) as run,
+        ):
+            response = planning_peer.run_brief(args)
+
+        self.assertEqual(response, self.outdir / "requirements.md")
+        self.assertEqual(response.read_text(encoding="utf-8"), VALID_BRIEF + "\n")
+        self.assertFalse((self.outdir / "state.json").exists())
+        prompt = run.call_args.kwargs["input"]
+        self.assertIn("## Objective", prompt)
+        self.assertIn("## Requirements", prompt)
+        self.assertIn("## Constraints", prompt)
+
+    def test_failed_claude_brief_can_be_retried_without_losing_artifacts(
+        self,
+    ) -> None:
+        request = self.outdir / "request.md"
+        self.outdir.mkdir(parents=True)
+        request.write_text("Add a safe feature.\n", encoding="utf-8")
+        args = Namespace(
+            repo=str(self.repo),
+            request=str(request),
+            outdir=str(self.outdir),
+            model=None,
+            cli=None,
+            retry=False,
+            timeout_seconds=900,
+        )
+        failed = CompletedProcess([], 1, stdout="partial", stderr="network failed")
+        with (
+            patch.object(planning_peer, "_resolve_cli", return_value="claude"),
+            patch.object(planning_peer.subprocess, "run", return_value=failed),
+            self.assertRaises(planning_peer.PlanningPeerError),
+        ):
+            planning_peer.run_brief(args)
+
+        args.retry = True
+        payload = json.dumps(
+            {"session_id": "brief-session", "result": VALID_BRIEF}
+        )
+        with (
+            patch.object(planning_peer, "_resolve_cli", return_value="claude"),
+            patch.object(
+                planning_peer.subprocess,
+                "run",
+                return_value=CompletedProcess([], 0, stdout=payload, stderr=""),
+            ),
+        ):
+            planning_peer.run_brief(args)
+
+        failed_dir = (
+            self.outdir
+            / "failed-attempts"
+            / "requirements-attempt-01"
+        )
+        self.assertTrue((failed_dir / "requirements-events.json").is_file())
+        self.assertTrue((failed_dir / "requirements-stderr.log").is_file())
+        self.assertEqual(
+            (self.outdir / "requirements.md").read_text(encoding="utf-8"),
+            VALID_BRIEF + "\n",
+        )
+
+    def test_parser_supports_claude_brief_command(self) -> None:
+        args = planning_peer.build_parser().parse_args(
+            [
+                "brief",
+                "--repo",
+                str(self.repo),
+                "--request",
+                str(self.brief),
+                "--outdir",
+                str(self.outdir),
+            ]
+        )
+        self.assertEqual(args.command, "brief")
+        self.assertEqual(args.timeout_seconds, 900)
+        self.assertFalse(args.retry)
 
 
 if __name__ == "__main__":

@@ -46,6 +46,15 @@ Use these headings in this order:
 
 ## Content rules
 
+### Scope guard
+
+The packet must tell the implementation agent explicitly:
+
+> Do not add features that are not explicitly included in this packet.
+
+Keep this instruction near the top-level requirement so it applies to every
+implementation step.
+
 ### Repository evidence
 
 Cite repository-relative file paths, symbols, commands, or observed behavior.
@@ -90,9 +99,11 @@ Example:
 
 ### Test policy
 
-State the expected test level, boundary and failure cases, lint/type/build
-checks, and any checks that cannot run locally. Never claim an unexecuted check
-passes.
+Require test-driven development for implementation behavior changes: add or
+update a failing test first, observe the expected failure, implement the
+smallest change that passes, then run the relevant regression suite. State the
+expected test level, boundary and failure cases, lint/type/build checks, and any
+checks that cannot run locally. Never claim an unexecuted check passes.
 
 ### Open questions
 

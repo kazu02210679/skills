@@ -18,8 +18,9 @@ plan.
 Resolve the repository root, task slug, user request, and applicable repository
 instructions. Inspect only the code and documentation needed to plan the work.
 Put applicable `AGENTS.md`, `CLAUDE.md`, and repository constraints into the
-brief because the peer process disables custom instructions, hooks, and MCP
-servers.
+brief. Claude runs without custom instructions, hooks, or MCP servers. Codex
+runs without user configuration or exec-policy rules, with MCP servers cleared;
+the brief remains the canonical statement of applicable repository constraints.
 
 Write dialogue artifacts under:
 
@@ -65,17 +66,17 @@ host is Codex:
 2. Invoke Claude with all required paths:
 
    ```text
-   python <skill-dir>/scripts/planning_peer.py start \
-     --peer claude \
+   python <skill-dir>/scripts/planning_peer.py brief \
      --repo <repo> \
-     --brief <repo>/.ai-planning/<task-slug>/request.md \
+     --request <repo>/.ai-planning/<task-slug>/request.md \
      --outdir <repo>/.ai-planning/<task-slug>
    ```
 
-3. Normalize Claude's first response into `requirements.md` without erasing its
-   uncertainties or dissent.
-4. Write Codex's response as `round-01-host.md` and continue the recorded Claude
-   session with `planning_peer.py reply`.
+3. Read Claude's generated `requirements.md`. Preserve its uncertainties and
+   dissent; add only repository evidence that can be cited explicitly.
+4. Continue to section 3 and start a new Claude peer session using that
+   `requirements.md`. Brief generation is separate from the debate and does not
+   create `state.json`.
 
 Ask the user only when missing information would materially change the product
 behavior, safety boundary, public contract, data migration, or cost. Otherwise
@@ -99,8 +100,10 @@ Choose the other model as `--peer`: use `codex` when hosted by Claude Code and
 `state.json`; never use a global “resume last session” operation.
 
 Claude runs with safe mode, an empty strict MCP configuration, planning
-permissions, and only read/search tools. Codex runs with a read-only sandbox.
-Do not weaken either boundary for ordinary planning.
+permissions, and only read/search tools. Codex ignores user configuration and
+exec-policy rules, clears MCP servers, and explicitly uses a read-only sandbox
+on both the initial and resumed turns. Do not weaken either boundary for
+ordinary planning.
 
 Read the peer response and verify cited repository facts yourself. A model
 claim is a proposal, not evidence.
@@ -138,7 +141,8 @@ The script moves the failed attempt into
 `failed-attempts/round-NN-attempt-MM/` before retrying the exact recorded
 session. For a failed initial `start`, use `start --retry`; it archives the
 failed artifacts and creates a new peer session because no trusted state was
-completed.
+completed. For failed Claude brief generation, use `brief --retry`; it archives
+the failed requirements artifacts and creates a new one-shot Claude session.
 
 Require both sides to end each turn with one vote:
 
@@ -169,6 +173,8 @@ Before presenting it, check:
 - every implementation step names concrete files or discovery targets;
 - every acceptance item is verifiable;
 - constraints and non-goals are retained;
+- the packet explicitly forbids features outside its stated scope;
+- the test policy requires TDD for implementation changes;
 - risky assumptions have evidence, validation steps, or rollback paths;
 - no unresolved `BLOCK` is hidden;
 - the plan contains no production-code changes made during planning.
@@ -194,6 +200,8 @@ replan.
 - Peer timeout or malformed output: retain logs in the planning directory and
   report the failed turn. Use `--retry` only after checking whether duplicate
   delivery could create an ambiguous transcript.
+- Peer response missing any required section or final vote: treat the turn as
+  malformed and do not advance its recorded round.
 - Session ID missing: stop before replying; never resume an unrelated session.
 - Repository changed materially during discussion: mark the plan stale and
   re-check affected evidence.

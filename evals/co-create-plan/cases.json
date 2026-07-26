@@ -22,6 +22,8 @@
     "prompt": "Codex からこのスキルを使い、Claude Code と共同で計画して。",
     "expect": {
       "first_peer": "claude",
+      "claude_generates_structured_brief": true,
+      "brief_session_separate_from_debate": true,
       "raw_request_preserved": true,
       "same_session_used_for_replies": true
     }
@@ -60,7 +62,7 @@
     "expect": {
       "failed_artifacts_archived": true,
       "exact_session_resumed": true,
-      "state_advanced_only_after_success": true
+      "state_advanced_only_after_valid_protocol_response": true
     }
   },
   {
@@ -69,7 +71,8 @@
     "expect": {
       "planning_directory_treated_as_sensitive": true,
       "automatic_commit": false,
-      "ignore_status_checked": true
+      "ignore_status_checked": true,
+      "outdir_restricted_to_planning_root": true
     }
   }
 ]

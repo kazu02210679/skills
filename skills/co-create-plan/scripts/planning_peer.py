@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,25 @@ from typing import Any
 STATE_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_MAX_ROUNDS = 3
+PEER_RESPONSE_HEADINGS = (
+    "Position",
+    "Agreements",
+    "Challenges",
+    "Proposed plan changes",
+    "Open decisions",
+    "Vote",
+)
+BRIEF_HEADINGS = (
+    "Objective",
+    "Requirements",
+    "Constraints",
+    "In scope",
+    "Out of scope",
+    "Evidence and assumptions",
+    "Open decisions",
+    "Acceptance signals",
+)
+VALID_VOTES = {"AGREE", "AGREE_WITH_CHANGES", "BLOCK"}
 
 
 class PlanningPeerError(RuntimeError):
@@ -55,6 +75,44 @@ def _resolve_cli(peer: str, override: str | None) -> str:
     )
 
 
+def _validate_planning_outdir(repo: Path, outdir: Path) -> None:
+    planning_root = (repo / ".ai-planning").resolve()
+    if outdir.parent != planning_root or not outdir.name:
+        raise PlanningPeerError(
+            "output directory must be exactly one task directory under "
+            f"{planning_root}"
+        )
+
+
+def _brief_prompt(request: str) -> str:
+    return f"""You are Claude Code preparing the first requirements brief for a
+joint Claude Code–Codex planning session.
+
+Organize the user's request before technical debate begins. Inspect the target
+repository when useful, but do not edit files, install dependencies, or
+implement code. Preserve uncertainty instead of silently resolving material
+product, safety, migration, public-contract, or cost decisions.
+
+<user-request>
+{request}
+</user-request>
+
+Respond with exactly this Markdown structure:
+
+# Planning brief
+## Objective
+## Requirements
+## Constraints
+## In scope
+## Out of scope
+## Evidence and assumptions
+## Open decisions
+## Acceptance signals
+
+Separate observed repository evidence from assumptions. Do not include a debate
+vote in this brief."""
+
+
 def _initial_prompt(peer: str, brief: str) -> str:
     return f"""You are the {peer} participant in a joint Claude Code–Codex planning session.
 You are an equal planning peer, not an implementer and not a subordinate reviewer.
@@ -83,6 +141,35 @@ Respond with exactly these sections:
 The final line under Vote must be exactly one of: AGREE,
 AGREE_WITH_CHANGES, or BLOCK. Use BLOCK only for a material unresolved conflict
 or missing decision. Do not write production code."""
+
+
+def _validate_headings(
+    text: str, expected: tuple[str, ...], label: str
+) -> None:
+    headings = re.findall(r"^## ([^\r\n]+)\s*$", text, flags=re.MULTILINE)
+    if headings != list(expected):
+        raise PlanningPeerError(
+            f"{label} did not contain the required sections in order: "
+            + ", ".join(expected)
+        )
+
+
+def _validate_peer_response(text: str) -> None:
+    _validate_headings(text, PEER_RESPONSE_HEADINGS, "peer response")
+    final_line = next(
+        (line.strip() for line in reversed(text.splitlines()) if line.strip()), ""
+    )
+    if final_line not in VALID_VOTES:
+        raise PlanningPeerError(
+            "peer response did not end with a valid vote: "
+            + ", ".join(sorted(VALID_VOTES))
+        )
+
+
+def _validate_brief(text: str) -> None:
+    if not re.search(r"^# Planning brief\s*$", text, flags=re.MULTILINE):
+        raise PlanningPeerError("Claude brief did not start with '# Planning brief'")
+    _validate_headings(text, BRIEF_HEADINGS, "Claude brief")
 
 
 def _reply_prompt(
@@ -223,6 +310,15 @@ def _artifact_paths(outdir: Path, round_number: int) -> dict[str, Path]:
     }
 
 
+def _brief_artifact_paths(outdir: Path) -> dict[str, Path]:
+    return {
+        "prompt": outdir / "requirements-prompt.md",
+        "response": outdir / "requirements.md",
+        "events": outdir / "requirements-events.json",
+        "stderr": outdir / "requirements-stderr.log",
+    }
+
+
 def _artifacts_exist(paths: dict[str, Path]) -> bool:
     return any(path.exists() for path in paths.values())
 
@@ -247,10 +343,37 @@ def _archive_failed_attempt(
     return destination
 
 
+def _archive_failed_brief_attempt(
+    outdir: Path, paths: dict[str, Path]
+) -> Path:
+    failed_root = outdir / "failed-attempts"
+    attempt_number = 1
+    while True:
+        destination = failed_root / f"requirements-attempt-{attempt_number:02d}"
+        if not destination.exists():
+            break
+        attempt_number += 1
+    destination.mkdir(parents=True)
+    for path in paths.values():
+        if path.exists():
+            path.replace(destination / path.name)
+    return destination
+
+
 def _base_command(peer: str, cli: str, model: str | None) -> list[str]:
     command = [cli]
     if peer == "codex":
-        command.append("exec")
+        command.extend(
+            [
+                "exec",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "-c",
+                'sandbox_mode="read-only"',
+                "-c",
+                "mcp_servers={}",
+            ]
+        )
         if model:
             command.extend(["--model", model])
     else:
@@ -311,10 +434,12 @@ def _invoke_start(
 
     if peer == "codex":
         session_id = _parse_codex_session(result.stdout)
-        _read_text(paths["response"], "Codex response")
+        response = _read_text(paths["response"], "Codex response")
+        _validate_peer_response(response)
     else:
         response, session_id = _parse_claude_output(result.stdout, fallback_session)
         paths["response"].write_text(response + "\n", encoding="utf-8")
+        _validate_peer_response(response)
     return result, session_id
 
 
@@ -350,7 +475,8 @@ def _invoke_reply(
         )
 
     if peer == "codex":
-        _read_text(paths["response"], "Codex response")
+        response = _read_text(paths["response"], "Codex response")
+        _validate_peer_response(response)
     else:
         response, returned_session = _parse_claude_output(
             result.stdout, state["session_id"]
@@ -360,7 +486,47 @@ def _invoke_reply(
                 "Claude resumed a different session; refusing to mix transcripts"
             )
         paths["response"].write_text(response + "\n", encoding="utf-8")
+        _validate_peer_response(response)
     return result
+
+
+def run_brief(args: argparse.Namespace) -> Path:
+    repo = Path(args.repo).resolve()
+    request_path = Path(args.request).resolve()
+    outdir = Path(args.outdir).resolve()
+    if not repo.is_dir():
+        raise PlanningPeerError(f"repository directory not found: {repo}")
+    _validate_planning_outdir(repo, outdir)
+    request = _read_text(request_path, "user request")
+    paths = _brief_artifact_paths(outdir)
+    if _artifacts_exist(paths):
+        if not args.retry:
+            raise PlanningPeerError(
+                "Claude brief artifacts already exist; inspect them, then use "
+                "brief --retry to archive the failed attempt"
+            )
+        _archive_failed_brief_attempt(outdir, paths)
+
+    timeout_seconds = int(args.timeout_seconds)
+    if timeout_seconds < 1:
+        raise PlanningPeerError("timeout must be at least 1 second")
+    cli = _resolve_cli("claude", args.cli)
+    outdir.mkdir(parents=True, exist_ok=True)
+    prompt = _brief_prompt(request)
+    paths["prompt"].write_text(prompt + "\n", encoding="utf-8")
+    command = _base_command("claude", cli, args.model)
+    session_id = str(uuid.uuid4())
+    command.extend(["--session-id", session_id])
+    result = _run_and_capture(command, prompt, repo, paths, timeout_seconds)
+    if result.returncode != 0:
+        raise PlanningPeerError(
+            "Claude brief generation failed with exit code "
+            f"{result.returncode}; see {paths['stderr']}"
+        )
+    response, _ = _parse_claude_output(result.stdout, session_id)
+    paths["response"].write_text(response + "\n", encoding="utf-8")
+    _validate_brief(response)
+    return paths["response"]
 
 
 def run_start(args: argparse.Namespace) -> Path:
@@ -369,6 +535,7 @@ def run_start(args: argparse.Namespace) -> Path:
     outdir = Path(args.outdir).resolve()
     if not repo.is_dir():
         raise PlanningPeerError(f"repository directory not found: {repo}")
+    _validate_planning_outdir(repo, outdir)
     brief = _read_text(brief_path, "planning brief")
     state_path = outdir / "state.json"
     if state_path.exists():
@@ -445,6 +612,10 @@ def _load_state(path: Path) -> dict[str, Any]:
         raise PlanningPeerError(f"invalid peer in state: {state['peer']}")
     if not isinstance(state["session_id"], str) or not state["session_id"].strip():
         raise PlanningPeerError("state session_id must be a non-empty string")
+    if not isinstance(state["repo"], str) or not state["repo"].strip():
+        raise PlanningPeerError("state repo must be a non-empty string")
+    if not isinstance(state["outdir"], str) or not state["outdir"].strip():
+        raise PlanningPeerError("state outdir must be a non-empty string")
     if not isinstance(state["round"], int) or state["round"] < 1:
         raise PlanningPeerError(f"invalid round in state: {state['round']}")
     if not isinstance(state["turns"], list):
@@ -459,12 +630,13 @@ def run_reply(args: argparse.Namespace) -> Path:
     state_path = Path(args.state).resolve()
     state = _load_state(state_path)
     message = _read_text(Path(args.message).resolve(), "host message")
-    repo = Path(state["repo"])
-    outdir = Path(state["outdir"])
+    repo = Path(state["repo"]).resolve()
+    outdir = Path(state["outdir"]).resolve()
     if state_path.parent != outdir:
         raise PlanningPeerError("state path does not match its recorded outdir")
     if not repo.is_dir():
         raise PlanningPeerError(f"repository directory not found: {repo}")
+    _validate_planning_outdir(repo, outdir)
     max_rounds = int(state.get("max_rounds", DEFAULT_MAX_ROUNDS))
     if int(state["round"]) >= max_rounds:
         raise PlanningPeerError(
@@ -518,6 +690,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    brief = subparsers.add_parser(
+        "brief", help="Have Claude organize the initial requirements brief."
+    )
+    brief.add_argument("--repo", required=True)
+    brief.add_argument("--request", required=True)
+    brief.add_argument("--outdir", required=True)
+    brief.add_argument("--model")
+    brief.add_argument("--cli", help="Override the Claude CLI executable.")
+    brief.add_argument(
+        "--retry",
+        action="store_true",
+        help="Archive failed brief artifacts and retry with a new Claude session.",
+    )
+    brief.add_argument(
+        "--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS
+    )
+
     start = subparsers.add_parser("start", help="Start a peer planning session.")
     start.add_argument("--peer", choices=("claude", "codex"), required=True)
     start.add_argument("--repo", required=True)
@@ -553,7 +742,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        response = run_start(args) if args.command == "start" else run_reply(args)
+        if args.command == "brief":
+            response = run_brief(args)
+        elif args.command == "start":
+            response = run_start(args)
+        else:
+            response = run_reply(args)
     except PlanningPeerError as exc:
         print(f"planning_peer: {exc}", file=sys.stderr)
         return 2
