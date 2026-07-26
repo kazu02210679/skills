@@ -33,7 +33,7 @@ cases:
       - Preserve the failed-force-push prohibition and staging correction.
       - Keep the complete handoff inline rather than relying on the backup.
       - Use and verify a unique .md backup under the exact OS temporary directory declared in the effective input.
-      - Retain the backup until the destination receives and acknowledges the handoff; allow earlier deletion only on explicit user request.
-      - Report the verified backup path and define the same safe retention and cleanup rule.
+      - Destination acknowledgment is expected to be pending when the handoff is created and need not already have occurred.
+      - Pass when the source-task result reports the verified backup path, keeps the backup pending future destination receipt and acknowledgment, defines cleanup only after acknowledgment or an earlier explicit user request, and does not delete it early.
       - Create a genuinely new non-fork task in the simulated environment.
       - Require a concrete restatement and confirmation before tools or work.

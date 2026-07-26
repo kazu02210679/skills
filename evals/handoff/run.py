@@ -213,6 +213,33 @@ def _safe_output_directory(output_directory: Path) -> Path:
     return resolved
 
 
+def _safe_simulated_temp_root(
+    requested_root: str | Path | None,
+) -> Path:
+    """Resolve and create a simulated temp root outside the repository."""
+
+    root = (
+        Path(requested_root)
+        if requested_root is not None
+        else Path(tempfile.gettempdir())
+    ).resolve()
+    repository = REPOSITORY_ROOT.resolve()
+    try:
+        root.relative_to(repository)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            "The simulated temp root must be outside the repository."
+        )
+    root.mkdir(parents=True, exist_ok=True)
+    if not root.is_dir():
+        raise ValueError(
+            f"The simulated temp root is not a directory: {root}"
+        )
+    return root
+
+
 def _parse_assessment(text: str, case_id: str) -> dict[str, Any]:
     candidate = text.strip()
     if candidate.startswith("```"):
@@ -280,7 +307,14 @@ def run_evaluation(args: argparse.Namespace) -> int:
         model=args.model or "codex-default",
         execution_prompts=prompts,
     )
-    os_temp_directory = Path(tempfile.gettempdir()).resolve()
+    simulated_temp_root = _safe_simulated_temp_root(
+        getattr(args, "simulated_temp_root", None)
+    )
+    case_three_temp_context = tempfile.TemporaryDirectory(
+        prefix="handoff-eval-case-3-",
+        dir=simulated_temp_root,
+    )
+    os_temp_directory = Path(case_three_temp_context.name).resolve()
 
     for case_id in case_ids:
         case_output = output_directory / case_id
@@ -400,6 +434,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
         }
         if case_id == "case-3":
             case_evidence["environment"] = {
+                "simulated_temp_root": str(simulated_temp_root),
                 "os_temp_directory": str(os_temp_directory),
             }
         manifest["cases"][case_id] = case_evidence
@@ -415,6 +450,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    case_three_temp_context.cleanup()
     print(f"Handoff evaluation: {passed}/{len(case_ids)} passed.")
     print(f"Evidence: {output_directory}")
     return 0 if passed == len(case_ids) else 1
@@ -426,6 +462,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-commit", required=True)
     parser.add_argument("--model")
     parser.add_argument("--codex")
+    parser.add_argument(
+        "--simulated-temp-root",
+        help=(
+            "Root outside the repository for the unique Case 3 simulated "
+            "OS temporary directory (default: the runtime OS temp root)."
+        ),
+    )
     return parser.parse_args()
 
 

@@ -60,6 +60,7 @@ In `First response contract`, require the destination's first response to restat
 - Re-read the backup after writing it. Verify that the file exists and that its contents exactly match the complete redacted handoff. Report the verified backup path only after both checks pass.
 - Treat the file as backup only. Keep the complete handoff inline in every destination prompt; never make continuation depend on the file.
 - Retain the backup until the destination has received and acknowledged the handoff; after acknowledgment, delete it when cleanup is available. Delete it earlier only on explicit user request. Never make continuation or recovery depend on retaining the backup.
+- Whenever a backup is created, include in the source-task result its verified path, that it is retained pending destination receipt and acknowledgment, and that cleanup occurs only after acknowledgment (or earlier only on explicit user request).
 - If backup creation, verification, or cleanup is unavailable or fails, say so honestly and continue with the complete copyable handoff.
 
 ## 6. Create a fresh task when possible

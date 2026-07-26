@@ -78,6 +78,8 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
         self.assertIn("unknown", conditions)
         self.assertIn("simulated capability invocation/result", conditions)
         self.assertIn("not a forbidden", conditions)
+        self.assertIn("acknowledgment is expected to be pending", conditions)
+        self.assertIn("need not already have occurred", conditions)
 
     def test_execution_prompts_do_not_include_evaluator_criteria(self) -> None:
         criteria_text = (EVAL_ROOT / "criteria.yaml").read_text(encoding="utf-8")
@@ -127,6 +129,33 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                 b"dirty candidate\n",
             )
 
+    def test_simulated_temp_root_is_resolved_outside_repository(self) -> None:
+        with self.assertRaisesRegex(ValueError, "outside the repository"):
+            self.runner._safe_simulated_temp_root(REPOSITORY_ROOT)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            requested = Path(temporary_directory) / "simulated-root"
+            resolved = self.runner._safe_simulated_temp_root(requested)
+            self.assertEqual(requested.resolve(), resolved)
+            self.assertTrue(resolved.is_dir())
+
+    def test_cli_accepts_simulated_temp_root(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "run.py",
+                "--output-dir",
+                "evidence",
+                "--candidate-commit",
+                "a" * 40,
+                "--simulated-temp-root",
+                "safe-temp",
+            ],
+        ):
+            arguments = self.runner.parse_args()
+        self.assertEqual("safe-temp", arguments.simulated_temp_root)
+
     def test_long_evaluator_prompt_is_passed_via_utf8_stdin(self) -> None:
         long_prompt = self.runner.build_evaluator_prompt(
             "case-long",
@@ -169,6 +198,7 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
         )
         received_prompts: list[str] = []
         execution_inputs: dict[str, str] = {}
+        case_three_temp_directories: list[Path] = []
 
         def fake_run(
             command: list[str],
@@ -209,6 +239,18 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                 execution_inputs[input_files[0].stem] = input_files[0].read_text(
                     encoding="utf-8"
                 )
+                if input_files[0].stem == "case-3":
+                    match = re.search(
+                        r"operating system's temporary directory is\s+"
+                        r"`([^`]+)`",
+                        execution_inputs["case-3"],
+                    )
+                    self.assertIsNotNone(match)
+                    case_three_temp_directory = Path(match.group(1))
+                    self.assertTrue(case_three_temp_directory.is_dir())
+                    case_three_temp_directories.append(
+                        case_three_temp_directory
+                    )
                 output_path.write_text(
                     "Simulated candidate response.\n",
                     encoding="utf-8",
@@ -225,11 +267,13 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
             candidate_path = temporary_root / "SKILL.md"
             candidate_path.write_bytes(committed_skill)
             output_directory = temporary_root / "evidence"
+            simulated_temp_root = temporary_root / "simulated-temp"
             arguments = argparse.Namespace(
                 output_dir=str(output_directory),
                 candidate_commit=head,
                 model="dry-run-model",
                 codex="codex-dry-run",
+                simulated_temp_root=str(simulated_temp_root),
             )
 
             with (
@@ -267,10 +311,22 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
             )
             case_three = evidence["cases"]["case-3"]
             self.assertIn("environment", case_three)
-            os_temp_directory = str(Path(tempfile.gettempdir()).resolve())
             self.assertEqual(
-                os_temp_directory,
-                case_three["environment"]["os_temp_directory"],
+                str(simulated_temp_root.resolve()),
+                case_three["environment"]["simulated_temp_root"],
+            )
+            os_temp_directory = case_three["environment"]["os_temp_directory"]
+            self.assertEqual(
+                simulated_temp_root.resolve(),
+                Path(os_temp_directory).parent,
+            )
+            self.assertRegex(
+                Path(os_temp_directory).name,
+                r"^handoff-eval-case-3-",
+            )
+            self.assertEqual(
+                [Path(os_temp_directory)],
+                case_three_temp_directories,
             )
             self.assertIn(os_temp_directory, execution_inputs["case-3"])
             self.assertNotIn(
@@ -306,6 +362,7 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                             / case_evidence["artifacts"]["response"]
                         ).is_file()
                     )
+            self.assertFalse(Path(os_temp_directory).exists())
 
     def test_backup_retention_requires_destination_acknowledgment(self) -> None:
         skill_text = (
@@ -313,6 +370,15 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn(
             "destination has received and acknowledged the handoff",
+            skill_text,
+        )
+        self.assertIn("source-task result", skill_text)
+        self.assertIn(
+            "retained pending destination receipt and acknowledgment",
+            skill_text,
+        )
+        self.assertIn(
+            "cleanup occurs only after acknowledgment",
             skill_text,
         )
         self.assertIn("explicit user request", skill_text)

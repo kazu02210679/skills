@@ -22,6 +22,11 @@ commit, Skill SHA-256, Codex CLI version, model selection, exact execution and
 evaluator prompts, commands, JSONL tool transcripts, final responses, and
 per-case assessments in `evidence.json`.
 
+Use `--simulated-temp-root PATH` to select an ASCII-safe temporary root for
+Case 3. The runner requires that root to be outside the repository, creates a
+unique case-specific directory beneath it, records both paths in evidence,
+and removes the case-specific directory after the run.
+
 The runner uses a new OS-temporary execution workspace for every case, copies
 only `candidate/SKILL.md` and the selected `inputs/<case>.md` into it, and
 removes that workspace afterward. The evaluator runs separately with the
