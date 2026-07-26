@@ -23,17 +23,49 @@ through their internals.
 
 ## 1. Establish the local publish context
 
-Run the inspector. It reads local Git state only and never contacts a remote:
+Run the inspector, from this Skill's own directory. It reads local Git state
+only and never contacts a remote. Substitute the two placeholders — this Skill's
+directory, and the repository being published:
 
 ```bash
-python {skill}/scripts/inspect_pr_context.py --repository {repository}
+python SKILL_DIR/scripts/inspect_pr_context.py --repository REPOSITORY
 ```
 
-Stop when the inspector is missing, exits non-zero, or returns anything but the
-documented JSON object. Report what it did instead. Do not fall back to running
-the checks by hand and do not guess at the missing values — a publish decision
-made on state you could not read is the failure this whole Skill exists to
-prevent.
+It returns one JSON object:
+
+```json
+{
+  "repository": "owner/name or a local path",
+  "headRef": "feature/import-csv",
+  "headSha": "40-hex",
+  "baseRef": "main",
+  "baseSha": "40-hex",
+  "baseResolution": "user | upstream | origin-head | main-or-master",
+  "baseProvisional": true,
+  "mergeBaseSha": "40-hex",
+  "isDefaultBranch": false,
+  "stagedDirty": false,
+  "trackedDirty": false,
+  "untrackedLocalEvidence": ["docs/reviews/slug/review-data.json"],
+  "untrackedOther": ["src/new_feature.py"],
+  "commitsAhead": 3,
+  "codexPlanIds": ["plan-alpha"],
+  "reviewArtifacts": [
+    {
+      "path": "docs/reviews/slug/review-data.json",
+      "valid": true,
+      "headMatches": true,
+      "baseMatches": true
+    }
+  ]
+}
+```
+
+Stop when the inspector is missing, exits non-zero, or returns anything other
+than that object with every key present. Report what it did instead. Do not fall
+back to running the checks by hand and do not guess at the missing values — a
+publish decision made on state you could not read is the failure this whole
+Skill exists to prevent.
 
 Stop, report the reason, and change nothing when any of these hold:
 
@@ -54,25 +86,34 @@ carry that list into the final approval.
 
 Never commit, stage, or stash anything to satisfy a condition above.
 
-Treat `baseRef` as provisional while `baseProvisional` is true. Settle it in
-step 5 before asking for approval.
+Treat `baseRef` as provisional while `baseProvisional` is true; `baseResolution`
+tells you which rule produced it — an explicit user choice, the branch upstream,
+`refs/remotes/origin/HEAD`, or a local `main`/`master`. Settle it in step 5
+before asking for approval, and stop if it cannot be settled to exactly one
+branch. Guessing the base silently changes what the pull request proposes.
 
 ## 2. Reconstruct what the branch contains
 
 Read `git log {base}..HEAD` and `git diff --stat {base}...HEAD`.
 
-When `reviewArtifacts` is non-empty, first stop on any artifact whose `valid` is
-false. A malformed `review-data.json` is not an absent one: it may have held a
-`blocking` finding, and quietly falling through to your own verification would
-bury it. Report that the artifact cannot be read, and continue only if the user
-explicitly approves ignoring it and verifying the branch yourself.
-
-Among the valid artifacts, choose one:
+When `reviewArtifacts` is non-empty, choose one from those whose `valid` is true:
 
 1. the artifact whose recorded head matches the current `HEAD`;
 2. then the one whose recorded merge-base matches the current merge-base;
 3. then the most recent of those that remain;
 4. and stop when no single artifact wins.
+
+Then stop if any artifact has `valid` false **and** you did not select one whose
+head matches the current `HEAD`. A malformed `review-data.json` is not an absent
+one: it may have held a `blocking` finding, and falling through to your own
+verification would bury it. Report that it cannot be read, and continue only if
+the user explicitly approves ignoring it and verifying the branch yourself.
+
+Scope that stop deliberately. `docs/reviews/` accumulates a file per review, so
+one stale broken artifact would otherwise block every future publish — and
+worse, the escape hatch would discard a good current review along with it. A
+malformed file matters when it might be the review of what you are about to
+publish, not when a current one already covers this exact `HEAD`.
 
 Compare commit SHAs, not branch names. A recorded base of `main` says nothing
 about whether `main` has moved since the review ran.
@@ -93,8 +134,9 @@ not adopt a plan directory that no trailer points to.
 
 ## 3. Verify the branch
 
-Prefer the chosen artifact's `verification` entries. Without one, detect the
-repository's test and lint commands, run them, and record the real output.
+Prefer the chosen artifact's `verification` entries. When no artifact was
+chosen, or the chosen one carries no entries, detect the repository's test and
+lint commands, run them, and record the real output.
 
 When you cannot detect or cannot run a check, record it as `not-run` with the
 reason. Never write down a check as passing because it probably would.
@@ -170,6 +212,10 @@ git merge-base --is-ancestor {remote-head-sha} HEAD
 ## 6. Compose the pull request
 
 Match the language of the repository's existing pull requests and commits.
+
+Write the title as one sentence stating what the branch is for — the change it
+proposes, not the process that produced it. "Add CSV delimiter handling" tells a
+reviewer whether to open it; "Codex plan T1-T3 complete" does not.
 
 ```markdown
 ## Summary
@@ -301,9 +347,10 @@ gh pr create \
 
 Drop `--draft` only for ready.
 
-When the push is rejected, report it and stop. Do not reach for `--force`: a
+When the push is rejected, stop and report it. Do not reach for `--force`: a
 rejection means the remote holds commits you have not seen, and overwriting them
-destroys someone's work to save a step. Re-run step 5 to find out what arrived.
+destroys someone's work to save a step. Diagnosing it means returning to step 5
+to see what arrived — not retrying the push.
 
 Report the URL, base, head, draft or ready, and the verification results. When
 the push succeeded and creation failed, say exactly that. The branch is on the
