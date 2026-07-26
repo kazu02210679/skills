@@ -40,7 +40,7 @@ It returns one JSON object:
   "headSha": "40-hex",
   "baseRef": "main",
   "baseSha": "40-hex",
-  "baseResolution": "user | upstream | origin-head | main-or-master",
+  "baseResolution": "user | upstream | origin-head | main-or-master | unresolved",
   "baseProvisional": true,
   "mergeBaseSha": "40-hex",
   "isDefaultBranch": false,
@@ -71,6 +71,8 @@ Stop, report the reason, and change nothing when any of these hold:
 
 | Condition | Why it stops |
 |---|---|
+| `headSha` is empty | The repository could not be read, or has no commits. There is no state to publish from |
+| `baseResolution` is `unresolved` | No rule identified a base. Picking one yourself changes what the pull request proposes |
 | `isDefaultBranch` | Publishing means proposing a change, not committing to the trunk |
 | `stagedDirty` | Staged work is neither in the branch nor excluded from it |
 | `trackedDirty` | The diff you would describe is not the diff you would push |
@@ -88,9 +90,17 @@ Never commit, stage, or stash anything to satisfy a condition above.
 
 Treat `baseRef` as provisional while `baseProvisional` is true; `baseResolution`
 tells you which rule produced it — an explicit user choice, the branch upstream,
-`refs/remotes/origin/HEAD`, or a local `main`/`master`. Settle it in step 5
+`refs/remotes/origin/HEAD`, or a local `main`/`master`. When no rule matched it
+is `unresolved` and `baseRef` and `baseSha` are empty. Settle the base in step 5
 before asking for approval, and stop if it cannot be settled to exactly one
 branch. Guessing the base silently changes what the pull request proposes.
+
+Read the emptiness of `headSha`, `baseSha`, and `mergeBaseSha` as real signals.
+They are empty when a value could not be resolved, and a value that could not be
+resolved makes every field derived from it meaningless — `commitsAhead` of 0
+against an unresolvable base means "not measured", not "nothing to propose".
+Report what could not be read rather than the conclusion you would have drawn
+from it.
 
 ## 2. Reconstruct what the branch contains
 
