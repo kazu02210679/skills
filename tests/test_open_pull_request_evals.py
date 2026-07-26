@@ -89,6 +89,19 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         )
         self.assertIn("even when a later fallback succeeds", skill)
 
+    def test_skill_does_not_call_a_worktree_clean_when_evidence_is_untracked(
+        self,
+    ) -> None:
+        skill = (
+            REPOSITORY_ROOT / "skills" / "open-pull-request" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Never call the worktree clean while either untracked list is non-empty",
+            skill,
+        )
+        self.assertIn("tracked changes are clean", skill)
+
     def test_every_declared_fixture_builds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -111,6 +124,20 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         )
 
         self.assertEqual("ancestor:1", specification["remote"]["headSha"])
+
+    def test_case_03_ignores_test_generated_python_cache(self) -> None:
+        specification = json.loads(
+            (EVAL_ROOT / "fixtures" / "case-03.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        committed_files = {
+            path: content
+            for commit in specification["commits"]
+            for path, content in commit["files"].items()
+        }
+
+        self.assertIn("__pycache__/", committed_files[".gitignore"])
 
     def test_case_09_ignores_test_generated_python_cache(self) -> None:
         specification = json.loads(

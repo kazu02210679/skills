@@ -87,6 +87,11 @@ is far more likely to be a missed commit than a local artifact. Continue only if
 the user states those paths are deliberately outside this pull request, and
 carry that list into the final approval.
 
+Never call the worktree clean while either untracked list is non-empty. Say that
+the tracked changes are clean, then list every untracked path and whether it is
+local evidence or other work. "Clean" without that qualification contradicts
+the inspector and hides what will stay behind.
+
 Never commit, stage, or stash anything to satisfy a condition above.
 
 Treat `baseRef` as provisional while `baseProvisional` is true; `baseResolution`
