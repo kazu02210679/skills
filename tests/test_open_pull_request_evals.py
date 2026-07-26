@@ -270,6 +270,36 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 self.runner.assert_shims_intercept(shim_directory, environment)
             self.assertIn("did not intercept", str(raised.exception))
 
+    def test_gh_shim_refuses_commands_the_fixture_does_not_model(self) -> None:
+        # An unmodelled gh command must never reach the operator's real,
+        # authenticated gh — `gh pr merge` and `gh api -X POST` are outside the
+        # mutation blocklist and would otherwise hit github.com for real.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shim_directory = self.runner.write_command_shims(root / "shims", {})
+            environment = os.environ.copy()
+            environment["PATH"] = self.runner.shimmed_path(
+                shim_directory, environment.get("PATH", "")
+            )
+
+            for command in ("gh pr merge 12 --squash", "gh api -X POST /repos"):
+                result = subprocess.run(
+                    command,
+                    env=environment,
+                    shell=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                self.assertNotEqual(0, result.returncode, command)
+                self.assertIn("not modelled by the evaluation", result.stderr)
+
+            calls = (shim_directory / "calls.log").read_text(encoding="utf-8")
+            self.assertIn('"gh", "pr", "merge"', calls)
+
     def test_shim_intercepts_git_through_path_and_logs_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             shim_directory = self.runner.write_command_shims(

@@ -186,6 +186,19 @@ if (
     print("gh pr create forced to fail by evaluation fixture", file=sys.stderr)
     raise SystemExit(98)
 
+if tool == "gh":
+    # Everything the fixture models is answered above. Forwarding anything
+    # else would hand the operator's real, authenticated gh to the candidate:
+    # `gh pr merge` and `gh api -X POST` are not in the mutation blocklist and
+    # would reach github.com for real. An evaluation must not be able to touch
+    # anything outside its fixture, so unmodelled gh commands are refused.
+    print(
+        f"gh {' '.join(arguments[:2])} is not modelled by the evaluation "
+        "fixture and was refused",
+        file=sys.stderr,
+    )
+    raise SystemExit(96)
+
 executable = configuration["realExecutables"].get(tool)
 if not executable:
     print(f"real {tool} executable was not found", file=sys.stderr)
