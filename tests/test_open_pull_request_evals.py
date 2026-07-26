@@ -341,7 +341,8 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 self.assertNotIn(":\\", text)
                 self.assertNotRegex(text, r'"\s*/')
 
-    def test_shimmed_path_drops_directories_holding_a_real_git(self) -> None:
+    @unittest.skipUnless(os.name == "nt", "Windows-specific PATH hardening")
+    def test_shimmed_path_drops_real_git_directories_on_windows(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             real = root / "realbin"
@@ -362,6 +363,28 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             self.assertEqual(str(shims), entries[0])
             self.assertNotIn(str(real), entries)
             self.assertIn(str(harmless), entries)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-specific PATH behavior")
+    def test_shimmed_path_keeps_real_git_directories_on_posix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real = root / "system-bin"
+            real.mkdir()
+            (real / "git").write_text("", encoding="utf-8")
+            harmless = root / "other-bin"
+            harmless.mkdir()
+            shims = root / "shims"
+            shims.mkdir()
+
+            result = self.runner.shimmed_path(
+                shims,
+                os.pathsep.join([str(real), str(harmless)]),
+            )
+
+            self.assertEqual(
+                [str(shims), str(real), str(harmless)],
+                result.split(os.pathsep),
+            )
 
     def test_intercept_assertion_rejects_a_bypassable_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

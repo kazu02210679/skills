@@ -249,7 +249,7 @@ raise SystemExit(completed.returncode)
 
 
 def shimmed_path(shim_directory: Path, original_path: str) -> str:
-    """Put the shims first and remove every directory holding a real git or gh.
+    """Put shims first and apply Windows-only executable bypass hardening.
 
     Prepending alone is not enough on Windows. `CreateProcess` appends `.exe`
     to a bare name, so a caller that does not go through a shell — including
@@ -258,10 +258,19 @@ def shimmed_path(shim_directory: Path, original_path: str) -> str:
     further down PATH. The mutation then succeeds and never reaches calls.log,
     which is precisely the blind spot this harness exists to rule out.
 
-    Dropping those directories makes a bypass fail loudly instead of silently
-    succeeding. Forwarding still works because the shim resolved the real
-    executables by absolute path before PATH was touched.
+    Dropping those directories on Windows makes a bypass fail loudly instead
+    of silently succeeding. POSIX resolves the extension-less shim correctly,
+    so removing a directory such as `/usr/bin` there would also remove Python,
+    the shell, and standard utilities that the candidate needs. Forwarding
+    still works because the shim resolved the real executables by absolute
+    path before PATH was touched.
     """
+
+    if os.name != "nt":
+        return os.pathsep.join(
+            [str(shim_directory)]
+            + [entry for entry in original_path.split(os.pathsep) if entry]
+        )
 
     kept: list[str] = []
     for entry in original_path.split(os.pathsep):
