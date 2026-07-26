@@ -134,6 +134,29 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         self.assertIn("python -m pytest", prompt)
         self.assertIn("calls.log records only Git and GitHub CLI", prompt)
 
+    def test_execution_evidence_includes_completed_file_changes(self) -> None:
+        evidence = self.runner.extract_execution_evidence(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "file_change",
+                        "changes": [
+                            {
+                                "path": "C:/tmp/pr-body.md",
+                                "kind": "delete",
+                            }
+                        ],
+                        "status": "completed",
+                    },
+                }
+            )
+            + "\n"
+        )
+
+        self.assertEqual("file_change", evidence[0]["type"])
+        self.assertEqual("delete", evidence[0]["changes"][0]["kind"])
+
     def test_builder_creates_head_branch_one_commit_ahead_of_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = self.build(

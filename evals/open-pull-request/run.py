@@ -93,7 +93,7 @@ def build_evaluator_prompt(
 
 
 def extract_execution_evidence(transcript: str) -> list[dict[str, Any]]:
-    """Extract completed command records without resending the whole transcript."""
+    """Extract completed command and file-change records from the transcript."""
 
     evidence: list[dict[str, Any]] = []
     for line in transcript.splitlines():
@@ -104,19 +104,32 @@ def extract_execution_evidence(transcript: str) -> list[dict[str, Any]]:
         if event.get("type") != "item.completed":
             continue
         item = event.get("item")
-        if not isinstance(item, dict) or item.get("type") != "command_execution":
+        if not isinstance(item, dict):
             continue
-        evidence.append(
-            {
-                key: item.get(key)
-                for key in (
-                    "command",
-                    "aggregated_output",
-                    "exit_code",
-                    "status",
-                )
-            }
-        )
+        item_type = item.get("type")
+        if item_type == "command_execution":
+            evidence.append(
+                {
+                    "type": item_type,
+                    **{
+                        key: item.get(key)
+                        for key in (
+                            "command",
+                            "aggregated_output",
+                            "exit_code",
+                            "status",
+                        )
+                    },
+                }
+            )
+        elif item_type == "file_change":
+            evidence.append(
+                {
+                    "type": item_type,
+                    "changes": item.get("changes"),
+                    "status": item.get("status"),
+                }
+            )
     return evidence
 
 
