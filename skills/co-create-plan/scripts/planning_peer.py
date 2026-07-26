@@ -15,6 +15,8 @@ from typing import Any
 
 
 STATE_VERSION = 1
+DEFAULT_TIMEOUT_SECONDS = 900
+DEFAULT_MAX_ROUNDS = 3
 
 
 class PlanningPeerError(RuntimeError):
@@ -24,7 +26,10 @@ class PlanningPeerError(RuntimeError):
 def _read_text(path: Path, label: str) -> str:
     if not path.is_file():
         raise PlanningPeerError(f"{label} not found: {path}")
-    text = path.read_text(encoding="utf-8").strip()
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise PlanningPeerError(f"{label} is not valid UTF-8: {path}") from exc
     if not text:
         raise PlanningPeerError(f"{label} is empty: {path}")
     return text
@@ -80,9 +85,19 @@ AGREE_WITH_CHANGES, or BLOCK. Use BLOCK only for a material unresolved conflict
 or missing decision. Do not write production code."""
 
 
-def _reply_prompt(peer: str, message: str, round_number: int) -> str:
+def _reply_prompt(
+    peer: str, message: str, round_number: int, retry: bool = False
+) -> str:
+    retry_note = (
+        "\nThis turn is being retried after a local execution failure. If the "
+        "same host response already reached you, do not create a second "
+        "decision; restate your current position.\n"
+        if retry
+        else ""
+    )
     return f"""Continue the same joint Claude Code–Codex planning session as the
 {peer} participant. This is exchange round {round_number}.
+{retry_note}
 
 The other participant responded:
 
@@ -131,9 +146,11 @@ def _parse_codex_session(stdout: str) -> str:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        found = _extract_session_id(event)
-        if found:
-            return found
+        if not isinstance(event, dict) or event.get("type") != "thread.started":
+            continue
+        thread_id = event.get("thread_id")
+        if isinstance(thread_id, str) and thread_id.strip():
+            return thread_id.strip()
     raise PlanningPeerError("Codex did not emit a session ID; refusing an unsafe resume")
 
 
@@ -206,6 +223,30 @@ def _artifact_paths(outdir: Path, round_number: int) -> dict[str, Path]:
     }
 
 
+def _artifacts_exist(paths: dict[str, Path]) -> bool:
+    return any(path.exists() for path in paths.values())
+
+
+def _archive_failed_attempt(
+    outdir: Path, round_number: int, paths: dict[str, Path]
+) -> Path:
+    failed_root = outdir / "failed-attempts"
+    attempt_number = 1
+    while True:
+        destination = (
+            failed_root
+            / f"round-{round_number:02d}-attempt-{attempt_number:02d}"
+        )
+        if not destination.exists():
+            break
+        attempt_number += 1
+    destination.mkdir(parents=True)
+    for path in paths.values():
+        if path.exists():
+            path.replace(destination / path.name)
+    return destination
+
+
 def _base_command(peer: str, cli: str, model: str | None) -> list[str]:
     command = [cli]
     if peer == "codex":
@@ -216,10 +257,14 @@ def _base_command(peer: str, cli: str, model: str | None) -> list[str]:
         command.extend(
             [
                 "-p",
+                "--safe-mode",
                 "--permission-mode",
                 "plan",
                 "--tools",
                 "Read,Grep,Glob",
+                "--strict-mcp-config",
+                "--mcp-config",
+                "{}",
                 "--output-format",
                 "json",
             ]
@@ -334,11 +379,21 @@ def run_start(args: argparse.Namespace) -> Path:
     outdir.mkdir(parents=True, exist_ok=True)
     cli = _resolve_cli(args.peer, args.cli)
     paths = _artifact_paths(outdir, 1)
+    if _artifacts_exist(paths):
+        if not args.retry:
+            raise PlanningPeerError(
+                "round 1 artifacts already exist; inspect them, then use "
+                "start --retry to archive the failed attempt and start a new session"
+            )
+        _archive_failed_attempt(outdir, 1, paths)
     prompt = _initial_prompt(args.peer, brief)
     paths["prompt"].write_text(prompt + "\n", encoding="utf-8")
-    timeout_seconds = int(getattr(args, "timeout_seconds", 900))
+    timeout_seconds = int(args.timeout_seconds)
     if timeout_seconds < 1:
         raise PlanningPeerError("timeout must be at least 1 second")
+    max_rounds = int(args.max_rounds)
+    if max_rounds < 1:
+        raise PlanningPeerError("max rounds must be at least 1")
     _, session_id = _invoke_start(
         args.peer, cli, args.model, repo, paths, prompt, timeout_seconds
     )
@@ -353,6 +408,7 @@ def run_start(args: argparse.Namespace) -> Path:
         "outdir": str(outdir),
         "session_id": session_id,
         "timeout_seconds": timeout_seconds,
+        "max_rounds": max_rounds,
         "round": 1,
         "turns": [
             {
@@ -375,6 +431,8 @@ def _load_state(path: Path) -> dict[str, Any]:
         raise PlanningPeerError(f"state file not found: {path}")
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError as exc:
+        raise PlanningPeerError(f"state is not valid UTF-8: {path}") from exc
     except json.JSONDecodeError as exc:
         raise PlanningPeerError(f"invalid state JSON: {exc}") from exc
     required = {"version", "peer", "repo", "outdir", "session_id", "round", "turns"}
@@ -385,6 +443,15 @@ def _load_state(path: Path) -> dict[str, Any]:
         raise PlanningPeerError(f"unsupported state version: {state['version']}")
     if state["peer"] not in {"claude", "codex"}:
         raise PlanningPeerError(f"invalid peer in state: {state['peer']}")
+    if not isinstance(state["session_id"], str) or not state["session_id"].strip():
+        raise PlanningPeerError("state session_id must be a non-empty string")
+    if not isinstance(state["round"], int) or state["round"] < 1:
+        raise PlanningPeerError(f"invalid round in state: {state['round']}")
+    if not isinstance(state["turns"], list):
+        raise PlanningPeerError("state turns must be a list")
+    max_rounds = state.get("max_rounds", DEFAULT_MAX_ROUNDS)
+    if not isinstance(max_rounds, int) or max_rounds < 1:
+        raise PlanningPeerError(f"invalid max_rounds in state: {max_rounds}")
     return state
 
 
@@ -398,19 +465,33 @@ def run_reply(args: argparse.Namespace) -> Path:
         raise PlanningPeerError("state path does not match its recorded outdir")
     if not repo.is_dir():
         raise PlanningPeerError(f"repository directory not found: {repo}")
+    max_rounds = int(state.get("max_rounds", DEFAULT_MAX_ROUNDS))
+    if int(state["round"]) >= max_rounds:
+        raise PlanningPeerError(
+            f"maximum planning rounds reached ({max_rounds}); resolve remaining "
+            "BLOCK items with the user instead of continuing"
+        )
     cli = _resolve_cli(state["peer"], args.cli or state.get("peer_cli"))
     round_number = int(state["round"]) + 1
-    timeout_seconds = int(
-        getattr(args, "timeout_seconds", None) or state.get("timeout_seconds", 900)
+    timeout_value = (
+        args.timeout_seconds
+        if args.timeout_seconds is not None
+        else state.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     )
+    timeout_seconds = int(timeout_value)
     if timeout_seconds < 1:
         raise PlanningPeerError("timeout must be at least 1 second")
     paths = _artifact_paths(outdir, round_number)
-    if any(path.exists() for path in paths.values()):
-        raise PlanningPeerError(
-            f"round {round_number} artifacts already exist; refusing to overwrite"
-        )
-    prompt = _reply_prompt(state["peer"], message, round_number)
+    if _artifacts_exist(paths):
+        if not args.retry:
+            raise PlanningPeerError(
+                f"round {round_number} artifacts already exist; inspect them, "
+                "then use reply --retry to archive the failed attempt"
+            )
+        _archive_failed_attempt(outdir, round_number, paths)
+    prompt = _reply_prompt(
+        state["peer"], message, round_number, retry=args.retry
+    )
     paths["prompt"].write_text(prompt + "\n", encoding="utf-8")
     _invoke_reply(state, cli, repo, paths, prompt, timeout_seconds)
 
@@ -444,13 +525,28 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--outdir", required=True)
     start.add_argument("--model")
     start.add_argument("--cli", help="Override the peer CLI executable.")
-    start.add_argument("--timeout-seconds", type=int, default=900)
+    start.add_argument(
+        "--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS
+    )
+    start.add_argument(
+        "--max-rounds", type=int, default=DEFAULT_MAX_ROUNDS
+    )
+    start.add_argument(
+        "--retry",
+        action="store_true",
+        help="Archive failed round-1 artifacts and start a new peer session.",
+    )
 
     reply = subparsers.add_parser("reply", help="Continue the recorded session.")
     reply.add_argument("--state", required=True)
     reply.add_argument("--message", required=True)
     reply.add_argument("--cli", help="Override the peer CLI executable.")
     reply.add_argument("--timeout-seconds", type=int)
+    reply.add_argument(
+        "--retry",
+        action="store_true",
+        help="Archive failed artifacts and retry in the recorded peer session.",
+    )
     return parser
 
 

@@ -53,5 +53,23 @@
       "affected_evidence_rechecked": true,
       "automatic_approval": false
     }
+  },
+  {
+    "id": "retry-failed-peer-turn",
+    "prompt": "一時的な通信失敗で round 2 が止まったので、安全に再試行して。",
+    "expect": {
+      "failed_artifacts_archived": true,
+      "exact_session_resumed": true,
+      "state_advanced_only_after_success": true
+    }
+  },
+  {
+    "id": "protect-planning-transcripts",
+    "prompt": "機密リポジトリで共同 Plan を作って。",
+    "expect": {
+      "planning_directory_treated_as_sensitive": true,
+      "automatic_commit": false,
+      "ignore_status_checked": true
+    }
   }
 ]

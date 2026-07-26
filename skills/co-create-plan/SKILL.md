@@ -17,6 +17,9 @@ plan.
 
 Resolve the repository root, task slug, user request, and applicable repository
 instructions. Inspect only the code and documentation needed to plan the work.
+Put applicable `AGENTS.md`, `CLAUDE.md`, and repository constraints into the
+brief because the peer process disables custom instructions, hooks, and MCP
+servers.
 
 Write dialogue artifacts under:
 
@@ -32,6 +35,12 @@ The planning workflow may additionally write the final packet to:
 
 Do not edit product code, dependency files, tests, or configuration while
 planning. Use a separate implementation workflow after approval.
+
+Treat `.ai-planning/` as sensitive working data. Prompts, transcripts, stderr,
+and absolute local paths can contain repository information. Check whether it
+is ignored before starting; if it is not, warn the user and recommend adding it
+to `.gitignore` outside this planning-only workflow. Never stage, commit, or
+publish `.ai-planning/` automatically.
 
 ## 2. Have Claude organize the brief first
 
@@ -53,8 +62,16 @@ host is Codex:
 
 1. Save the raw user request and known context to
    `.ai-planning/<task-slug>/request.md`.
-2. Invoke Claude with `planning_peer.py start --peer claude --brief
-   <request.md>`.
+2. Invoke Claude with all required paths:
+
+   ```text
+   python <skill-dir>/scripts/planning_peer.py start \
+     --peer claude \
+     --repo <repo> \
+     --brief <repo>/.ai-planning/<task-slug>/request.md \
+     --outdir <repo>/.ai-planning/<task-slug>
+   ```
+
 3. Normalize Claude's first response into `requirements.md` without erasing its
    uncertainties or dissent.
 4. Write Codex's response as `round-01-host.md` and continue the recorded Claude
@@ -73,12 +90,17 @@ python <skill-dir>/scripts/planning_peer.py start \
   --peer <codex-or-claude> \
   --repo <repo> \
   --brief <repo>/.ai-planning/<task-slug>/requirements.md \
-  --outdir <repo>/.ai-planning/<task-slug>
+  --outdir <repo>/.ai-planning/<task-slug> \
+  --max-rounds 3
 ```
 
 Choose the other model as `--peer`: use `codex` when hosted by Claude Code and
 `claude` when hosted by Codex. The script records the exact peer session ID in
 `state.json`; never use a global “resume last session” operation.
+
+Claude runs with safe mode, an empty strict MCP configuration, planning
+permissions, and only read/search tools. Codex runs with a read-only sandbox.
+Do not weaken either boundary for ordinary planning.
 
 Read the peer response and verify cited repository facts yourself. A model
 claim is a proposal, not evidence.
@@ -102,6 +124,22 @@ For each round:
 
 5. Update a provisional plan after the exchange, not before reading it.
 
+If a peer command fails, inspect the retained events and stderr first. Retry
+only when duplicate delivery will not make the transcript ambiguous:
+
+```text
+python <skill-dir>/scripts/planning_peer.py reply \
+  --state <repo>/.ai-planning/<task-slug>/state.json \
+  --message <repo>/.ai-planning/<task-slug>/round-NN-host.md \
+  --retry
+```
+
+The script moves the failed attempt into
+`failed-attempts/round-NN-attempt-MM/` before retrying the exact recorded
+session. For a failed initial `start`, use `start --retry`; it archives the
+failed artifacts and creates a new peer session because no trusted state was
+completed.
+
 Require both sides to end each turn with one vote:
 
 - `AGREE` — no material objection remains;
@@ -110,10 +148,10 @@ Require both sides to end each turn with one vote:
 - `BLOCK` — a material conflict or missing decision prevents a responsible
   plan.
 
-Do not manufacture consensus. Continue for at most three substantive exchange
-rounds by default. If a high-impact `BLOCK` remains, present the competing
-options and evidence to the user for a decision. The user is the tie-breaker,
-not either model.
+Do not manufacture consensus. The script enforces at most three substantive
+exchange rounds by default. If a high-impact `BLOCK` remains, present the
+competing options and evidence to the user for a decision. The user is the
+tie-breaker, not either model.
 
 ## 5. Produce one joint plan
 
@@ -154,8 +192,8 @@ replan.
 - Missing peer CLI or authentication: preserve the brief, report the exact
   prerequisite, and do not imitate the unavailable model.
 - Peer timeout or malformed output: retain logs in the planning directory and
-  report the failed turn. Retry only when the exact session ID is known and
-  duplicate delivery cannot create an ambiguous transcript.
+  report the failed turn. Use `--retry` only after checking whether duplicate
+  delivery could create an ambiguous transcript.
 - Session ID missing: stop before replying; never resume an unrelated session.
 - Repository changed materially during discussion: mark the plan stale and
   re-check affected evidence.
