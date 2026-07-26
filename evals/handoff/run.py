@@ -104,10 +104,12 @@ def _run(
     command: list[str],
     *,
     cwd: Path,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=cwd,
+        input=input_text,
         text=True,
         encoding="utf-8",
         errors="replace",
@@ -172,7 +174,7 @@ def _codex_command(
     ]
     if model:
         command.extend(["--model", model])
-    command.append(prompt)
+    command.append("-")
     return command
 
 
@@ -285,7 +287,11 @@ def run_evaluation(args: argparse.Namespace) -> int:
                 response_path,
                 model=args.model,
             )
-            execution = _run(execution_command, cwd=workspace)
+            execution = _run(
+                execution_command,
+                cwd=workspace,
+                input_text=execution_prompt,
+            )
             (case_output / "execution-transcript.jsonl").write_text(
                 execution.stdout,
                 encoding="utf-8",
@@ -320,7 +326,11 @@ def run_evaluation(args: argparse.Namespace) -> int:
             evaluator_output,
             model=args.model,
         )
-        evaluation = _run(evaluator_command, cwd=output_directory)
+        evaluation = _run(
+            evaluator_command,
+            cwd=output_directory,
+            input_text=evaluator_prompt,
+        )
         (case_output / "evaluator-transcript.jsonl").write_text(
             evaluation.stdout,
             encoding="utf-8",

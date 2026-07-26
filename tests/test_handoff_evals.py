@@ -6,6 +6,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -101,6 +102,37 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                 b"dirty candidate\n",
             )
 
+    def test_long_evaluator_prompt_is_passed_via_utf8_stdin(self) -> None:
+        long_prompt = self.runner.build_evaluator_prompt(
+            "case-long",
+            "入力データ\n" * 400,
+            "候補応答\n" * 400,
+            ["Universal condition."],
+            ["Case condition."],
+        )
+        self.assertGreater(len(long_prompt.encode("utf-8")), 6_000)
+
+        command = self.runner._codex_command(
+            "codex",
+            long_prompt,
+            Path("assessment.json"),
+            model="test-model",
+        )
+        self.assertEqual("-", command[-1])
+        self.assertNotIn(long_prompt, command)
+
+        result = self.runner._run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write(sys.stdin.read())",
+            ],
+            cwd=REPOSITORY_ROOT,
+            input_text=long_prompt,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(long_prompt, result.stdout)
+
     def test_dry_run_binds_linked_worktree_commit_and_writes_evidence(self) -> None:
         head = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -110,10 +142,17 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
         resolved_commit, committed_skill = self.runner._read_committed_candidate(
             head
         )
+        received_prompts: list[str] = []
 
-        def fake_run(command: list[str], *, cwd: Path):
+        def fake_run(
+            command: list[str],
+            *,
+            cwd: Path,
+            input_text: str | None = None,
+        ):
             del cwd
             if command[-1] == "--version":
+                self.assertIsNone(input_text)
                 return subprocess.CompletedProcess(
                     command,
                     0,
@@ -121,8 +160,12 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                     stderr="",
                 )
 
+            self.assertEqual("-", command[-1])
+            self.assertIsNotNone(input_text)
+            self.assertNotIn(input_text, command)
+            received_prompts.append(input_text)
             output_path = Path(command[command.index("-o") + 1])
-            prompt = command[-1]
+            prompt = input_text
             if prompt.startswith("Act as a strict behavioral evaluator."):
                 payload = json.loads(prompt.split("\n\n", 1)[1])
                 output_path.write_text(
@@ -192,12 +235,29 @@ class HandoffEvaluationIsolationTests(unittest.TestCase):
                 set(self.criteria["cases"]),
                 set(evidence["execution_prompts"]),
             )
-            for case_id in self.criteria["cases"]:
+            for index, case_id in enumerate(sorted(self.criteria["cases"])):
                 with self.subTest(case_id=case_id):
+                    case_evidence = evidence["cases"][case_id]
+                    self.assertEqual(
+                        evidence["execution_prompts"][case_id],
+                        received_prompts[index * 2],
+                    )
+                    self.assertEqual(
+                        case_evidence["evaluator_prompt"],
+                        received_prompts[index * 2 + 1],
+                    )
+                    self.assertEqual(
+                        "-",
+                        case_evidence["execution_command"][-1],
+                    )
+                    self.assertEqual(
+                        "-",
+                        case_evidence["evaluator_command"][-1],
+                    )
                     self.assertTrue(
                         (
                             output_directory
-                            / evidence["cases"][case_id]["artifacts"]["response"]
+                            / case_evidence["artifacts"]["response"]
                         ).is_file()
                     )
 
