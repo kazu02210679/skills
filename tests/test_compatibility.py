@@ -11,6 +11,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CUSTOM_SKILLS = {
     "complexity-aware-execution",
     "handoff",
+    "open-pull-request",
     "writing-style",
 }
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Open Pull Request"
+  short_description: "Publish a verified branch as a pull request"
+  default_prompt: "Use $open-pull-request to publish this verified branch and open a pull request."

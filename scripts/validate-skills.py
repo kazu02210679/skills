@@ -22,6 +22,7 @@ MANIFEST_PATTERN = re.compile(
 CUSTOM_SKILLS = {
     "complexity-aware-execution",
     "handoff",
+    "open-pull-request",
     "writing-style",
 }
 FRONTMATTER_KEYS = {"name", "description"}
@@ -433,8 +434,8 @@ def validate_repository(repository_root: Path) -> list[str]:
 
     skill_names = {path.name for path in skill_directories}
     pm_skill_names = skill_names - CUSTOM_SKILLS
-    if len(skill_names) != 71:
-        errors.append(f"expected 71 skills, found {len(skill_names)}")
+    if len(skill_names) != 72:
+        errors.append(f"expected 72 skills, found {len(skill_names)}")
     if not CUSTOM_SKILLS <= skill_names:
         errors.append(
             f"missing custom Skills: {sorted(CUSTOM_SKILLS - skill_names)}"
@@ -448,7 +449,7 @@ def validate_repository(repository_root: Path) -> list[str]:
     except (OSError, UnicodeDecodeError) as exc:
         errors.append(f"README catalog count cannot be verified: {exc}")
     else:
-        if "次の71個" not in readme or "68 Skill" not in readme:
+        if "次の72個" not in readme or "68 Skill" not in readme:
             errors.append(
                 "README catalog count must state 71 total and 68 PM Skills"
             )
