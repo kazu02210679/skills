@@ -50,7 +50,18 @@ def _display_ref(reference: str) -> str:
     return reference
 
 
-def _resolve_base(repository: Path, base: str | None, head_ref: str) -> tuple[str, str, str]:
+def _is_dirty(result: subprocess.CompletedProcess[str]) -> bool:
+    """Report dirtiness only when git actually answered.
+
+    `git diff --quiet` exits 1 for "differences exist" and 128 when it could
+    not run at all. Treating every non-zero code as dirty makes a directory
+    that is not a repository look like one with uncommitted work.
+    """
+
+    return result.returncode == 1
+
+
+def _resolve_base(repository: Path, base: str | None) -> tuple[str, str, str]:
     if base is not None:
         return base, base, "user"
 
@@ -85,8 +96,7 @@ def _resolve_base(repository: Path, base: str | None, head_ref: str) -> tuple[st
         if result.returncode == 0:
             return candidate, candidate, "main-or-master"
 
-    fallback = head_ref if head_ref in {"main", "master"} else "main"
-    return fallback, fallback, "main-or-master"
+    return "", "", "unresolved"
 
 
 def _repository_label(repository: Path) -> str:
@@ -193,15 +203,16 @@ def inspect(repository: Path, base: str | None = None) -> dict[str, Any]:
     `base` overrides base detection. When it is None the base is resolved in
     this order and `baseResolution` records which rule matched: the branch
     upstream, `refs/remotes/origin/HEAD`, then a local `main` or `master`.
+    When no rule matches, `baseResolution` is `unresolved` and `baseRef` and
+    `baseSha` are empty — never a guessed branch name, because every field
+    derived from a fabricated base is silently wrong.
     `baseProvisional` is always True here because no remote is contacted.
     """
 
     repository = Path(repository).resolve()
     head_ref = _git_output(repository, "symbolic-ref", "--quiet", "--short", "HEAD")
     head_sha = _resolve(repository, "HEAD")
-    base_ref, base_revision, base_resolution = _resolve_base(
-        repository, base, head_ref
-    )
+    base_ref, base_revision, base_resolution = _resolve_base(repository, base)
     base_sha = _resolve(repository, base_revision)
     merge_base_sha = _git_output(
         repository, "merge-base", base_revision, "HEAD"
@@ -238,9 +249,9 @@ def inspect(repository: Path, base: str | None = None) -> dict[str, Any]:
         "baseResolution": base_resolution,
         "baseProvisional": True,
         "mergeBaseSha": merge_base_sha,
-        "isDefaultBranch": head_ref == base_ref,
-        "stagedDirty": staged_result.returncode != 0,
-        "trackedDirty": tracked_result.returncode != 0,
+        "isDefaultBranch": bool(head_ref) and head_ref == base_ref,
+        "stagedDirty": _is_dirty(staged_result),
+        "trackedDirty": _is_dirty(tracked_result),
         "untrackedLocalEvidence": untracked_local_evidence,
         "untrackedOther": untracked_other,
         "commitsAhead": commits_ahead,
