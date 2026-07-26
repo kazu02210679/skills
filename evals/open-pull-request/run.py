@@ -343,7 +343,8 @@ if tool == "gh" and arguments[:2] == ["repo", "view"]:
             {
                 "defaultBranchRef": {
                     "name": state.get("defaultBranch", "main")
-                }
+                },
+                "viewerPermission": state.get("viewerPermission", "WRITE"),
             },
             ensure_ascii=False,
         )

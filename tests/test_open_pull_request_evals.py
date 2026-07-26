@@ -556,6 +556,33 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("github.com", result.stdout)
 
+    def test_gh_shim_models_write_permission_for_publishable_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shim_directory = self.runner.write_command_shims(
+                root / "shims",
+                {"defaultBranch": "main", "viewerPermission": "WRITE"},
+            )
+            environment = os.environ.copy()
+            environment["PATH"] = (
+                str(shim_directory) + os.pathsep + environment["PATH"]
+            )
+
+            result = subprocess.run(
+                "gh repo view --json defaultBranchRef,viewerPermission",
+                env=environment,
+                shell=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("WRITE", json.loads(result.stdout)["viewerPermission"])
+
     def test_git_shim_models_public_remote_urls_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
