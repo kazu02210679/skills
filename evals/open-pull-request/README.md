@@ -28,3 +28,10 @@ invocation in that case's `calls.log`. Mutating remote commands are refused
 unless the fixture explicitly allows them. The no-mutation case is decided
 from `calls.log`, not from what the candidate claims in its response. The log
 is also included in the evidence manifest.
+
+Fixture-only remote state stays local. `remote.baseAhead` advances the bare
+default branch after the local tracking ref was recorded, and `remote.fork`
+creates separate origin and upstream repositories. `githubState.remoteUrls`
+supplies the public URLs returned by `git remote get-url` without enabling
+network access. A string-valued `reviewData` entry is written verbatim so a
+case can model malformed JSON.

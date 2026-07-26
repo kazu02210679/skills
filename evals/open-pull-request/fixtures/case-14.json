@@ -1,0 +1,19 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/batch",
+  "commits": [
+    {"message": "Add batch runner", "files": {"src/batch.py": "def run():\n    pass\n"}},
+    {"message": "Handle retries", "files": {"src/batch.py": "def run(retries=3):\n    pass\n"}},
+    {"message": "Test retries", "files": {"tests/test_batch.py": "def test_retries():\n    assert True\n"}}
+  ],
+  "remote": {
+    "headSha": "ancestor:2"
+  },
+  "githubState": {
+    "defaultBranch": "main",
+    "pullRequests": [],
+    "remoteUrls": {
+      "origin": "https://github.com/example/project.git"
+    }
+  }
+}

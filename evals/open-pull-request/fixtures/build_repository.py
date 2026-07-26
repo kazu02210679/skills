@@ -209,12 +209,53 @@ def _publish_remote(
         step="configure upstream tracking for the head branch",
     )
 
+    base_ahead = specification.get("baseAhead", 0)
+    if not isinstance(base_ahead, int) or base_ahead < 0:
+        raise ValueError("remote baseAhead must be a non-negative integer")
+    remote_base_sha = base_sha
+    base_tree = _run_git(
+        ["rev-parse", f"{base_sha}^{{tree}}"],
+        cwd=repository,
+        step="resolve base tree for remote advances",
+    ).stdout.strip()
+    for index in range(1, base_ahead + 1):
+        remote_base_sha = _run_git(
+            [
+                "commit-tree",
+                base_tree,
+                "-p",
+                remote_base_sha,
+                "-m",
+                f"Remote base advance {index}",
+            ],
+            cwd=repository,
+            step=f"create remote base advance {index}",
+            commit_number=commit_number + index,
+        ).stdout.strip()
+    if base_ahead:
+        _run_git(
+            [
+                "push",
+                str(primary),
+                f"{remote_base_sha}:refs/heads/{default_branch}",
+            ],
+            cwd=repository,
+            step="advance remote base without refreshing local tracking",
+        )
+
 
 def build_repository(
     specification: dict[str, Any],
     destination: Path,
 ) -> Path:
     """Create a repository at ``destination`` from a declarative specification.
+
+    ``remote.headSha`` accepts ``equal``, ``ancestor:N``, or ``diverged``.
+    ``remote.fork`` creates distinct ``origin`` and ``upstream`` bare remotes,
+    and ``remote.baseAhead`` advances the remote default branch without
+    refreshing the local tracking ref. Mapping-valued ``reviewData`` entries
+    are serialized as JSON; string values are written verbatim for malformed
+    artifact cases.
 
     The sibling ``githubState`` key is intentionally ignored. The evaluation
     runner passes that state to the command shims instead.
@@ -290,9 +331,11 @@ def build_repository(
             / "review-data.json"
         )
         review_path.parent.mkdir(parents=True, exist_ok=True)
-        review_path.write_text(
-            json.dumps(review_data, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
+        content = (
+            review_data
+            if isinstance(review_data, str)
+            else json.dumps(review_data, ensure_ascii=False, indent=2) + "\n"
         )
+        review_path.write_text(content, encoding="utf-8")
 
     return destination

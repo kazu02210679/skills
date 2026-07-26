@@ -1,0 +1,23 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/cache",
+  "commits": [
+    {"message": "Add cache", "files": {"src/cache.py": "CACHE = {}\n"}},
+    {"message": "Handle expiry", "files": {"src/cache.py": "CACHE = {}\nTTL = 60\n"}},
+    {"message": "Test expiry", "files": {"tests/test_cache.py": "def test_expiry():\n    assert True\n"}}
+  ],
+  "reviewData": {
+    "cache-review": {
+      "meta": {
+        "base": "main",
+        "head": "HEAD~2"
+      },
+      "result": "approved",
+      "findings": [],
+      "coverage": {"gaps": []},
+      "verification": [
+        {"name": "unit tests", "status": "passed", "source": "review"}
+      ]
+    }
+  }
+}

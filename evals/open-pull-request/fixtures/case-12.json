@@ -1,0 +1,19 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/fork-work",
+  "commits": [
+    {"message": "Add fork contribution", "files": {"src/contribution.py": "READY = True\n"}}
+  ],
+  "remote": {
+    "headSha": "equal",
+    "fork": true
+  },
+  "githubState": {
+    "defaultBranch": "main",
+    "pullRequests": [],
+    "remoteUrls": {
+      "origin": "https://github.com/contributor/project.git",
+      "upstream": "https://github.com/upstream/project.git"
+    }
+  }
+}

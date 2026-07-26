@@ -1,0 +1,21 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/parser",
+  "commits": [
+    {"message": "Add parser", "files": {"src/parser.py": "def parse(text):\n    return text\n"}}
+  ],
+  "reviewData": {
+    "parser-review": {
+      "meta": {
+        "base": "main",
+        "head": "HEAD"
+      },
+      "result": "approved",
+      "findings": [],
+      "coverage": {"gaps": []},
+      "verification": [
+        {"name": "unit tests", "status": "failed", "source": "review"}
+      ]
+    }
+  }
+}

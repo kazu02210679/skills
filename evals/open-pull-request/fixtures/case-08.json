@@ -1,0 +1,18 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/audit",
+  "commits": [
+    {"message": "Add audit log", "files": {"src/audit.py": "def record(event):\n    pass\n"}}
+  ],
+  "remote": {
+    "headSha": "equal",
+    "baseAhead": 1
+  },
+  "githubState": {
+    "defaultBranch": "main",
+    "pullRequests": [],
+    "remoteUrls": {
+      "origin": "https://github.com/example/project.git"
+    }
+  }
+}

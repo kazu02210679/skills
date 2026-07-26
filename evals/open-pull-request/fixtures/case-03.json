@@ -1,0 +1,15 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/search",
+  "commits": [
+    {"message": "Add search", "files": {"src/search.py": "def search(query):\n    return []\n"}},
+    {"message": "Test search", "files": {"tests/test_search.py": "def test_search():\n    assert True\n"}}
+  ],
+  "githubState": {
+    "defaultBranch": "main",
+    "pullRequests": [],
+    "remoteUrls": {
+      "origin": "https://github.com/example/project.git"
+    }
+  }
+}

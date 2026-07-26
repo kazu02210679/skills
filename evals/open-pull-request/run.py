@@ -163,8 +163,21 @@ if (is_git_push or is_gh_mutation) and not state.get("allowMutations", False):
     )
     raise SystemExit(97)
 
+if (
+    tool == "git"
+    and arguments[:2] == ["remote", "get-url"]
+    and len(arguments) >= 3
+):
+    modelled_url = state.get("remoteUrls", {}).get(arguments[2])
+    if modelled_url:
+        print(modelled_url)
+        raise SystemExit(0)
+
 if tool == "gh" and arguments[:2] in (["pr", "list"], ["pr", "view"]):
     print(json.dumps(state.get("pullRequests", []), ensure_ascii=False))
+    raise SystemExit(0)
+if tool == "gh" and arguments[:2] == ["auth", "status"]:
+    print("github.com: authenticated as open-pull-request-eval")
     raise SystemExit(0)
 if tool == "gh" and arguments[:2] == ["repo", "view"]:
     print(

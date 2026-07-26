@@ -1,0 +1,12 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/import-csv",
+  "commits": [
+    {"message": "Add CSV reader", "files": {"src/importer.py": "def read():\n    return []\n"}},
+    {"message": "Add delimiter handling", "files": {"src/importer.py": "def read(delimiter=','):\n    return []\n"}},
+    {"message": "Add tests", "files": {"tests/test_importer.py": "def test_read():\n    assert True\n"}}
+  ],
+  "modified": {
+    "src/importer.py": "def read(delimiter=',', strict=False):\n    return []\n"
+  }
+}

@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 EVAL_ROOT = REPOSITORY_ROOT / "evals" / "open-pull-request"
@@ -45,6 +47,40 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
 
     def build(self, root: Path, specification: dict) -> Path:
         return self.builder.build_repository(specification, root / "repo")
+
+    def test_every_case_has_an_input_and_a_fixture(self) -> None:
+        criteria = yaml.safe_load(
+            (EVAL_ROOT / "criteria.yaml").read_text(encoding="utf-8")
+        )
+        case_ids = set(criteria["cases"])
+        self.assertEqual(14, len(case_ids))
+        inputs = {path.stem for path in (EVAL_ROOT / "inputs").glob("*.md")}
+        fixtures = {
+            path.stem for path in (EVAL_ROOT / "fixtures").glob("case-*.json")
+        }
+        self.assertEqual(case_ids, inputs)
+        self.assertEqual(case_ids, fixtures)
+
+    def test_inputs_never_contain_pass_conditions(self) -> None:
+        for path in (EVAL_ROOT / "inputs").glob("*.md"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("pass_conditions", text)
+            self.assertNotIn("Pass conditions", text)
+            self.assertNotIn("criteria.yaml", text)
+
+    def test_every_declared_fixture_builds(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for path in sorted((EVAL_ROOT / "fixtures").glob("case-*.json")):
+                specification = json.loads(path.read_text(encoding="utf-8"))
+                repository = self.builder.build_repository(
+                    specification,
+                    root / path.stem / "repo",
+                )
+                self.assertTrue(
+                    (repository / ".git").is_dir(),
+                    path.name,
+                )
 
     def test_builder_creates_head_branch_one_commit_ahead_of_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -185,6 +221,74 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 json.loads(review_path.read_text(encoding="utf-8")),
             )
 
+    def test_review_data_can_be_written_verbatim_for_malformed_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.build(
+                Path(directory),
+                {
+                    "headBranch": "feature",
+                    "reviewData": {"broken-review": "{ definitely not json"},
+                },
+            )
+            review_path = (
+                repository
+                / "docs"
+                / "reviews"
+                / "broken-review"
+                / "review-data.json"
+            )
+            self.assertEqual(
+                "{ definitely not json",
+                review_path.read_text(encoding="utf-8"),
+            )
+
+    def test_remote_base_can_advance_beyond_local_tracking_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.build(
+                Path(directory),
+                {
+                    "headBranch": "feature",
+                    "commits": [
+                        {"message": "Feature", "files": {"feature.txt": "1\n"}}
+                    ],
+                    "remote": {"headSha": "equal", "baseAhead": 1},
+                },
+            )
+            local_base = run_git(repository, "rev-parse", "origin/main")
+            remote_base = run_git(
+                repository,
+                "ls-remote",
+                "--refs",
+                "origin",
+                "refs/heads/main",
+            )
+
+            self.assertEqual(0, local_base.returncode, local_base.stderr)
+            self.assertEqual(0, remote_base.returncode, remote_base.stderr)
+            self.assertNotEqual(
+                local_base.stdout.strip(),
+                remote_base.stdout.split()[0],
+            )
+
+    def test_fork_fixture_has_distinct_origin_and_upstream_remotes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.build(
+                Path(directory),
+                {
+                    "headBranch": "feature",
+                    "commits": [
+                        {"message": "Feature", "files": {"feature.txt": "1\n"}}
+                    ],
+                    "remote": {"headSha": "equal", "fork": True},
+                },
+            )
+            origin = run_git(repository, "remote", "get-url", "origin")
+            upstream = run_git(repository, "remote", "get-url", "upstream")
+
+            self.assertEqual(0, origin.returncode, origin.stderr)
+            self.assertEqual(0, upstream.returncode, upstream.stderr)
+            self.assertNotEqual(origin.stdout.strip(), upstream.stdout.strip())
+
     def test_commit_trailers_appear_in_git_log(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = self.build(
@@ -324,6 +428,70 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
 
             calls = (shim_directory / "calls.log").read_text(encoding="utf-8")
             self.assertIn('"gh", "pr", "merge"', calls)
+
+    def test_gh_shim_models_read_only_auth_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shim_directory = self.runner.write_command_shims(root / "shims", {})
+            environment = os.environ.copy()
+            environment["PATH"] = (
+                str(shim_directory) + os.pathsep + environment["PATH"]
+            )
+
+            result = subprocess.run(
+                "gh auth status",
+                env=environment,
+                shell=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("github.com", result.stdout)
+
+    def test_git_shim_models_public_remote_urls_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = self.build(
+                root,
+                {"headBranch": "feature", "remote": {"headSha": "equal"}},
+            )
+            shim_directory = self.runner.write_command_shims(
+                root / "shims",
+                {
+                    "remoteUrls": {
+                        "origin": "https://github.com/contributor/project.git",
+                        "upstream": "https://github.com/upstream/project.git",
+                    }
+                },
+            )
+            environment = os.environ.copy()
+            environment["PATH"] = (
+                str(shim_directory) + os.pathsep + environment["PATH"]
+            )
+
+            result = subprocess.run(
+                "git remote get-url origin",
+                cwd=repository,
+                env=environment,
+                shell=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                "https://github.com/contributor/project.git",
+                result.stdout.strip(),
+            )
 
     def test_shim_intercepts_git_through_path_and_logs_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
