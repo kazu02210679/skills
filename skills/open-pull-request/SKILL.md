@@ -90,9 +90,11 @@ carry that list into the final approval.
 Never commit, stage, or stash anything to satisfy a condition above.
 
 Treat `baseRef` as provisional while `baseProvisional` is true; `baseResolution`
-tells you which rule produced it — an explicit user choice, the branch upstream,
-`refs/remotes/origin/HEAD`, or a local `main`/`master`. When no rule matched it
-is `unresolved` and `baseRef` and `baseSha` are empty. Settle the base in step 5
+tells you which rule produced it — an explicit user choice, a branch upstream
+that differs from the current branch, `refs/remotes/origin/HEAD`, or a local
+`main`/`master`. A same-named tracking branch such as `origin/feature` is the
+push destination, not the pull request base. When no rule matched it is
+`unresolved` and `baseRef` and `baseSha` are empty. Settle the base in step 5
 before asking for approval, and stop if it cannot be settled to exactly one
 branch. Guessing the base silently changes what the pull request proposes.
 

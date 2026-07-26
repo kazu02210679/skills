@@ -70,6 +70,31 @@ class InspectContextTests(unittest.TestCase):
                 git(repository, "rev-parse", "HEAD"), context["headSha"]
             )
 
+    def test_tracking_feature_branch_does_not_become_the_pull_request_base(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            make_repository(repository)
+            remote = root / "remote.git"
+            git(root, "init", "--bare", "--initial-branch", "main", str(remote))
+            git(repository, "remote", "add", "origin", str(remote))
+            git(repository, "push", "--quiet", "origin", "main")
+            git(repository, "remote", "set-head", "origin", "main")
+            git(repository, "checkout", "--quiet", "-b", "feature")
+            (repository / "feature.txt").write_text("work\n", encoding="utf-8")
+            git(repository, "add", "feature.txt")
+            git(repository, "commit", "--quiet", "-m", "Add feature")
+            git(repository, "push", "--quiet", "-u", "origin", "feature")
+
+            context = self.module.inspect(repository)
+
+            self.assertEqual("main", context["baseRef"])
+            self.assertEqual("origin-head", context["baseResolution"])
+            self.assertEqual(1, context["commitsAhead"])
+
     def test_separates_known_evidence_from_other_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = make_repository(Path(directory))

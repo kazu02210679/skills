@@ -65,6 +65,13 @@ def _resolve_base(repository: Path, base: str | None) -> tuple[str, str, str]:
     if base is not None:
         return base, base, "user"
 
+    head_ref = _git_output(
+        repository,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
+    )
     upstream = _git_output(
         repository,
         "rev-parse",
@@ -72,7 +79,7 @@ def _resolve_base(repository: Path, base: str | None) -> tuple[str, str, str]:
         "--symbolic-full-name",
         "@{upstream}",
     )
-    if upstream:
+    if upstream and _display_ref(upstream) != head_ref:
         return _display_ref(upstream), upstream, "upstream"
 
     origin_head = _git_output(
@@ -201,8 +208,10 @@ def inspect(repository: Path, base: str | None = None) -> dict[str, Any]:
     """Return the publish context contract for `repository`.
 
     `base` overrides base detection. When it is None the base is resolved in
-    this order and `baseResolution` records which rule matched: the branch
-    upstream, `refs/remotes/origin/HEAD`, then a local `main` or `master`.
+    this order and `baseResolution` records which rule matched: a branch
+    upstream that differs from the current branch, `refs/remotes/origin/HEAD`,
+    then a local `main` or `master`. A same-named tracking branch such as
+    `origin/feature` is the publish destination, not the pull request base.
     When no rule matches, `baseResolution` is `unresolved` and `baseRef` and
     `baseSha` are empty — never a guessed branch name, because every field
     derived from a fabricated base is silently wrong.
