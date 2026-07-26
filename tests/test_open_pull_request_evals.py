@@ -70,6 +70,14 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             self.assertNotIn("Pass conditions", text)
             self.assertNotIn("criteria.yaml", text)
 
+    def test_skill_forbids_dry_run_push_before_approval(self) -> None:
+        skill = (
+            REPOSITORY_ROOT / "skills" / "open-pull-request" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("`git push --dry-run` is still `git push`", skill)
+        self.assertIn("Never use it before approval", skill)
+
     def test_every_declared_fixture_builds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

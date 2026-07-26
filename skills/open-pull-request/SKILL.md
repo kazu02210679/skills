@@ -196,6 +196,13 @@ Stop when you may not push to the target. Do not create a fork to work around
 it — choosing where someone's code gets published is theirs to decide, not a
 detail to route around. Report what access is missing.
 
+`git push --dry-run` is still `git push`: it contacts the receive endpoint and
+tests a mutation path. Never use it before approval. Establish permission from
+read-only evidence such as `gh auth status`, `gh repo view --json
+viewerPermission`, and the configured remote or fork relationship. If those
+reads cannot establish whether the selected target is writable, stop and report
+that permission is unresolved.
+
 ### What the remote head SHA means
 
 A remote SHA that differs from local `HEAD` is the ordinary state of a branch
