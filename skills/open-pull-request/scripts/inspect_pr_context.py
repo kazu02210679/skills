@@ -214,8 +214,10 @@ def inspect(repository: Path, base: str | None = None) -> dict[str, Any]:
     head_sha = _resolve(repository, "HEAD")
     base_ref, base_revision, base_resolution = _resolve_base(repository, base)
     base_sha = _resolve(repository, base_revision)
-    merge_base_sha = _git_output(
-        repository, "merge-base", base_revision, "HEAD"
+    merge_base_sha = (
+        _git_output(repository, "merge-base", base_revision, "HEAD")
+        if base_revision
+        else ""
     )
 
     staged_result = _git(repository, "diff", "--cached", "--quiet")
@@ -232,13 +234,18 @@ def inspect(repository: Path, base: str | None = None) -> dict[str, Any]:
         if not path.startswith(KNOWN_EVIDENCE_PREFIXES)
     ]
 
-    commits_ahead_output = _git_output(
-        repository, "rev-list", "--count", f"{base_revision}..HEAD"
-    )
-    try:
-        commits_ahead = int(commits_ahead_output)
-    except ValueError:
-        commits_ahead = 0
+    # Guard the empty base explicitly: `git rev-list --count ..HEAD` succeeds,
+    # because git defaults an omitted range side to HEAD, so an unresolved base
+    # would silently produce a computed HEAD..HEAD rather than "not measured".
+    commits_ahead = 0
+    if base_revision:
+        commits_ahead_output = _git_output(
+            repository, "rev-list", "--count", f"{base_revision}..HEAD"
+        )
+        try:
+            commits_ahead = int(commits_ahead_output)
+        except ValueError:
+            commits_ahead = 0
 
     return {
         "repository": _repository_label(repository),

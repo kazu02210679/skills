@@ -102,7 +102,13 @@ class InspectContextTests(unittest.TestCase):
             self.assertTrue(context["baseProvisional"])
             self.assertIn(
                 context["baseResolution"],
-                {"user", "upstream", "origin-head", "main-or-master"},
+                {
+                    "user",
+                    "upstream",
+                    "origin-head",
+                    "main-or-master",
+                    "unresolved",
+                },
             )
 
     def test_collects_codex_plan_ids_from_trailers(self) -> None:
@@ -212,6 +218,8 @@ class InspectContextTests(unittest.TestCase):
             self.assertEqual("", context["baseSha"])
             self.assertEqual("", context["mergeBaseSha"])
             self.assertFalse(context["isDefaultBranch"])
+            self.assertEqual(0, context["commitsAhead"])
+            self.assertEqual([], context["codexPlanIds"])
 
     def test_explicit_base_that_does_not_resolve_reports_empty_shas(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -227,6 +235,7 @@ class InspectContextTests(unittest.TestCase):
             self.assertFalse(context["stagedDirty"])
             self.assertFalse(context["trackedDirty"])
             self.assertEqual("", context["headSha"])
+            self.assertFalse(context["isDefaultBranch"])
 
     def test_resolves_base_from_local_main_without_remote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -234,6 +243,33 @@ class InspectContextTests(unittest.TestCase):
             git(repository, "checkout", "--quiet", "-b", "feature")
             context = self.module.inspect(repository)
             self.assertEqual("main-or-master", context["baseResolution"])
+            self.assertEqual("main", context["baseRef"])
+
+    def test_resolves_base_from_origin_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin_path = root / "origin"
+            origin_path.mkdir()
+            origin = make_repository(origin_path)
+            repository = root / "clone"
+            git(root, "clone", "--quiet", str(origin), str(repository))
+            git(repository, "checkout", "--quiet", "-b", "feature")
+            context = self.module.inspect(repository)
+            self.assertEqual("origin-head", context["baseResolution"])
+            self.assertEqual("main", context["baseRef"])
+
+    def test_resolves_base_from_branch_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin_path = root / "origin"
+            origin_path.mkdir()
+            origin = make_repository(origin_path)
+            repository = root / "clone"
+            git(root, "clone", "--quiet", str(origin), str(repository))
+            git(repository, "checkout", "--quiet", "-b", "feature")
+            git(repository, "branch", "--set-upstream-to", "origin/main")
+            context = self.module.inspect(repository)
+            self.assertEqual("upstream", context["baseResolution"])
             self.assertEqual("main", context["baseRef"])
 
     def test_returns_exactly_the_contract_keys(self) -> None:

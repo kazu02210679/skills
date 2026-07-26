@@ -73,6 +73,7 @@ Stop, report the reason, and change nothing when any of these hold:
 |---|---|
 | `headSha` is empty | The repository could not be read, or has no commits. There is no state to publish from |
 | `baseResolution` is `unresolved` | No rule identified a base. Picking one yourself changes what the pull request proposes |
+| `baseSha` is empty | The base does not resolve to a commit — including a base the user named that does not exist. Nothing can be measured against it |
 | `isDefaultBranch` | Publishing means proposing a change, not committing to the trunk |
 | `stagedDirty` | Staged work is neither in the branch nor excluded from it |
 | `trackedDirty` | The diff you would describe is not the diff you would push |
