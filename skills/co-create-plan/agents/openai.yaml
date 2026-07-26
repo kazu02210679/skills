@@ -1,0 +1,4 @@
+interface:
+  display_name: "Co-create Plan"
+  short_description: "Claude Code ‚Æ Codex ‚ª‘Î“™‚É‹c˜_‚µ‚ÄÀ‘•Œv‰æ‚ğ‡ˆÓ"
+  default_prompt: "Use $co-create-plan to have Claude Code and Codex jointly produce an approved implementation plan."
