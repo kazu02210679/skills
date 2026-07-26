@@ -78,6 +78,17 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         self.assertIn("`git push --dry-run` is still `git push`", skill)
         self.assertIn("Never use it before approval", skill)
 
+    def test_skill_requires_reporting_refused_steps_after_recovery(self) -> None:
+        skill = (
+            REPOSITORY_ROOT / "skills" / "open-pull-request" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "Report every failed or policy-refused workflow step",
+            skill,
+        )
+        self.assertIn("even when a later fallback succeeds", skill)
+
     def test_every_declared_fixture_builds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
