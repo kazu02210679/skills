@@ -222,6 +222,70 @@ raise SystemExit(completed.returncode)
     return directory
 
 
+def shimmed_path(shim_directory: Path, original_path: str) -> str:
+    """Put the shims first and remove every directory holding a real git or gh.
+
+    Prepending alone is not enough on Windows. `CreateProcess` appends `.exe`
+    to a bare name, so a caller that does not go through a shell — including
+    `subprocess.run(["git", ...])`, which the Skill's own inspector uses —
+    walks straight past the extension-less shim and finds the real `git.exe`
+    further down PATH. The mutation then succeeds and never reaches calls.log,
+    which is precisely the blind spot this harness exists to rule out.
+
+    Dropping those directories makes a bypass fail loudly instead of silently
+    succeeding. Forwarding still works because the shim resolved the real
+    executables by absolute path before PATH was touched.
+    """
+
+    kept: list[str] = []
+    for entry in original_path.split(os.pathsep):
+        if not entry:
+            continue
+        directory = Path(entry)
+        if any(
+            (directory / name).exists()
+            for name in ("git", "git.exe", "gh", "gh.exe")
+        ):
+            continue
+        kept.append(entry)
+    return os.pathsep.join([str(shim_directory), *kept])
+
+
+def assert_shims_intercept(
+    shim_directory: Path,
+    environment: dict[str, str],
+) -> None:
+    """Fail the run unless both spawn styles actually reach the shim.
+
+    A shim that stops intercepting does not announce itself — the evaluation
+    keeps running and every case silently reports "no command was attempted".
+    Prove interception before trusting a single case, through a shell and
+    without one, because the two resolve executables by different rules.
+    """
+
+    log = shim_directory / "calls.log"
+    before = log.read_text(encoding="utf-8") if log.exists() else ""
+    for shell in (True, False):
+        command = "git --version" if shell else ["git", "--version"]
+        subprocess.run(
+            command,
+            shell=shell,
+            env=environment,
+            cwd=shim_directory,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    after = log.read_text(encoding="utf-8") if log.exists() else ""
+    recorded = after[len(before) :].count('"git", "--version"')
+    if recorded < 2:
+        raise RuntimeError(
+            "Command shims did not intercept both spawn styles "
+            f"({recorded}/2 reached {log}). Refusing to run: an unintercepted "
+            "candidate can mutate the remote without leaving a trace."
+        )
+
+
 def _run(
     command: list[str],
     *,
@@ -490,11 +554,11 @@ def run_evaluation(args: argparse.Namespace) -> int:
                 fixture_specification.get("githubState", {}),
             )
             candidate_environment = os.environ.copy()
-            candidate_environment["PATH"] = (
-                str(shim_directory)
-                + os.pathsep
-                + candidate_environment.get("PATH", "")
+            candidate_environment["PATH"] = shimmed_path(
+                shim_directory,
+                candidate_environment.get("PATH", ""),
             )
+            assert_shims_intercept(shim_directory, candidate_environment)
 
             execution_prompt = prompts[case_id]
             (case_output / "execution-prompt.txt").write_text(

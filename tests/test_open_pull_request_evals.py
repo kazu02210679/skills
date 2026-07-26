@@ -227,6 +227,48 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                     f"{wrapper.name} must stay ASCII; found non-ASCII bytes "
                     f"{offending[:8]}",
                 )
+                # The ASCII check alone does not hold on CI, where every path
+                # happens to be ASCII already: reinstating an absolute
+                # interpreter path would pass there and fail only on a machine
+                # whose home directory is not Latin. Pin the mechanism instead
+                # — %~dp0 is what keeps the path out of the file at all.
+                text = content.decode("ascii")
+                self.assertIn("%~dp0command_shim.py", text)
+                self.assertNotIn(":\\", text)
+                self.assertNotRegex(text, r'"\s*/')
+
+    def test_shimmed_path_drops_directories_holding_a_real_git(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real = root / "realbin"
+            real.mkdir()
+            (real / ("git.exe" if os.name == "nt" else "git")).write_text(
+                "", encoding="utf-8"
+            )
+            harmless = root / "otherbin"
+            harmless.mkdir()
+            shims = root / "shims"
+            shims.mkdir()
+
+            result = self.runner.shimmed_path(
+                shims, os.pathsep.join([str(real), str(harmless)])
+            )
+            entries = result.split(os.pathsep)
+
+            self.assertEqual(str(shims), entries[0])
+            self.assertNotIn(str(real), entries)
+            self.assertIn(str(harmless), entries)
+
+    def test_intercept_assertion_rejects_a_bypassable_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shim_directory = self.runner.write_command_shims(
+                Path(directory) / "shims", {}
+            )
+            environment = os.environ.copy()
+            # The shim directory is absent from PATH, so nothing can intercept.
+            with self.assertRaises(RuntimeError) as raised:
+                self.runner.assert_shims_intercept(shim_directory, environment)
+            self.assertIn("did not intercept", str(raised.exception))
 
     def test_shim_intercepts_git_through_path_and_logs_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
