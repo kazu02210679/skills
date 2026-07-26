@@ -110,6 +110,131 @@ def build_evidence_manifest(
         "cases": {},
     }
 
+
+def _write_windows_executable_shims(directory: Path) -> None:
+    """Compile `.exe` launchers so CreateProcess cannot bypass the shims."""
+
+    windows = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    compiler_candidates = (
+        windows
+        / "Microsoft.NET"
+        / framework
+        / "v4.0.30319"
+        / "csc.exe"
+        for framework in ("Framework64", "Framework")
+    )
+    compiler = next(
+        (candidate for candidate in compiler_candidates if candidate.is_file()),
+        None,
+    )
+    if compiler is None:
+        raise RuntimeError(
+            "A Windows C# compiler is required to build no-shell command "
+            "shims. Refusing to run an evaluation that CreateProcess can "
+            "bypass."
+        )
+
+    source = r'''
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+
+public static class CommandShimLauncher
+{
+    private static string Quote(string value)
+    {
+        if (value.Length == 0)
+        {
+            return "\"\"";
+        }
+        if (value.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0)
+        {
+            return value;
+        }
+
+        StringBuilder quoted = new StringBuilder("\"");
+        int backslashes = 0;
+        foreach (char character in value)
+        {
+            if (character == '\\')
+            {
+                backslashes += 1;
+            }
+            else if (character == '"')
+            {
+                quoted.Append('\\', backslashes * 2 + 1);
+                quoted.Append('"');
+                backslashes = 0;
+            }
+            else
+            {
+                quoted.Append('\\', backslashes);
+                quoted.Append(character);
+                backslashes = 0;
+            }
+        }
+        quoted.Append('\\', backslashes * 2);
+        quoted.Append('"');
+        return quoted.ToString();
+    }
+
+    public static int Main(string[] arguments)
+    {
+        string executable = Environment.GetCommandLineArgs()[0];
+        string tool = Path.GetFileNameWithoutExtension(executable).ToLowerInvariant();
+        string script = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "command_shim.py"
+        );
+
+        StringBuilder childArguments = new StringBuilder(Quote(script));
+        childArguments.Append(' ');
+        childArguments.Append(Quote(tool));
+        foreach (string argument in arguments)
+        {
+            childArguments.Append(' ');
+            childArguments.Append(Quote(argument));
+        }
+
+        ProcessStartInfo start = new ProcessStartInfo(
+            "python.exe",
+            childArguments.ToString()
+        );
+        start.UseShellExecute = false;
+        using (Process child = Process.Start(start))
+        {
+            child.WaitForExit();
+            return child.ExitCode;
+        }
+    }
+}
+'''
+    source_path = directory / "command_shim_launcher.cs"
+    launcher_path = directory / "command_shim_launcher.exe"
+    source_path.write_text(source, encoding="utf-8", newline="\n")
+    compilation = subprocess.run(
+        [
+            str(compiler),
+            "/nologo",
+            "/target:exe",
+            f"/out:{launcher_path}",
+            str(source_path),
+        ],
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if compilation.returncode != 0 or not launcher_path.is_file():
+        detail = compilation.stderr.strip() or compilation.stdout.strip()
+        raise RuntimeError(f"Unable to compile Windows command shims: {detail}")
+    for tool in ("git", "gh"):
+        shutil.copy2(launcher_path, directory / f"{tool}.exe")
+
+
 def write_command_shims(
     directory: Path,
     github_state: dict[str, Any],
@@ -244,6 +369,8 @@ raise SystemExit(completed.returncode)
             encoding="ascii",
             newline="\r\n",
         )
+    if os.name == "nt":
+        _write_windows_executable_shims(directory)
     (directory / "calls.log").touch()
     return directory
 
@@ -299,18 +426,38 @@ def assert_shims_intercept(
     """
 
     log = shim_directory / "calls.log"
+    probe_directory = shim_directory.parent
     before = log.read_text(encoding="utf-8") if log.exists() else ""
-    for shell in (True, False):
-        command = "git --version" if shell else ["git", "--version"]
-        subprocess.run(
-            command,
-            shell=shell,
-            env=environment,
-            cwd=shim_directory,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+    subprocess.run(
+        "git --version",
+        shell=True,
+        env=environment,
+        cwd=probe_directory,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    # On Windows, CreateProcess resolves a shell=False executable against the
+    # parent process environment rather than the `env` override supplied to
+    # this individual Popen call. The candidate itself is a child launched
+    # with the shimmed environment, so prove the same boundary by launching a
+    # Python child first and making its no-shell call from there.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import subprocess,sys;"
+                "result=subprocess.run(['git','--version'],check=False);"
+                "sys.exit(result.returncode)"
+            ),
+        ],
+        env=environment,
+        cwd=probe_directory,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
     after = log.read_text(encoding="utf-8") if log.exists() else ""
     recorded = after[len(before) :].count('"git", "--version"')
     if recorded < 2:

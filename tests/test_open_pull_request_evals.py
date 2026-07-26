@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -397,6 +399,21 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 self.runner.assert_shims_intercept(shim_directory, environment)
             self.assertIn("did not intercept", str(raised.exception))
 
+    @unittest.skipUnless(os.name == "nt", "Windows-specific no-shell behavior")
+    def test_intercept_assertion_accepts_executable_windows_shims(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shim_directory = self.runner.write_command_shims(
+                Path(directory) / "shims",
+                {},
+            )
+            environment = os.environ.copy()
+            environment["PATH"] = self.runner.shimmed_path(
+                shim_directory,
+                environment["PATH"],
+            )
+
+            self.runner.assert_shims_intercept(shim_directory, environment)
+
     def test_remote_fixture_configures_upstream_tracking(self) -> None:
         # The skill's inspector resolves the base from @{upstream} first and
         # only then from origin/HEAD. Without tracking, every case would
@@ -531,6 +548,46 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 "git --version",
                 env=environment,
                 shell=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            calls = (shim_directory / "calls.log").read_text(encoding="utf-8")
+
+            self.assertEqual(0, intercepted.returncode, intercepted.stderr)
+            self.assertIn('"git", "--version"', calls)
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific no-shell behavior")
+    def test_shim_intercepts_git_without_a_shell_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shim_directory = self.runner.write_command_shims(
+                Path(directory) / "shims",
+                {},
+            )
+            environment = os.environ.copy()
+            environment["PATH"] = self.runner.shimmed_path(
+                shim_directory,
+                environment["PATH"],
+            )
+            self.assertEqual(
+                (shim_directory / "git.exe").resolve(),
+                Path(shutil.which("git", path=environment["PATH"])).resolve(),
+            )
+
+            intercepted = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import subprocess,sys;"
+                        "result=subprocess.run(['git','--version'],check=False);"
+                        "sys.exit(result.returncode)"
+                    ),
+                ],
+                env=environment,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
