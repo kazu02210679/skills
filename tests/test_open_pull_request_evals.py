@@ -600,6 +600,101 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             self.assertEqual(0, intercepted.returncode, intercepted.stderr)
             self.assertIn('"git", "--version"', calls)
 
+    @unittest.skipUnless(os.name == "nt", "Windows-specific no-shell behavior")
+    def test_windows_executable_shim_forwards_git_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = self.build(root, {"headBranch": "feature"})
+            shim_directory = self.runner.write_command_shims(root / "shims", {})
+            environment = os.environ.copy()
+            environment["PATH"] = self.runner.shimmed_path(
+                shim_directory,
+                environment["PATH"],
+            )
+
+            forwarded = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import subprocess,sys;"
+                        "result=subprocess.run("
+                        "['git','branch','--show-current'],"
+                        "text=True,capture_output=True,check=False"
+                        ");"
+                        "sys.stdout.write(result.stdout);"
+                        "sys.stderr.write(result.stderr);"
+                        "sys.exit(result.returncode)"
+                    ),
+                ],
+                cwd=repository,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(0, forwarded.returncode, forwarded.stderr)
+            self.assertEqual("feature", forwarded.stdout.strip())
+            forwarding = [
+                json.loads(line)
+                for line in (shim_directory / "forwarding.log")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            self.assertEqual(0, forwarding[-1]["returncode"])
+            self.assertEqual("feature", forwarding[-1]["stdout"].strip())
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific PowerShell behavior")
+    def test_inspector_reads_repository_through_windows_shims(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = self.build(root, {"headBranch": "feature"})
+            shim_directory = self.runner.write_command_shims(root / "shims", {})
+            environment = os.environ.copy()
+            environment["PATH"] = self.runner.shimmed_path(
+                shim_directory,
+                environment["PATH"],
+            )
+            inspector = (
+                REPOSITORY_ROOT
+                / "skills"
+                / "open-pull-request"
+                / "scripts"
+                / "inspect_pr_context.py"
+            )
+
+            inspected = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "python "
+                        f"'{inspector}' "
+                        f"--repository '{repository}'"
+                    ),
+                ],
+                cwd=root,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            self.assertEqual(0, inspected.returncode, inspected.stderr)
+            context = json.loads(inspected.stdout)
+            self.assertEqual("feature", context["headRef"])
+            self.assertTrue(context["headSha"])
+            self.assertEqual("main", context["baseRef"])
+            self.assertTrue(context["baseSha"])
+
     def test_shim_refuses_and_logs_git_push_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

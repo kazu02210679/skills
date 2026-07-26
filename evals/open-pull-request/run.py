@@ -341,7 +341,47 @@ executable = configuration["realExecutables"].get(tool)
 if not executable:
     print(f"real {tool} executable was not found", file=sys.stderr)
     raise SystemExit(127)
-completed = subprocess.run([executable, *arguments], check=False)
+try:
+    completed = subprocess.run(
+        [executable, *arguments],
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+except OSError as exc:
+    forwarding = {
+        "tool": tool,
+        "arguments": arguments,
+        "returncode": None,
+        "stdout": "",
+        "stderr": f"{type(exc).__name__}: {exc}",
+    }
+    with (directory / "forwarding.log").open(
+        "a",
+        encoding="utf-8",
+        newline="\n",
+    ) as log:
+        log.write(json.dumps(forwarding, ensure_ascii=False) + "\n")
+    print(forwarding["stderr"], file=sys.stderr)
+    raise SystemExit(127)
+forwarding = {
+    "tool": tool,
+    "arguments": arguments,
+    "returncode": completed.returncode,
+    "stdout": completed.stdout,
+    "stderr": completed.stderr,
+}
+with (directory / "forwarding.log").open(
+    "a",
+    encoding="utf-8",
+    newline="\n",
+) as log:
+    log.write(json.dumps(forwarding, ensure_ascii=False) + "\n")
+sys.stdout.write(completed.stdout)
+sys.stderr.write(completed.stderr)
 raise SystemExit(completed.returncode)
 '''
     script_path = directory / "command_shim.py"
@@ -768,6 +808,10 @@ def run_evaluation(args: argparse.Namespace) -> int:
                 encoding="utf-8",
             )
             shutil.copy2(shim_directory / "calls.log", case_output / "calls.log")
+            shutil.copy2(
+                shim_directory / "forwarding.log",
+                case_output / "forwarding.log",
+            )
             if execution.returncode != 0:
                 raise RuntimeError(
                     f"{case_id} execution failed ({execution.returncode}); "
@@ -831,6 +875,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
                 "input": f"{case_id}/input.md",
                 "fixture": f"{case_id}/fixture.json",
                 "calls_log": f"{case_id}/calls.log",
+                "forwarding_log": f"{case_id}/forwarding.log",
                 "execution_transcript": f"{case_id}/execution-transcript.jsonl",
                 "response": f"{case_id}/response.md",
                 "evaluator_transcript": f"{case_id}/evaluator-transcript.jsonl",
