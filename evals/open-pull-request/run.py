@@ -453,6 +453,23 @@ def shimmed_path(shim_directory: Path, original_path: str) -> str:
     return os.pathsep.join([str(shim_directory), *kept])
 
 
+def build_candidate_environment(shim_directory: Path) -> dict[str, str]:
+    """Build a hermetic environment for a sandbox-owned toy repository."""
+
+    environment = os.environ.copy()
+    environment["PATH"] = shimmed_path(
+        shim_directory,
+        environment.get("PATH", ""),
+    )
+    # Windows Codex commands run as a low-privilege sandbox account, while the
+    # fixture is created by the host account. Mark only this evaluation process
+    # as accepting such repositories; never mutate the user's global Git config.
+    environment["GIT_CONFIG_COUNT"] = "1"
+    environment["GIT_CONFIG_KEY_0"] = "safe.directory"
+    environment["GIT_CONFIG_VALUE_0"] = "*"
+    return environment
+
+
 def assert_shims_intercept(
     shim_directory: Path,
     environment: dict[str, str],
@@ -775,10 +792,8 @@ def run_evaluation(args: argparse.Namespace) -> int:
                 workspace / "shims",
                 fixture_specification.get("githubState", {}),
             )
-            candidate_environment = os.environ.copy()
-            candidate_environment["PATH"] = shimmed_path(
+            candidate_environment = build_candidate_environment(
                 shim_directory,
-                candidate_environment.get("PATH", ""),
             )
             assert_shims_intercept(shim_directory, candidate_environment)
 

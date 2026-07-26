@@ -366,6 +366,19 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             self.assertNotIn(str(real), entries)
             self.assertIn(str(harmless), entries)
 
+    def test_candidate_environment_marks_sandbox_fixture_as_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            shim_directory = Path(directory) / "shims"
+            shim_directory.mkdir()
+
+            environment = self.runner.build_candidate_environment(
+                shim_directory,
+            )
+
+            self.assertEqual("1", environment["GIT_CONFIG_COUNT"])
+            self.assertEqual("safe.directory", environment["GIT_CONFIG_KEY_0"])
+            self.assertEqual("*", environment["GIT_CONFIG_VALUE_0"])
+
     @unittest.skipIf(os.name == "nt", "POSIX-specific PATH behavior")
     def test_shimmed_path_keeps_real_git_directories_on_posix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
