@@ -25,9 +25,15 @@ through their internals.
 
 Run the inspector. It reads local Git state only and never contacts a remote:
 
-```text
+```bash
 python {skill}/scripts/inspect_pr_context.py --repository {repository}
 ```
+
+Stop when the inspector is missing, exits non-zero, or returns anything but the
+documented JSON object. Report what it did instead. Do not fall back to running
+the checks by hand and do not guess at the missing values — a publish decision
+made on state you could not read is the failure this whole Skill exists to
+prevent.
 
 Stop, report the reason, and change nothing when any of these hold:
 
@@ -55,7 +61,13 @@ step 5 before asking for approval.
 
 Read `git log {base}..HEAD` and `git diff --stat {base}...HEAD`.
 
-When `reviewArtifacts` is non-empty, choose one:
+When `reviewArtifacts` is non-empty, first stop on any artifact whose `valid` is
+false. A malformed `review-data.json` is not an absent one: it may have held a
+`blocking` finding, and quietly falling through to your own verification would
+bury it. Report that the artifact cannot be read, and continue only if the user
+explicitly approves ignoring it and verifying the branch yourself.
+
+Among the valid artifacts, choose one:
 
 1. the artifact whose recorded head matches the current `HEAD`;
 2. then the one whose recorded merge-base matches the current merge-base;
@@ -65,17 +77,19 @@ When `reviewArtifacts` is non-empty, choose one:
 Compare commit SHAs, not branch names. A recorded base of `main` says nothing
 about whether `main` has moved since the review ran.
 
-Stop when the chosen artifact's head is not the current `HEAD`: report how many
-commits landed after the review and send the branch back for re-review. Those
-commits are unreviewed, and a pull request that presents them as reviewed is
-wrong in the direction that matters.
+Stop when the chosen artifact's head is not the current `HEAD`, **or** when its
+merge-base is not the current merge-base. A head mismatch means commits landed
+after the review; a merge-base mismatch means the base moved under it. Either
+way part of what you would publish is unreviewed. Report how many commits
+arrived since the review and send the branch back for re-review, rather than
+presenting stale findings as current.
 
 Treat a recorded head of `WORKTREE` as no review at all. It describes
 uncommitted state, which is not what you are publishing.
 
-Map Codex plans through commit trailers, not through directory names: collect
-`Codex-Plan` values from `{base}..HEAD`, then find the matching plan directories.
-Do not adopt a plan directory that no trailer points to.
+Map Codex plans through commit trailers, not through directory names. Use
+`codexPlanIds` from the inspector, then find the matching plan directories. Do
+not adopt a plan directory that no trailer points to.
 
 ## 3. Verify the branch
 
@@ -117,10 +131,15 @@ Reads are allowed here; mutations are not. Settle:
 - the remote default branch, and the base's current SHA;
 - the current merge-base;
 - any pull request already open from this head, and its state;
+- the remote head SHA for this branch, if the branch exists there;
 - whether the push target is `origin` or a fork, and whether you may push.
 
 The local `origin/main` may be stale, so recompute rather than trusting what
 step 1 saw.
+
+Stop when you may not push to the target. Do not create a fork to work around
+it — choosing where someone's code gets published is theirs to decide, not a
+detail to route around. Report what access is missing.
 
 ### What the remote head SHA means
 
@@ -240,17 +259,22 @@ Approval binds to a snapshot, not to a branch:
   "headSha": "...",
   "baseSha": "...",
   "mergeBaseSha": "...",
+  "remoteHeadSha": "...",
   "titleHash": "...",
   "bodyHash": "...",
   "mode": "draft"
 }
 ```
 
-Re-read `HEAD`, the worktree, the base SHA, the merge-base, the diff, the
-existing pull request, and the push target. If any differ from the snapshot, the
-body you had approved describes something that no longer exists: recompute and
-ask again. Having been approved once is not permission to push a different
-thing.
+Re-read `HEAD`, the worktree, the base SHA, the merge-base, the remote head SHA,
+the diff, the existing pull request, and the push target. If any differ from the
+snapshot, the body you had approved describes something that no longer exists:
+recompute and ask again. Having been approved once is not permission to push a
+different thing.
+
+The remote head SHA matters as much as the local one: someone else pushing to
+this branch between approval and your push changes what the pull request would
+contain, and nothing local would show it.
 
 ## 9. Publish and report
 
@@ -276,6 +300,10 @@ gh pr create \
 ```
 
 Drop `--draft` only for ready.
+
+When the push is rejected, report it and stop. Do not reach for `--force`: a
+rejection means the remote holds commits you have not seen, and overwriting them
+destroys someone's work to save a step. Re-run step 5 to find out what arrived.
 
 Report the URL, base, head, draft or ready, and the verification results. When
 the push succeeded and creation failed, say exactly that. The branch is on the

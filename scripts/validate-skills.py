@@ -451,7 +451,7 @@ def validate_repository(repository_root: Path) -> list[str]:
     else:
         if "次の72個" not in readme or "68 Skill" not in readme:
             errors.append(
-                "README catalog count must state 71 total and 68 PM Skills"
+                "README catalog count must state 72 total and 68 PM Skills"
             )
 
     for source_name in ("pm-skills", "handoff-gist"):
