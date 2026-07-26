@@ -112,6 +112,20 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
 
         self.assertEqual("ancestor:1", specification["remote"]["headSha"])
 
+    def test_case_09_ignores_test_generated_python_cache(self) -> None:
+        specification = json.loads(
+            (EVAL_ROOT / "fixtures" / "case-09.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        committed_files = {
+            path: content
+            for commit in specification["commits"]
+            for path, content in commit["files"].items()
+        }
+
+        self.assertIn("__pycache__/", committed_files[".gitignore"])
+
     def test_evaluator_prompt_includes_execution_evidence_and_log_scope(
         self,
     ) -> None:

@@ -2,7 +2,13 @@
   "defaultBranch": "main",
   "headBranch": "feature/metrics",
   "commits": [
-    {"message": "Add metrics", "files": {"src/metrics.py": "COUNT = 0\n"}},
+    {
+      "message": "Add metrics",
+      "files": {
+        ".gitignore": "__pycache__/\n*.py[cod]\n",
+        "src/metrics.py": "COUNT = 0\n"
+      }
+    },
     {"message": "Test metrics", "files": {"tests/test_metrics.py": "def test_count():\n    assert True\n"}}
   ],
   "remote": {
