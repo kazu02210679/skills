@@ -4,5 +4,6 @@
   "license": "MIT",
   "copyright": "Copyright (c) 2026 tegnike",
   "adapted_on": "2026-07-26",
+  "sha256_manifest": "SHA256SUMS",
   "notes": "Adapted for capability-aware task creation, honest fallback behavior, Codex and ChatGPT portability, explicit state classification, and repository-managed evaluation."
 }

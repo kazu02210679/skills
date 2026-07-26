@@ -22,6 +22,8 @@
 - Fall back to a copyable handoff when direct task creation is unavailable or fails.
 - Preserve the reference Gist's MIT license and source metadata.
 - Keep the same Skill usable in Codex and ChatGPT; do not create product-specific variants.
+- In command snippets, set `$REPOSITORY_ROOT` to the active checkout and
+  `$SKILL_CREATOR_ROOT` to the installed `skill-creator` Skill directory.
 
 ---
 
@@ -156,7 +158,7 @@ Run with UTF-8 mode:
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-python "C:\Users\楫屋寿弥\.codex\skills\.system\skill-creator\scripts\init_skill.py" handoff `
+python "$SKILL_CREATOR_ROOT\scripts\init_skill.py" handoff `
   --path skills `
   --interface 'display_name=Session Handoff' `
   --interface 'short_description=Move work to a fresh task without losing intent' `
@@ -263,7 +265,7 @@ Run:
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-python "C:\Users\楫屋寿弥\.codex\skills\.system\skill-creator\scripts\quick_validate.py" skills/handoff
+python "$SKILL_CREATOR_ROOT\scripts\quick_validate.py" skills/handoff
 python scripts/validate-skills.py
 ```
 
@@ -380,7 +382,7 @@ Prompt:
 
 ```text
 Use $handoff from
-C:\Users\楫屋寿弥\Documents\Codex\2026-07-20\new-chat\work\skills-repo\skills\handoff
+$REPOSITORY_ROOT/skills/handoff
 for the source conversation and environment below. Return the observable
 result only.
 
@@ -404,7 +406,7 @@ Prompt:
 
 ```text
 Use $handoff from
-C:\Users\楫屋寿弥\Documents\Codex\2026-07-20\new-chat\work\skills-repo\skills\handoff
+$REPOSITORY_ROOT/skills/handoff
 for the source conversation and environment below. Return the observable
 result only.
 
@@ -426,7 +428,7 @@ Prompt:
 
 ```text
 Use $handoff from
-C:\Users\楫屋寿弥\Documents\Codex\2026-07-20\new-chat\work\skills-repo\skills\handoff
+$REPOSITORY_ROOT/skills/handoff
 for the source conversation and environment below. Return the observable
 result only.
 
@@ -487,7 +489,7 @@ Run:
 python scripts/validate-skills.py
 
 $env:PYTHONUTF8 = "1"
-$validator = "C:\Users\楫屋寿弥\.codex\skills\.system\skill-creator\scripts\quick_validate.py"
+$validator = "$SKILL_CREATOR_ROOT\scripts\quick_validate.py"
 $failures = @()
 Get-ChildItem -LiteralPath "skills" -Directory | ForEach-Object {
     $output = & python $validator $_.FullName 2>&1

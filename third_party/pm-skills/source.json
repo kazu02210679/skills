@@ -6,5 +6,6 @@
   "copyright": "Copyright (c) 2026 Pawel Huryn",
   "imported_skill_count": 68,
   "imported_on": "2026-07-26",
+  "sha256_manifest": "SHA256SUMS",
   "notes": "Imported from the locally installed Codex plugin cache. Commands and plugin manifests are not redistributed."
 }
