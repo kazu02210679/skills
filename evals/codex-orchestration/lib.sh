@@ -33,6 +33,7 @@ new_repo() {
   git -C "$d" init -q -b main
   git -C "$d" config user.email t@t
   git -C "$d" config user.name t
+  git -C "$d" config init.defaultBranch main
   echo base >"$d/src/a.py"
   echo base >"$d/docs/d.md"
   git -C "$d" add -A

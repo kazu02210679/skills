@@ -15,9 +15,26 @@ git -C "$R" checkout -q work
 R="$(new_repo run1trunk)"; P="$(new_plan "$R" auth)"
 git -C "$R" checkout -q main
 git -C "$R" branch -m trunk
+git -C "$R" config init.defaultBranch trunk
 out=$("$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
 check "refuses a conventional trunk default branch" "$rc" "2"
 has "identifies trunk as the default branch" "$out" "default branch ('trunk')"
+
+R="$TMPROOT/run1unknown"
+mkdir -p "$R/src"
+git -C "$R" init -q -b release
+git -C "$R" config user.email t@t
+git -C "$R" config user.name t
+git -C "$R" config init.defaultBranch missing-default
+echo base >"$R/src/a.py"
+git -C "$R" add -A
+git -C "$R" commit -qm init
+P="$(new_plan "$R" auth)"
+LOG="$TMPROOT/unknown-default-argv"; : >"$LOG"
+out=$(FAKE_CODEX_LOG="$LOG" "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
+check "refuses an unknown default branch state" "$rc" "2"
+has "explains the unknown default branch state" "$out" "cannot determine the default branch"
+check "does not launch Codex when the default branch is unknown" "$(wc -c <"$LOG" | tr -d ' ')" "0"
 
 R="$(new_repo run1work)"; P="$(new_plan "$R" auth)"
 

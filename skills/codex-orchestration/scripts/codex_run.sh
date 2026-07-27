@@ -127,10 +127,7 @@ if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     if [ -n "$CONFIGURED_DEFAULT" ] && git -C "$WORKDIR" show-ref --verify --quiet "refs/heads/$CONFIGURED_DEFAULT"; then
       DEFAULT_BRANCH="$CONFIGURED_DEFAULT"
     else
-      case "$BRANCH" in
-        main|master|trunk|default|develop|development) DEFAULT_BRANCH="$BRANCH" ;;
-        *) DEFAULT_BRANCH="" ;;
-      esac
+      die "cannot determine the default branch from origin/HEAD or init.defaultBranch. Configure an existing branch with 'git config init.defaultBranch <branch>' before running Codex."
     fi
   fi
   if [ -n "$DEFAULT_BRANCH" ] && [ "$BRANCH" = "$DEFAULT_BRANCH" ] \
