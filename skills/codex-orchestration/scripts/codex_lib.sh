@@ -40,6 +40,35 @@ codex_is_meta_path() {
   esac
 }
 
+# codex_load_allowlist <file> <array_name>
+# Parse one allowlist into caller-owned memory. A commit gate keeps this array
+# in its parent shell while tests run in children, so tests have no pathname
+# they can rewrite to change the verdict.
+codex_load_allowlist() {
+  local file="$1" output_name="$2" line
+  local -n output="$output_name"
+  output=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] && output+=("$line")
+  done <"$file"
+  return 0
+}
+
+# codex_path_allowed <literal_path> <pattern>...
+# The path is always data. Only allowlist entries are intentional Bash globs.
+codex_path_allowed() {
+  local path="$1" pattern
+  shift
+  for pattern in "$@"; do
+    # shellcheck disable=SC2053  # allowlist entries intentionally are globs
+    [[ "$path" == $pattern ]] && return 0
+  done
+  return 1
+}
+
 # codex_dirty_product <workdir> [base_ref]
 # Changed PRODUCT paths, one per line — metadata excluded. Used both by the
 # dirty preflight and by the "did this task actually do anything?" check, which

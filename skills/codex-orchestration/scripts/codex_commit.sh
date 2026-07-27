@@ -13,6 +13,25 @@ contract_failure() { say "$1"; exit 6; }
 [ "$#" -eq 4 ] || die "usage: codex_commit.sh <taskdir> <task_id> <workdir> <rundir>"
 TASKDIR="$1"; TASK_ID="$2"; WORKDIR="$3"; RUNDIR="$4"
 
+# Install one cleanup path before any temporary allocation. Each path is set
+# only after this process creates it; LOCK_HELD prevents removing another
+# process's pre-existing lock after a failed reservation.
+LOCK_DIR=""; LOCK_HELD=0
+PRODUCT_LIST_BEFORE=""; PRODUCT_LIST_AFTER=""
+TEST_OUT=""; MESSAGE_FILE=""; INDEX_DIR=""; INDEX_FILE=""
+cleanup() {
+  local path
+  for path in "$PRODUCT_LIST_BEFORE" "$PRODUCT_LIST_AFTER" "$TEST_OUT" \
+              "$MESSAGE_FILE" "$INDEX_FILE"; do
+    [ -z "$path" ] || rm -f -- "$path"
+  done
+  [ -z "$INDEX_DIR" ] || rmdir "$INDEX_DIR" 2>/dev/null || true
+  if [ "$LOCK_HELD" = "1" ] && [ -n "$LOCK_DIR" ]; then
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
 [ -d "$TASKDIR" ] || die "task directory not found: $TASKDIR"
 [ -d "$WORKDIR" ] || die "workdir not found: $WORKDIR"
 [ -d "$RUNDIR" ] || die "run directory not found: $RUNDIR"
@@ -71,50 +90,67 @@ esac
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   die "another codex commit gate is active (or left a stale lock): $LOCK_DIR"
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+LOCK_HELD=1
 
 # A lock waits for nothing: repeat the baseline check after acquiring it so a
 # gate that started while another task committed cannot judge a partial diff.
 head_gate
 
-# The contract check above proves the workspace copy matches its anchor at this
-# instant. Snapshot the verified allowlist under Git metadata before running
-# arbitrary test commands, and use only that trusted copy for every scope gate.
-# A passing test may write anywhere in the workspace, including RUNDIR.
-CONTRACT_ANCHOR="$(codex_contract_anchor "$WORKDIR_ABS" "$RUNDIR")" || \
-  contract_failure "the trusted frozen contract anchor cannot be resolved"
-TRUSTED_ALLOWLIST="$(mktemp "$(dirname -- "$CONTRACT_ANCHOR")/allowlist.XXXXXX")" || \
-  contract_failure "could not reserve a trusted allowlist snapshot"
-cp "$RUNDIR/allowlist" "$TRUSTED_ALLOWLIST" || \
-  contract_failure "could not snapshot the verified allowlist outside the workspace"
-trap 'rm -f "$TRUSTED_ALLOWLIST"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+# Retain every verdict input in parent-shell memory before executing arbitrary
+# test commands. Child test shells can rewrite pathnames, but cannot mutate
+# these arrays, digests, or strings.
+CONTRACT_DIGEST="$(codex_hash_file "$RUNDIR/contract.sha256")" || \
+  contract_failure "could not retain the frozen contract digest"
+ALLOWLIST_DIGEST="$(codex_hash_file "$RUNDIR/allowlist")" || \
+  contract_failure "could not retain the frozen allowlist digest"
+TASK_DIGEST="$(codex_hash_file "$RUNDIR/task.md")" || \
+  contract_failure "could not retain the frozen task digest"
+PLAN_ID_DIGEST="$(codex_hash_file "$RUNDIR/plan-id")" || \
+  contract_failure "could not retain the frozen plan identity digest"
+TEST_DIGEST="$(codex_hash_file "$RUNDIR/test")" || \
+  contract_failure "could not retain the frozen test digest"
+RECORDED_TEST_SOURCE="$( [ -f "$RUNDIR/test_source" ] && cat "$RUNDIR/test_source" || true)"
+PLAN_FINGERPRINT="$(codex_meta_fingerprint "$TASKDIR_ABS")" || \
+  contract_failure "could not retain the live plan fingerprint"
+ALLOWLIST_PATTERNS=()
+codex_load_allowlist "$RUNDIR/allowlist" ALLOWLIST_PATTERNS
+[ "${#ALLOWLIST_PATTERNS[@]}" -gt 0 ] || contract_failure "the frozen allowlist has no patterns"
 
-ALLOWLIST="$TRUSTED_ALLOWLIST"
 PLAN_ID="$(tr -d '[:space:]' <"$RUNDIR/plan-id")"
 [ -n "$PLAN_ID" ] || contract_failure "the frozen plan identity is empty"
 
 # Live plan files must still be byte-identical to their frozen counterparts;
 # this also checks whether a per-task test appeared/disappeared after the run.
 plan_drift_gate() {
-  local live_test recorded_test_source
+  local live_test
   local -a drift=()
-  [ "$(codex_hash_file "$TASK_MD")" = "$(codex_hash_file "$RUNDIR/task.md")" ] || drift+=("$TASK_ID.md")
+  [ "$(codex_hash_file "$TASK_MD")" = "$TASK_DIGEST" ] || drift+=("$TASK_ID.md")
   [ -f "$TASKDIR_ABS/$TASK_ID.allowlist" ] &&
-    [ "$(codex_hash_file "$TASKDIR_ABS/$TASK_ID.allowlist")" = "$(codex_hash_file "$TRUSTED_ALLOWLIST")" ] ||
+    [ "$(codex_hash_file "$TASKDIR_ABS/$TASK_ID.allowlist")" = "$ALLOWLIST_DIGEST" ] ||
     drift+=("$TASK_ID.allowlist")
-  [ "$(codex_hash_file "$TASKDIR_ABS/plan-id")" = "$(codex_hash_file "$RUNDIR/plan-id")" ] || drift+=("plan-id")
+  [ "$(codex_hash_file "$TASKDIR_ABS/plan-id")" = "$PLAN_ID_DIGEST" ] || drift+=("plan-id")
   live_test="$(codex_test_file "$TASKDIR_ABS" "$TASK_ID")"
-  recorded_test_source="$( [ -f "$RUNDIR/test_source" ] && cat "$RUNDIR/test_source" || true)"
   if [ -n "$live_test" ]; then
     live_test="$(cd -- "$(dirname -- "$live_test")" && pwd)/$(basename -- "$live_test")"
   fi
-  [ "$live_test" = "$recorded_test_source" ] || drift+=("test commands")
-  [ "$(codex_hash_file "$live_test")" = "$(codex_hash_file "$RUNDIR/test")" ] || drift+=("test commands")
+  [ "$live_test" = "$RECORDED_TEST_SOURCE" ] || drift+=("test commands")
+  [ "$(codex_hash_file "$live_test")" = "$TEST_DIGEST" ] || drift+=("test commands")
+  [ "$(codex_meta_fingerprint "$TASKDIR_ABS")" = "$PLAN_FINGERPRINT" ] || drift+=("plan directory")
   if [ "${#drift[@]}" -gt 0 ]; then
     contract_failure "the plan changed since this task was run: ${drift[*]}"
   fi
 }
 plan_drift_gate
+
+contract_gate() {
+  [ "$(codex_hash_file "$RUNDIR/contract.sha256")" = "$CONTRACT_DIGEST" ] || \
+    contract_failure "the frozen contract manifest changed while tests were running"
+  [ "$(codex_hash_file "$RUNDIR/allowlist")" = "$ALLOWLIST_DIGEST" ] || \
+    contract_failure "the frozen allowlist changed while tests were running"
+  if ! codex_contract_check "$RUNDIR" "$WORKDIR_ABS"; then
+    contract_failure "the frozen contract changed while tests were running"
+  fi
+}
 
 collect_product() {
   local output="$1"
@@ -123,27 +159,48 @@ collect_product() {
   fi
 }
 
-PRODUCT_LIST="$(mktemp)" || die "could not create a temporary file"
-trap 'rm -f "$TRUSTED_ALLOWLIST" "$PRODUCT_LIST"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
-collect_product "$PRODUCT_LIST"
-if [ ! -s "$PRODUCT_LIST" ]; then
+PRODUCT_LIST_BEFORE="$(mktemp)" || die "could not create a pre-test product-list file"
+collect_product "$PRODUCT_LIST_BEFORE"
+if [ ! -s "$PRODUCT_LIST_BEFORE" ]; then
   say "$TASK_ID changed no product files — refusing to record it as done"
   exit 1
 fi
+PRODUCT_PATHS=()
+mapfile -d '' -t PRODUCT_PATHS <"$PRODUCT_LIST_BEFORE"
 
-scope_gate() {
-  local when="$1" rc
-  set +e
-  "$SCRIPT_DIR/codex_scope_check.sh" "$ALLOWLIST" "$WORKDIR_ABS" "$BASE_COMMIT" >&2
-  rc=$?
-  set -e
-  case "$rc" in
-    0) return 0 ;;
-    1) say "$TASK_ID is out of scope ($when) — not committing"; exit 3 ;;
-    *) die "scope verdict is indeterminate ($when); refusing to commit" ;;
-  esac
+scope_paths_gate() {
+  local when="$1" path
+  local -a violations=()
+  shift
+  for path in "$@"; do
+    codex_path_allowed "$path" "${ALLOWLIST_PATTERNS[@]}" || violations+=("$path")
+  done
+  if [ "${#violations[@]}" -gt 0 ]; then
+    printf 'codex_commit: out-of-scope product path(s) (%s):\n' "$when" >&2
+    printf '  %s\n' "${violations[@]}" >&2
+    say "$TASK_ID is out of scope ($when) — not committing"
+    exit 3
+  fi
 }
-scope_gate "before tests"
+scope_paths_gate "before tests" "${PRODUCT_PATHS[@]}"
+
+# Freeze exactly the candidate tree before tests. The private index starts at
+# BASE_COMMIT and receives only literal collected product paths plus the active
+# plan. This tree is the sole source of the commit eventually published.
+STAGE_PATHS=("${PRODUCT_PATHS[@]}")
+case "$TASKDIR_ABS" in
+  "$WORKDIR_ABS"/*) STAGE_PATHS+=("${TASKDIR_ABS#"$WORKDIR_ABS"/}") ;;
+  *) say "note: $TASKDIR_ABS is outside the repository; the plan will not be committed with the task" ;;
+esac
+INDEX_DIR="$(mktemp -d)" || die "could not create an isolated Git-index directory"
+INDEX_FILE="$INDEX_DIR/index"
+GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" read-tree "$BASE_COMMIT" || \
+  die "could not initialize the isolated Git index from the frozen baseline"
+GIT_LITERAL_PATHSPECS=1 GIT_INDEX_FILE="$INDEX_FILE" \
+  git -C "$WORKDIR_ABS" add -A -- "${STAGE_PATHS[@]}" || \
+  die "could not add the literal task paths to the isolated Git index"
+TREE="$(GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" write-tree)" || \
+  die "could not freeze the pre-test task tree"
 
 commands=()
 if [ -f "$RUNDIR/test" ]; then
@@ -166,7 +223,6 @@ TIMEOUT_CMD=()
 while IFS= read -r token; do [ -n "$token" ] && TIMEOUT_CMD+=("$token"); done < <(codex_timeout_prefix "$CODEX_TEST_TIMEOUT")
 TEST_OUT="$(mktemp)" || die "could not create a test-output file"
 MESSAGE_FILE="$(mktemp)" || die "could not create a commit-message file"
-trap 'rm -f "$TRUSTED_ALLOWLIST" "$PRODUCT_LIST" "$TEST_OUT" "$MESSAGE_FILE"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 for command in "${commands[@]}"; do
   record "--- $command"
   set +e
@@ -183,20 +239,33 @@ for command in "${commands[@]}"; do
   fi
 done
 
-# Tests are adversarial workspace code. Re-establish every verdict input before
-# trusting their success or staging any candidate content.
-if ! codex_contract_check "$RUNDIR" "$WORKDIR_ABS"; then
-  contract_failure "the frozen contract changed while tests were running"
-fi
+# Tests are adversarial workspace code. Re-establish the retained contract and
+# live-plan digests, then require the literal product set and every selected
+# worktree blob to match the immutable tree frozen before tests.
+contract_gate
 plan_drift_gate
-scope_gate "after tests"
 head_gate
-collect_product "$PRODUCT_LIST"
-mapfile -d '' -t stage <"$PRODUCT_LIST"
-[ "${#stage[@]}" -gt 0 ] || { say "$TASK_ID changed no product files after tests"; exit 1; }
-case "$TASKDIR_ABS" in
-  "$WORKDIR_ABS"/*) stage+=("${TASKDIR_ABS#"$WORKDIR_ABS"/}") ;;
-  *) say "note: $TASKDIR_ABS is outside the repository; the plan will not be committed with the task" ;;
+PRODUCT_LIST_AFTER="$(mktemp)" || die "could not create a post-test product-list file"
+collect_product "$PRODUCT_LIST_AFTER"
+if ! cmp -s "$PRODUCT_LIST_BEFORE" "$PRODUCT_LIST_AFTER"; then
+  PRODUCT_PATHS_AFTER=()
+  mapfile -d '' -t PRODUCT_PATHS_AFTER <"$PRODUCT_LIST_AFTER"
+  scope_paths_gate "after tests" "${PRODUCT_PATHS_AFTER[@]}"
+  die "product path set changed after candidate freeze; refusing to publish"
+fi
+CURRENT_PRIVATE_TREE="$(GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" write-tree)" || \
+  die "could not verify the frozen private index"
+[ "$CURRENT_PRIVATE_TREE" = "$TREE" ] || \
+  die "the frozen private index changed while tests were running"
+set +e
+GIT_LITERAL_PATHSPECS=1 GIT_INDEX_FILE="$INDEX_FILE" \
+  git -C "$WORKDIR_ABS" diff --quiet -- "${STAGE_PATHS[@]}"
+CONTENT_RC=$?
+set -e
+case "$CONTENT_RC" in
+  0) ;;
+  1) die "selected worktree content changed after candidate freeze; refusing to publish" ;;
+  *) die "could not verify worktree content against the frozen candidate tree" ;;
 esac
 
 SUBJECT="${CODEX_COMMIT_MESSAGE:-}"
@@ -218,26 +287,13 @@ Codex-Task: $TASK_ID
 Codex-Tests: ${#commands[@]} command(s) passed
 EOF
 
-# Candidate construction never trusts the shared index. Initialize a private
-# index from the frozen base, then add only the cleared NUL-safe product path
-# array and the active plan path. Test commands and concurrent Git writers may
-# stage other entries in the real index, but those entries cannot enter TREE.
-INDEX_DIR="$(mktemp -d)" || die "could not create an isolated Git-index directory"
-INDEX_FILE="$INDEX_DIR/index"
-trap 'rm -f "$TRUSTED_ALLOWLIST" "$PRODUCT_LIST" "$TEST_OUT" "$MESSAGE_FILE" "$INDEX_FILE"; rmdir "$INDEX_DIR" 2>/dev/null || true; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
-GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" read-tree "$BASE_COMMIT" || \
-  die "could not initialize the isolated Git index from the frozen baseline"
-GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" add -A -- "${stage[@]}" || \
-  die "could not add the cleared task paths to the isolated Git index"
-TREE="$(GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" write-tree)" || \
-  die "could not write the isolated task tree for publication"
 CANDIDATE="$(git -C "$WORKDIR_ABS" commit-tree "$TREE" -p "$BASE_COMMIT" <"$MESSAGE_FILE")" || \
   die "could not create the candidate task commit"
 
 # Keep normal status evidence clean without affecting the already-fixed
 # candidate. Only selected task paths are added; unrelated entries staged by a
 # test or concurrent writer remain visible in the real index.
-git -C "$WORKDIR_ABS" add -A -- "${stage[@]}" || \
+GIT_LITERAL_PATHSPECS=1 git -C "$WORKDIR_ABS" add -A -- "${STAGE_PATHS[@]}" || \
   die "could not update status evidence for the cleared task paths"
 head_gate
 

@@ -64,16 +64,81 @@ check "post-test out-of-scope file is refused" "$rc" "3"
 has "post-test diagnostic" "$out" "after tests"
 check "post-test scope makes no commit" "$(ncommits "$R")" "$before"
 
-echo "== post-test contract and plan mutations are untrusted =="
-R="$(new_repo commit-post-test-contract)"; P="$(new_plan "$R" auth)"
+echo "== commit verdict inputs live only in parent-shell memory =="
+R="$(new_repo commit-snapshot-probe)"; P="$(new_plan "$R" auth)"
 cat >"$P/test" <<'EOF'
-run_dir="$(ls -dt .codex-runs/* | head -1)"; printf '*\n' >"$run_dir/allowlist"; printf '*\n' >.codex-instructions/auth/T1.allowlist; printf 'rewritten-plan\n' >.codex-instructions/auth/plan-id; printf 'escaped\n' >docs/escaped.txt
+run_dir="$(ls -dt .codex-runs/* | head -1)"; snapshot="$(find .git/codex-orchestration-contracts -maxdepth 1 -type f -name 'allowlist.*' 2>/dev/null | head -1)"; if [ -n "$snapshot" ]; then printf '*\n' >"$snapshot"; printf 'found\n' >"$run_dir/snapshot-probe"; else printf 'none\n' >"$run_dir/snapshot-probe"; fi
+EOF
+RD="$(run_task "$R" "$P" T1)"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "snapshot overwrite probe cannot disrupt a valid task" "$rc" "0"
+check "no mutable allowlist snapshot exists under Git metadata" "$(cat "$RD/snapshot-probe")" "none"
+
+echo "== live plan drift is independently fatal =="
+R="$(new_repo commit-live-plan-only)"; P="$(new_plan "$R" auth)"
+cat >"$P/test" <<'EOF'
+printf '*\n' >.codex-instructions/auth/T1.allowlist
 EOF
 RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
 out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
-check "a passing test cannot rewrite its verdict inputs" "$rc" "6"
-has "post-test contract drift is explained" "$out" "frozen contract"
-check "post-test verdict tampering makes no commit" "$(ncommits "$R")" "$before"
+check "live allowlist-only drift is refused" "$rc" "6"
+has "live allowlist drift is named" "$out" "T1.allowlist"
+check "live plan drift makes no commit" "$(ncommits "$R")" "$before"
+
+echo "== Git-metadata overwrite cannot widen live scope =="
+R="$(new_repo commit-snapshot-bypass)"; P="$(new_plan "$R" auth)"
+cat >"$P/test" <<'EOF'
+snapshot="$(find .git/codex-orchestration-contracts -maxdepth 1 -type f -name 'allowlist.*' 2>/dev/null | head -1)"; [ -z "$snapshot" ] || printf '*\n' >"$snapshot"; printf '*\n' >.codex-instructions/auth/T1.allowlist; printf 'escaped\n' >docs/escaped.txt
+EOF
+RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "snapshot and live-plan rewrite cannot bypass the gate" "$rc" "6"
+check "snapshot bypass makes no commit" "$(ncommits "$R")" "$before"
+
+echo "== passing tests cannot change the frozen candidate =="
+R="$(new_repo commit-test-adds-path)"; P="$(new_plan "$R" auth)"
+cat >"$P/test" <<'EOF'
+printf 'injected\n' >src/test-added.py
+EOF
+RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "a passing test cannot add a candidate path" "$rc" "2"
+has "test-added path drift is explained" "$out" "product path set changed"
+check "test-added path makes no commit" "$(ncommits "$R")" "$before"
+
+R="$(new_repo commit-test-mutates-content)"; P="$(new_plan "$R" auth)"
+cat >"$P/test" <<'EOF'
+printf 'test mutation\n' >>src/a.py
+EOF
+RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "a passing test cannot replace frozen candidate content" "$rc" "2"
+has "test-mutated content drift is explained" "$out" "content changed after candidate freeze"
+check "test-mutated content makes no commit" "$(ncommits "$R")" "$before"
+
+echo "== early private-index failures clean every reservation =="
+R="$(new_repo commit-cleanup)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"
+CLEAN_TMP="$TMPROOT/commit-cleanup-tmp"; mkdir -p "$CLEAN_TMP"
+REAL_GIT="$(command -v git)"
+FAIL_READ_TREE_BIN="$TMPROOT/fail-read-tree-bin"; mkdir -p "$FAIL_READ_TREE_BIN"
+cat >"$FAIL_READ_TREE_BIN/git" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  [ "\$arg" = "read-tree" ] && exit 77
+done
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$FAIL_READ_TREE_BIN/git"
+cp "$FAIL_READ_TREE_BIN/git" "$FAIL_READ_TREE_BIN/git.exe"
+chmod +x "$FAIL_READ_TREE_BIN/git.exe"
+out="$(TMPDIR="$CLEAN_TMP" PATH="$FAIL_READ_TREE_BIN:$PATH" \
+  "$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "private-index initialization failure is fail-closed" "$rc" "2"
+has "private-index failure is explained" "$out" "initialize the isolated Git index"
+leftovers="$(find "$CLEAN_TMP" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d '[:space:]')"
+check "early failure leaves no temporary files or directories" "$leftovers" "0"
+commit_lock="$(git -C "$R" rev-parse --git-path codex-orchestration-commit.lock)"
+[ -e "$commit_lock" ] && bad "early failure left the commit lock" || ok "early failure releases the commit lock"
 
 echo "== commit gate records exactly one bounded commit =="
 R="$(new_repo commit-green)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
@@ -207,6 +272,49 @@ for committed_path in "${committed_paths[@]}"; do
   [ "$committed_path" = "$newline_git_path" ] && newline_found=true
 done
 check "newline product path exactly matches a committed object name" "$newline_found" "true"
+
+echo "== Git pathspec syntax is always treated literally =="
+R="$(new_repo commit-bracket-path)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"
+bracket_path='src/[magic].py'; printf 'literal brackets\n' >"$R/$bracket_path"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "bracket path commits literally" "$rc" "0"
+bracket_names="$TMPROOT/bracket-committed-names"
+git -C "$R" ls-tree -r -z --name-only HEAD >"$bracket_names"
+mapfile -d '' -t committed_paths <"$bracket_names"
+bracket_found=false
+for committed_path in "${committed_paths[@]}"; do
+  [ "$committed_path" = "$bracket_path" ] && bracket_found=true
+done
+check "bracket path exactly matches a committed object name" "$bracket_found" "true"
+
+R="$(new_repo commit-posix-magic-path)"; P="$(new_plan "$R" auth)"
+printf 'src/*\n:(literal)magic.py\n' >"$P/T1.allowlist"
+RD="$(run_task "$R" "$P" T1)"
+magic_path=':(literal)magic.py'
+magic_error="$TMPROOT/posix-magic-create.err"
+if printf 'literal pathspec magic\n' >"$R/$magic_path" 2>"$magic_error"; then
+  mapfile -d '' -t magic_untracked < <(git -C "$R" ls-files --others --exclude-standard -z)
+  magic_visible=false
+  for untracked_path in "${magic_untracked[@]}"; do
+    [ "$untracked_path" = "$magic_path" ] && magic_visible=true
+  done
+  if [ "$magic_visible" = "true" ]; then
+    out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+    check "POSIX pathspec-magic filename commits literally" "$rc" "0"
+    magic_names="$TMPROOT/magic-committed-names"
+    git -C "$R" ls-tree -r -z --name-only HEAD >"$magic_names"
+    mapfile -d '' -t committed_paths <"$magic_names"
+    magic_found=false
+    for committed_path in "${committed_paths[@]}"; do
+      [ "$committed_path" = "$magic_path" ] && magic_found=true
+    done
+    check "POSIX pathspec-magic name exactly matches the committed object" "$magic_found" "true"
+  else
+    ok "POSIX pathspec-magic regression skipped: Git cannot round-trip the exact ':' filename on this filesystem"
+  fi
+else
+  ok "POSIX pathspec-magic regression skipped: filesystem rejected ':' ($(tr '\n' ' ' <"$magic_error"))"
+fi
 
 echo "== test gate policy =="
 R="$(new_repo commit-no-test)"; P="$(new_plan "$R" auth)"; rm "$P/test"; RD="$(run_task "$R" "$P" T1)"
