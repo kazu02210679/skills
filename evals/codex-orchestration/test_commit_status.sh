@@ -126,13 +126,42 @@ chmod +x "$race_hook"
 out="$(CODEX_COMMIT_TEST_BEFORE_PUBLISH="$race_hook" "$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
 check "publication race is refused without overwrite" "$rc" "5"
 has "publication conflict diagnostic" "$out" "publication"
+hasnt "branch race does not claim a task commit" "$out" "T1 committed "
 check "race leaves only the competing commit published" "$(ncommits "$R")" "$((before + 1))"
 check "competing commit remains HEAD" "$(git -C "$R" log -1 --format=%s)" "competing-publisher"
+
+R="$(new_repo commit-head-repoint-race)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; base="$(git -C "$R" rev-parse HEAD)"
+git -C "$R" branch other "$base"
+repoint_hook="$TMPROOT/repoint-head-before-publish"
+cat >"$repoint_hook" <<EOF
+#!/usr/bin/env bash
+git -C "$R" symbolic-ref HEAD refs/heads/other
+EOF
+chmod +x "$repoint_hook"
+out="$(CODEX_COMMIT_TEST_BEFORE_PUBLISH="$repoint_hook" "$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "HEAD repoint after candidate creation still publishes the pinned branch" "$rc" "0"
+has "HEAD repoint publication names the pinned branch" "$out" "to refs/heads/work"
+has "original pinned task branch carries the candidate" "$(git -C "$R" log -1 --format=%B refs/heads/work)" "Codex-Task: T1"
+check "competing branch remains at the frozen base" "$(git -C "$R" rev-parse refs/heads/other)" "$base"
+check "HEAD remains on the externally selected branch" "$(git -C "$R" symbolic-ref -q HEAD)" "refs/heads/other"
+check "publication evidence records the pinned branch" "$(cat "$RD/commit.ref")" "refs/heads/work"
+out="$("$S/codex_status.sh" "$P" "$R" 2>&1)"; rc=$?
+check "repointed current branch does not misreport the other branch's task" "$rc" "3"
+has "repointed current branch status remains zero" "$out" "0/2 committed"
 
 R="$(new_repo commit-detached-head)"; P="$(new_plan "$R" auth)"; git -C "$R" checkout -q --detach; RD="$(run_task "$R" "$P" T1)"
 out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
 check "detached HEAD is refused before publication" "$rc" "2"
 has "detached HEAD diagnostic" "$out" "symbolic"
+
+R="$(new_repo commit-unresolvable-head)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; base="$(git -C "$R" rev-parse HEAD)"
+git -C "$R" reset --mixed -q "$base"
+git -C "$R" update-ref refs/heads/unresolvable "$base"
+git -C "$R" symbolic-ref HEAD refs/heads/unresolvable
+git -C "$R" update-ref -d refs/heads/unresolvable
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "unresolvable symbolic HEAD is refused" "$rc" "2"
+has "unresolvable HEAD diagnostic" "$out" "does not resolve"
 
 echo "== newline paths stay one staged path =="
 R="$(new_repo commit-newline-path)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"

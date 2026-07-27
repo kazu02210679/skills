@@ -18,7 +18,6 @@ TASKDIR="$1"; TASK_ID="$2"; WORKDIR="$3"; RUNDIR="$4"
 [ -d "$RUNDIR" ] || die "run directory not found: $RUNDIR"
 git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repository: $WORKDIR"
 codex_require_hash || exit 2
-git -C "$WORKDIR" diff --cached --quiet || die "the Git index already contains staged changes; refusing to mix unrelated work into this task commit"
 
 TASKDIR_ABS="$(cd -- "$TASKDIR" && pwd)"
 WORKDIR_ABS="$(cd -- "$WORKDIR" && pwd)"
@@ -44,7 +43,8 @@ git -C "$WORKDIR_ABS" rev-parse --verify --quiet "$BASE_COMMIT^{commit}" >/dev/n
   contract_failure "the frozen baseline does not resolve in this worktree"
 head_gate() {
   local current
-  current="$(git -C "$WORKDIR_ABS" rev-parse HEAD)"
+  current="$(git -C "$WORKDIR_ABS" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true)"
+  [ -n "$current" ] || die "HEAD does not resolve to a commit; refusing publication"
   [ "$current" = "$BASE_COMMIT" ] || {
     say "HEAD moved during $TASK_ID: expected $BASE_COMMIT, found $current"
     exit 5
@@ -59,6 +59,7 @@ HEAD_REF="$(git -C "$WORKDIR_ABS" symbolic-ref -q HEAD)" || \
   die "HEAD is detached or has no resolvable symbolic ref; refusing atomic publication"
 git -C "$WORKDIR_ABS" rev-parse --verify --quiet "$HEAD_REF^{commit}" >/dev/null 2>&1 || \
   die "symbolic HEAD ref does not resolve to a commit: $HEAD_REF"
+git -C "$WORKDIR_ABS" diff --cached --quiet || die "the Git index already contains staged changes; refusing to mix unrelated work into this task commit"
 
 # Serialize cooperating commit gates. A stale lock is deliberately an error:
 # guessing whether another gate completed would make a clean verdict unsafe.
@@ -185,17 +186,6 @@ fi
 head_gate
 git -C "$WORKDIR_ABS" add -A -- "${stage[@]}"
 head_gate
-CURRENT_REF="$(git -C "$WORKDIR_ABS" symbolic-ref -q HEAD)" || \
-  die "HEAD is detached or has no resolvable symbolic ref; refusing atomic publication"
-[ "$CURRENT_REF" = "$HEAD_REF" ] || {
-  say "publication conflict: symbolic HEAD changed from $HEAD_REF to $CURRENT_REF"
-  exit 5
-}
-REF_HEAD="$(git -C "$WORKDIR_ABS" rev-parse --verify --quiet "$HEAD_REF^{commit}" 2>/dev/null || true)"
-[ "$REF_HEAD" = "$BASE_COMMIT" ] || {
-  say "publication conflict: $HEAD_REF moved from $BASE_COMMIT to ${REF_HEAD:-unresolved}"
-  exit 5
-}
 cat >"$MESSAGE_FILE" <<EOF
 $SUBJECT
 
@@ -207,21 +197,27 @@ TREE="$(git -C "$WORKDIR_ABS" write-tree)" || die "could not write the staged tr
 CANDIDATE="$(git -C "$WORKDIR_ABS" commit-tree "$TREE" -p "$BASE_COMMIT" <"$MESSAGE_FILE")" || \
   die "could not create the candidate task commit"
 
-# Test-only seam: a real competing commit can advance the branch after the
-# candidate exists but before the CAS. Normal runs leave this unset.
+# Test-only seam: a real competing writer can change refs after the candidate
+# exists but before the CAS. Normal runs leave this unset.
 if [ -n "${CODEX_COMMIT_TEST_BEFORE_PUBLISH:-}" ]; then
   [ -x "$CODEX_COMMIT_TEST_BEFORE_PUBLISH" ] || die "CODEX_COMMIT_TEST_BEFORE_PUBLISH is not an executable file"
   "$CODEX_COMMIT_TEST_BEFORE_PUBLISH" || die "pre-publication test hook failed"
 fi
 
+# HEAD_REF was pinned while HEAD still resolved to BASE_COMMIT. Publishing by
+# this named ref (rather than by HEAD) prevents a later symbolic-HEAD repoint
+# from redirecting this task's commit to another branch.
 set +e
 git -C "$WORKDIR_ABS" update-ref "$HEAD_REF" "$CANDIDATE" "$BASE_COMMIT"
 PUBLISH_RC=$?
 set -e
 if [ "$PUBLISH_RC" -ne 0 ]; then
+  # `commit-tree` has already created an object. Without a ref it is harmless
+  # and may remain unreachable until Git's normal garbage collection reclaims it.
   say "publication conflict: $HEAD_REF changed after candidate creation; task commit was not published"
   exit 5
 fi
+printf '%s\n' "$HEAD_REF" >"$RUNDIR/commit.ref" || contract_failure "could not write commit target evidence"
 SHA="$(git -C "$WORKDIR_ABS" rev-parse --short "$CANDIDATE")"
-say "$TASK_ID committed as $SHA (${#commands[@]} test command(s) green)"
+say "$TASK_ID committed $SHA to $HEAD_REF (${#commands[@]} test command(s) green)"
 printf '%s\n' "$SHA"
