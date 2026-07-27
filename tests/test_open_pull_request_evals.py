@@ -259,6 +259,16 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         self.assertEqual("file_change", evidence[0]["type"])
         self.assertEqual("delete", evidence[0]["changes"][0]["kind"])
 
+    def test_missing_evaluator_output_becomes_a_failed_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "assessment-raw.json"
+
+            assessment = self.runner._read_assessment(missing, "case-07")
+
+            self.assertFalse(assessment["pass"])
+            self.assertEqual("case-07", assessment["case_id"])
+            self.assertIn("did not produce", assessment["findings"][0])
+
     def test_builder_creates_head_branch_one_commit_ahead_of_base(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = self.build(
@@ -668,7 +678,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         # The shims sit on PATH, so anything started with this environment
         # reaches them. An unrelated `git ls-remote` once landed in calls.log
         # and the evaluator failed a case over a command the candidate never
-        # ran. Only the candidate carries the token.
+        # ran. Processes without the evaluation token go to a diagnostic log.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shim_directory = self.runner.write_command_shims(root / "shims", {})
@@ -676,11 +686,22 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             foreign = dict(candidate)
             foreign.pop("OPR_EVAL_RUN_TOKEN")
 
-            for environment, marker in ((candidate, "rev-parse"), (foreign, "var")):
+            for environment, arguments in (
+                (candidate, ["rev-parse", "--is-inside-work-tree"]),
+                (foreign, ["var", "GIT_EDITOR"]),
+            ):
                 subprocess.run(
-                    f"git {marker} --help",
-                    env=environment, shell=True, check=False,
+                    [sys.executable, "-c", (
+                        "import subprocess,sys;"
+                        f"result=subprocess.run({['git', *arguments]!r},"
+                        "check=False,stdout=subprocess.DEVNULL,"
+                        "stderr=subprocess.DEVNULL,timeout=10);"
+                        "sys.exit(result.returncode)"
+                    )],
+                    env=environment,
+                    check=False,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=15,
                 )
 
             calls = (shim_directory / "calls.log").read_text(encoding="utf-8")
@@ -743,6 +764,38 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 "contributor/project",
                 json.loads(viewed.stdout)["nameWithOwner"],
             )
+
+    def test_gh_repo_view_uses_the_requested_fork_or_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = {
+                "remoteUrls": {
+                    "origin": "https://github.com/contributor/project.git",
+                    "upstream": "https://github.com/upstream/project.git",
+                }
+            }
+            shim_directory = self.runner.write_command_shims(
+                Path(directory) / "shims", state
+            )
+            environment = self.runner.build_candidate_environment(shim_directory)
+
+            for selector in ("contributor/project", "upstream/project"):
+                viewed = subprocess.run(
+                    f"gh repo view {selector} --json nameWithOwner",
+                    env=environment,
+                    shell=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=10,
+                )
+                self.assertEqual(0, viewed.returncode, viewed.stderr)
+                self.assertEqual(
+                    selector,
+                    json.loads(viewed.stdout)["nameWithOwner"],
+                )
 
     def test_gh_pr_view_returns_an_object_like_the_real_cli(self) -> None:
         # The real `gh pr view --json` returns one object. Echoing the list
@@ -1058,6 +1111,64 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             self.assertNotEqual(0, push.returncode)
             self.assertIn("blocked by open-pull-request evaluation shim", push.stderr)
             self.assertIn('"git", "push", "origin", "HEAD:blocked"', calls)
+
+    def test_shim_refuses_git_send_pack_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = self.build(
+                root,
+                {"headBranch": "feature", "remote": {"headSha": "equal"}},
+            )
+            remote = root / "repo-remote.git"
+            shim_directory = self.runner.write_command_shims(root / "shims", {})
+            environment = self.runner.build_candidate_environment(shim_directory)
+            command = [
+                "git",
+                "send-pack",
+                str(remote),
+                "HEAD:refs/heads/bypass",
+            ]
+
+            attempted = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import subprocess,sys;"
+                        f"result=subprocess.run({command!r},"
+                        "text=True,capture_output=True,check=False,timeout=10);"
+                        "sys.stdout.write(result.stdout);"
+                        "sys.stderr.write(result.stderr);"
+                        "sys.exit(result.returncode)"
+                    ),
+                ],
+                cwd=repository,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=15,
+            )
+            published = run_git(
+                repository,
+                "--git-dir",
+                str(remote),
+                "rev-parse",
+                "--verify",
+                "refs/heads/bypass",
+            )
+
+            self.assertNotEqual(0, attempted.returncode)
+            self.assertIn(
+                "blocked by open-pull-request evaluation shim",
+                attempted.stderr,
+            )
+            self.assertNotEqual(0, published.returncode)
+            calls = (shim_directory / "calls.log").read_text(encoding="utf-8")
+            self.assertIn('"git", "send-pack"', calls)
 
     def test_shim_allows_and_logs_git_push_when_mutations_are_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

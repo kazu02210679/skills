@@ -194,9 +194,21 @@ def _codex_plan_ids(repository: Path, base_revision: str) -> list[str]:
     if result.returncode != 0:
         return []
 
+    trailer_line = re.compile(r"^[A-Za-z0-9-]+:[ \t]*.*$")
     plan_ids: list[str] = []
     for message in result.stdout.split("\x1e"):
-        for line in message.splitlines():
+        stripped = message.rstrip()
+        if not stripped:
+            continue
+        trailer_block = re.split(r"\n[ \t]*\n", stripped)[-1].splitlines()
+        # A trailer is the final paragraph of the commit message. Scanning the
+        # whole body makes prose such as "Codex-Plan: considered-option" look
+        # like provenance even when another paragraph follows it.
+        if not trailer_block or not all(
+            trailer_line.fullmatch(line) for line in trailer_block
+        ):
+            continue
+        for line in trailer_block:
             key, separator, value = line.partition(":")
             if not separator or key.strip().lower() != "codex-plan":
                 continue

@@ -8,14 +8,15 @@
 | Task | 状態 |
 |---|---|
 | 1. Skill本体とカタログ数 | 完了。レビュー Approved（修正2ラウンド） |
-| 2. `inspect_pr_context.py` | 完了。レビュー Approved（修正2ラウンド）、19テスト |
+| 2. `inspect_pr_context.py` | 完了。レビュー Approved（修正2ラウンド）、26テスト |
 | 3. 評価ハーネス | 完了。Windows 制約は解消済み（下記） |
 | 4. 14ケース | 完了。criteria / inputs / fixtures 一式 |
 | 5. 行動評価の実行 | 完了。14/14 通過 |
-| 6. リリースゲートとPR | 未着手 |
+| 6. リリースゲートとPR | PR #4 ready化済み。追加回帰修正はローカル検証完了、push待ち |
 
-テストは Windows で93件（1 skip）、Linux で eval 38件（5 skip）+ inspector 19件。
-skip はいずれもプラットフォーム固有テストで、両OSで validator は `Validated 72 skills.`。
+追加回帰修正後は Windows で焦点テスト73件、全体テスト109件が通過。
+validator は `Validated 72 skills.`、`git diff --check` と Python compile も通過した。
+Linux の再検証はpush後のCIで確認する。
 
 ## 設計から変わった点
 
@@ -67,11 +68,15 @@ no-shell 呼び出しが拡張子なしのラッパを飛び越え、**push が�
 `calls.log` には何も残らなかった**。このスキル自身の inspector が
 `subprocess.run(["git", ...])` を使うため、例外的な経路ではなかった。
 
-解決は2段構えになっている。
+解決は3段構えになっている。
 
-1. PATH から本物の git/gh を含むディレクトリを除去する。
+1. shim ディレクトリを PATH の先頭に置き、元の PATH は保つ。本物の Git と同じ
+   ディレクトリにある `git-upload-pack` などの transport helper を失わないため。
 2. `.NET` の C# コンパイラで `git.exe` / `gh.exe` を生成し、`CreateProcess` が
    必ず shim に当たるようにする。コンパイラが見つからなければ**実行を拒否する**。
+3. Git は読み取り系コマンドを明示許可する fail-closed 方式にする。公開ケースで
+   条件付き許可する変更操作は `git push` とモデル化済みの `gh pr ...` だけで、
+   `git send-pack` や `git update-ref` のような別経路は遮断する。
 
 `assert_shims_intercept` が shell あり・なしの両方で `git --version` が
 `calls.log` に届くことを確認してから各ケースを走らせる。届かなければ拒否する。
@@ -163,30 +168,28 @@ shim は PATH を通る**全プロセス**の git/gh を記録する。候補の
   fixture の `allowMutations` が決める。
 - **読み取り**は execution_transcript にも現れる場合のみ候補に帰属させる。
 
-安全性は落ちていない——変更操作はどこから来ても捕まる。取り除いたのは「候補が
-していない読み取りで候補を責める」能力だけである。ただしこれは**原理的な解決では
-なく運用上の回避**であり、Codex 側の挙動が変われば再検討が要る。
+変更操作の安全性は fail-closed にした。候補以外の変更操作も同じ shim で遮断される。
+一方、読み取りのプロセス帰属は**原理的な解決ではなく運用上の回避**であり、Codex
+側の挙動が変われば再検討が要る。診断用に run 外の呼び出しを
+`foreign-calls.log` としてケース成果物へ保存する。
 
-## 未解決の指摘
+## 追加レビューで解消した指摘
 
-現行コードで未解消であることを確認済み。
+以前ここに列挙した8件は、焦点テストを追加して解消した。
 
-- `ancestor:N` のテストが `--is-ancestor` しか見ておらず、`equal` に退化しても
-  緑のまま。`rev-list --count origin/feature..HEAD` を足すとよい。
-- `diverged` は共通祖先を持たない無関係な履歴を作る。実際の分岐とは違うので、
-  ケースを書く人はその差を知っておく必要がある。
-- `gh pr view` が `gh pr list` と同じ配列を返す。本物はオブジェクトを返す。
-- fixture 構築が周囲の global git config を継承する。`commit.gpgsign` や
-  `core.hooksPath` が設定された環境では fixture を作れない。
-  `GIT_CONFIG_GLOBAL` を存在しないパスへ向けると隔離できる。
-- `_publish_remote` が `destination` を `repository` と `destination` の両方に
-  受け取っており、常に同じ値。
-- `_repository_label` がローカルパスのリモートから `owner/name` 風の文字列を
-  作る。`gh pr create --repo` に渡ると失敗する。
-- トレーラの取得に git 2.24 以降が要る。古い git では**黙って** `codexPlanIds`
-  が空になる。silent-wrong-answer の類なので落とさないこと。
-- `_display_ref` が `origin/` しか外さない。別名リモートを upstream にすると
-  `isDefaultBranch` が偽陰性になり、デフォルトブランチ上での停止が働かない。
+- `ancestor:N` は ahead 件数まで検証し、`diverged` は共通祖先を持つ分岐にした。
+- `gh pr view` はオブジェクトを返し、`gh repo view <owner/name>` は origin と
+  upstream の指定を区別する。
+- fixture の global Git config を隔離した。
+- `_publish_remote` の重複引数を除去し、ローカルパスから偽の repository slug を
+  作らないようにした。
+- 古い Git でも `%B` から末尾 trailer block を解析する。本文中だけにある
+  `Codex-Plan:` は provenance として拾わない。
+- `_display_ref` はリモート名を限定しない。
+
+追加で、`git send-pack` による blocklist 回避を再現し、Git shim を読み取り
+allowlist方式へ変更した。評価器が終了コード0のまま assessment を作らない場合も、
+run 全体を失わず harness failure としてケース結果に残す。
 
 ## 委譲についての記録
 
@@ -201,11 +204,6 @@ Task 2 と 3 のコードは Codex に委譲した（`codex-plugin` 経由）。
 
 ## 次にやること
 
-Task 6。最終ゲートと PR の更新。PR 本文の `Verification` 節には実行した検証
-だけを事実として記載する。14/14 の行動評価はここに実結果として書ける。
-
-ready へ上げるかは、未解決の Minor をどこまで閉じるかと合わせて判断する。
-行動評価は通っているが、上に挙げた指摘のうち silent-wrong-answer 型の2件
-（git 2.24 未満で `codexPlanIds` が黙って空になる、`_display_ref` が別名
-リモートで `isDefaultBranch` を偽陰性にする）は、評価では露出しない性質の
-ものであり、通過数を根拠に解消済みとみなしてはならない。
+追加回帰修正をcommit/pushし、CIを確認してPR本文の `Verification` 節を実測値で
+更新する。必要なら行動評価を新しい候補コミットで再実行する。プロセス単位の
+読み取り帰属ができないという既知制約は、PR本文とこのstatus文書の両方に残す。

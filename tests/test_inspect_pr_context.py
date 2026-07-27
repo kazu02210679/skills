@@ -152,6 +152,37 @@ class InspectContextTests(unittest.TestCase):
             context = self.module.inspect(repository, base="main")
             self.assertEqual(["plan-alpha"], context["codexPlanIds"])
 
+    def test_ignores_codex_plan_labels_in_commit_body_prose(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = make_repository(Path(directory))
+            git(repository, "checkout", "--quiet", "-b", "feature")
+            (repository / "feature.txt").write_text("first\n", encoding="utf-8")
+            git(repository, "add", "feature.txt")
+            git(
+                repository,
+                "commit",
+                "--quiet",
+                "-m",
+                (
+                    "Describe the plan\n\n"
+                    "Codex-Plan: body-only\n\n"
+                    "This paragraph proves the label is body prose, not a trailer."
+                ),
+            )
+            (repository / "feature.txt").write_text("second\n", encoding="utf-8")
+            git(repository, "add", "feature.txt")
+            git(
+                repository,
+                "commit",
+                "--quiet",
+                "-m",
+                "Implement the plan\n\nCodex-Plan: plan-real\nCodex-Task: T2",
+            )
+
+            context = self.module.inspect(repository, base="main")
+
+            self.assertEqual(["plan-real"], context["codexPlanIds"])
+
     def test_reports_zero_commits_ahead_for_unborn_repository(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)

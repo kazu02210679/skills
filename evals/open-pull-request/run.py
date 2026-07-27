@@ -364,10 +364,10 @@ configuration = json.loads(
 )
 tool, *arguments = sys.argv[1:]
 # The shims sit on PATH, so any process started with this environment reaches
-# them — not only the candidate. An unrelated `git ls-remote` once landed in
-# calls.log and the evaluator held the candidate to it, failing a case for a
-# command it never ran. Only the candidate carries the run token, so anything
-# without it is recorded separately and kept out of the authoritative log.
+# them — not only the candidate. The run token separates processes outside the
+# evaluation run, but Codex and its children inherit the same token. Therefore
+# calls.log is deliberately a run-wide superset; the evaluator uses the
+# execution transcript to attribute read-only calls to the candidate.
 _entry = json.dumps([tool, *arguments], ensure_ascii=False) + "\n"
 _expected = configuration.get("runToken", "")
 _is_candidate = bool(_expected) and os.environ.get("OPR_EVAL_RUN_TOKEN") == _expected
@@ -376,7 +376,115 @@ with (directory / _log_name).open("a", encoding="utf-8", newline="\n") as log:
     log.write(_entry)
 
 state = configuration["githubState"]
-is_git_push = tool == "git" and "push" in arguments
+
+
+def _git_subcommand(values):
+    options_with_values = {
+        "-C",
+        "-c",
+        "--config-env",
+        "--exec-path",
+        "--git-dir",
+        "--namespace",
+        "--super-prefix",
+        "--work-tree",
+    }
+    index = 0
+    while index < len(values):
+        value = values[index]
+        if value == "--":
+            return values[index + 1] if index + 1 < len(values) else ""
+        if value in options_with_values:
+            index += 2
+            continue
+        if any(
+            value.startswith(prefix)
+            for prefix in (
+                "--config-env=",
+                "--exec-path=",
+                "--git-dir=",
+                "--namespace=",
+                "--super-prefix=",
+                "--work-tree=",
+            )
+        ):
+            index += 1
+            continue
+        if value.startswith("-"):
+            index += 1
+            continue
+        return value
+    return ""
+
+
+def _is_read_only_git_call(values):
+    subcommand = _git_subcommand(values)
+    always_read_only = {
+        "",
+        "blame",
+        "cat-file",
+        "check-ignore",
+        "count-objects",
+        "describe",
+        "diff",
+        "diff-tree",
+        "for-each-ref",
+        "grep",
+        "log",
+        "ls-files",
+        "ls-remote",
+        "ls-tree",
+        "merge-base",
+        "name-rev",
+        "rev-list",
+        "rev-parse",
+        "shortlog",
+        "show",
+        "show-ref",
+        "status",
+        "var",
+        "verify-commit",
+        "verify-tag",
+        "version",
+        "whatchanged",
+    }
+    if subcommand in always_read_only:
+        return True
+    if subcommand == "fetch":
+        # Fetch updates only the disposable fixture's local refs and is an
+        # explicitly supported way for the Skill to refresh remote evidence.
+        return True
+    if subcommand == "branch":
+        tail = values[values.index("branch") + 1 :]
+        return not any(not value.startswith("-") for value in tail)
+    if subcommand == "config":
+        return any(
+            value == "--list"
+            or value.startswith("--get")
+            or value.startswith("--show-")
+            for value in values
+        )
+    if subcommand == "remote":
+        tail = values[values.index("remote") + 1 :]
+        return not tail or tail[0] in ("-v", "--verbose", "get-url", "show")
+    if subcommand == "symbolic-ref":
+        positional = [
+            value
+            for value in values[values.index("symbolic-ref") + 1 :]
+            if not value.startswith("-")
+        ]
+        return len(positional) <= 1
+    if subcommand == "tag":
+        return any(value in ("-l", "--list") for value in values)
+    return False
+
+
+is_git_push = tool == "git" and _git_subcommand(arguments) == "push"
+is_unmodelled_git = (
+    tool == "git"
+    and not is_git_push
+    and not _is_read_only_git_call(arguments)
+)
 is_gh_mutation = tool == "gh" and any(
     arguments[index:index + 2] in (
         ["pr", "create"],
@@ -386,7 +494,10 @@ is_gh_mutation = tool == "gh" and any(
     )
     for index in range(max(0, len(arguments) - 1))
 )
-if (is_git_push or is_gh_mutation) and not state.get("allowMutations", False):
+if is_unmodelled_git or (
+    (is_git_push or is_gh_mutation)
+    and not state.get("allowMutations", False)
+):
     print(
         f"{tool} mutation blocked by open-pull-request evaluation shim",
         file=sys.stderr,
@@ -449,15 +560,33 @@ if tool == "gh" and arguments[:2] == ["pr", "view"]:
 if tool == "gh" and arguments[:2] == ["auth", "status"]:
     print("github.com: authenticated as open-pull-request-eval")
     raise SystemExit(0)
-def _name_with_owner(state):
-    url = state.get("remoteUrls", {}).get("origin", "")
+def _slug_from_url(url):
     slug = url.rsplit("/", 2)[-2:] if "/" in url else []
     if len(slug) == 2:
         return f"{slug[0]}/{slug[1][:-4] if slug[1].endswith('.git') else slug[1]}"
+    return ""
+
+
+def _name_with_owner(state, selector=""):
+    modelled = {
+        _slug_from_url(url)
+        for url in state.get("remoteUrls", {}).values()
+        if _slug_from_url(url)
+    }
+    if selector in modelled:
+        return selector
+    origin = _slug_from_url(state.get("remoteUrls", {}).get("origin", ""))
+    if origin:
+        return origin
     return state.get("nameWithOwner", "")
 
 
 if tool == "gh" and arguments[:2] == ["repo", "view"]:
+    selector = (
+        arguments[2]
+        if len(arguments) > 2 and not arguments[2].startswith("-")
+        else ""
+    )
     print(
         json.dumps(
             {
@@ -465,7 +594,7 @@ if tool == "gh" and arguments[:2] == ["repo", "view"]:
                     "name": state.get("defaultBranch", "main")
                 },
                 "viewerPermission": state.get("viewerPermission", "WRITE"),
-                "nameWithOwner": _name_with_owner(state),
+                "nameWithOwner": _name_with_owner(state, selector),
             },
             ensure_ascii=False,
         )
@@ -605,10 +734,10 @@ def build_candidate_environment(shim_directory: Path) -> dict[str, str]:
         shim_directory,
         environment.get("PATH", ""),
     )
-    # The shims log only invocations carrying this token, so a process that
-    # merely inherits the shimmed PATH cannot have its commands attributed to
-    # the candidate. calls.log is handed to the evaluator as authoritative;
-    # without the token that claim is not true.
+    # The shims log only invocations carrying this run token in calls.log.
+    # Codex and its children inherit it, so calls.log is intentionally a
+    # run-wide superset rather than a process-level attribution mechanism.
+    # Processes outside this run are retained separately in foreign-calls.log.
     configuration_path = shim_directory / "shim-config.json"
     if not configuration_path.is_file():
         raise RuntimeError(
@@ -867,6 +996,20 @@ def _parse_assessment(text: str, case_id: str) -> dict[str, Any]:
     return assessment
 
 
+def _read_assessment(path: Path, case_id: str) -> dict[str, Any]:
+    if not path.is_file():
+        return {
+            "case_id": case_id,
+            "pass": False,
+            "findings": [
+                "Evaluator exited successfully but did not produce its "
+                "assessment file; this is a harness failure, not a candidate "
+                "verdict."
+            ],
+        }
+    return _parse_assessment(path.read_text(encoding="utf-8"), case_id)
+
+
 def run_evaluation(args: argparse.Namespace) -> int:
     output_directory = _safe_output_directory(Path(args.output_dir))
     if output_directory.exists() and any(output_directory.iterdir()):
@@ -981,6 +1124,10 @@ def run_evaluation(args: argparse.Namespace) -> int:
             )
             shutil.copy2(shim_directory / "calls.log", case_output / "calls.log")
             shutil.copy2(
+                shim_directory / "foreign-calls.log",
+                case_output / "foreign-calls.log",
+            )
+            shutil.copy2(
                 shim_directory / "forwarding.log",
                 case_output / "forwarding.log",
             )
@@ -1049,10 +1196,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
                 "evaluator_returncode": evaluation.returncode,
             }
             continue
-        assessment = _parse_assessment(
-            evaluator_output.read_text(encoding="utf-8"),
-            case_id,
-        )
+        assessment = _read_assessment(evaluator_output, case_id)
         (case_output / "assessment.json").write_text(
             json.dumps(assessment, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -1067,6 +1211,7 @@ def run_evaluation(args: argparse.Namespace) -> int:
                 "input": f"{case_id}/input.md",
                 "fixture": f"{case_id}/fixture.json",
                 "calls_log": f"{case_id}/calls.log",
+                "foreign_calls_log": f"{case_id}/foreign-calls.log",
                 "forwarding_log": f"{case_id}/forwarding.log",
                 "execution_transcript": f"{case_id}/execution-transcript.jsonl",
                 "response": f"{case_id}/response.md",
