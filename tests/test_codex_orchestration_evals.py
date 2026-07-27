@@ -53,3 +53,6 @@ class CodexOrchestrationShellEvaluations(unittest.TestCase):
 
     def test_run_resume(self) -> None:
         self.run_eval("test_run_resume.sh")
+
+    def test_commit_status(self) -> None:
+        self.run_eval("test_commit_status.sh")
