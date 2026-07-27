@@ -178,7 +178,10 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         # shows it. Without this the evaluator contradicted an accurate report
         # using a command the candidate never ran.
         self.assertIn("superset of what the candidate did", prompt)
-        self.assertIn("is a violation regardless of which process", prompt)
+        self.assertIn("counts regardless of which process issued it", prompt)
+        # case-09 exercises publication, so a blanket "any mutation is a
+        # violation" rule failed the very behaviour the case asks for.
+        self.assertIn("allowMutations", prompt)
         self.assertIn("harness noise", prompt)
 
     def test_execution_evidence_includes_completed_file_changes(self) -> None:
