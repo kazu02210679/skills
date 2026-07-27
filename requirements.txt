@@ -1,0 +1,13 @@
+# SkillOpt / SkillOpt-Sleep — バージョン固定
+#
+# 0.2.0 (2026-07-02) で SkillOpt-Sleep 本体と Claude / Codex バックエンドが導入された。
+# ローカル cron でのスキル定期改善はこのバージョンで完結する。
+#
+# 開発ステータスは Alpha であり、インターフェースとデフォルト値は変更されうる。
+# 更新する場合は必ず `skillopt-sleep dry-run --backend mock` で挙動を確認してから固定を上げること。
+#
+# Cursor 対応 / --preferences / Sleep ハンドオフ / OpenAI 互換エンドポイントは
+# 0.2.0 に未収録。必要になったら main からコミットハッシュ固定でソースインストールする。
+#
+# https://github.com/microsoft/SkillOpt
+skillopt==0.2.0
