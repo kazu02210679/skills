@@ -15,18 +15,82 @@ Claude Code と Codex で共用するエージェントスキルの正本リポ�
 資産はスキルそのものであって、最適化ツールではない。SkillOpt は交換可能な道具として
 外部参照にとどめる(→ [依存の扱い](#依存の扱い))。
 
-## スキルの配置先
+## 収録スキル
 
-`SKILL.md` 形式は Claude Code と Codex で共通で、そのまま移植できる。
+正本は `skills/` に置く。現在は次の71個を収録している。
+
+- `complexity-aware-execution` — 調査と検証の深さをタスクの難易度・リスクに合わせる
+- `writing-style` — 正確さを保ちながら日本語の認知リズムを整える
+- `handoff` — 会話の目的・前提・未解決事項を保って新しいタスクへ移す
+- [phuryn/pm-skills](https://github.com/phuryn/pm-skills) 2.1.0の68 Skill
+
+PM SkillsはMITライセンスに基づいてSkill本体だけを収録した。Claude固有のコマンドと
+プラグイン定義は含めていない。出典とライセンスは
+`third_party/pm-skills/source.json`、`third_party/pm-skills/LICENSE`、および
+`third_party/pm-skills/SHA256SUMS` に固定している。
+
+## Codex / Claude Codeから使う
+
+`SKILL.md` の基本形式とSkill本文は両者で共用する。ただし、実行時の引数展開や上流の
+slash commandにはホスト差がある。`$ARGUMENTS` と欠落した上流コマンドの扱いは
+[ホスト互換性契約](docs/host-compatibility.md)に明記しており、完全なruntime parityは主張しない。
 
 | ツール | プロジェクト用 | 個人用 |
 |---|---|---|
 | Claude Code | `.claude/skills/` | `~/.claude/skills/` |
 | Codex | `.agents/skills/` | `~/.agents/skills/` |
 
-形式が共通なので、**最初からツール別に分岐させる必要はない**。SkillOpt の論文では、
+このリポジトリを開いて作業する場合、Codexは `AGENTS.md`、Claude Codeは `CLAUDE.md` から
+`skills/` を正本として参照する。別のプロジェクトでも自動発見させる場合は、同期スクリプトを使う。
+
+Windows PowerShell:
+
+```powershell
+# 個人用としてCodexとClaude Codeの両方へ同期
+powershell -ExecutionPolicy Bypass -File .\scripts\install-skills.ps1 -Agent both -Scope user
+
+# 特定プロジェクトへ同期
+powershell -ExecutionPolicy Bypass -File .\scripts\install-skills.ps1 `
+  -Agent both -Scope project -ProjectRoot C:\path\to\project
+
+# 既存の管理対象Skillをディレクトリ単位で明示的に置換
+powershell -ExecutionPolicy Bypass -File .\scripts\install-skills.ps1 `
+  -Agent both -Scope project -ProjectRoot C:\path\to\project -Force
+```
+
+macOS / Linux:
+
+```bash
+# 個人用としてCodexとClaude Codeの両方へ同期
+./scripts/install-skills.sh --agent both --scope user
+
+# 特定プロジェクトへ同期
+./scripts/install-skills.sh --agent both --scope project --project-root /path/to/project
+
+# 既存の管理対象Skillをディレクトリ単位で明示的に置換
+./scripts/install-skills.sh --agent both --scope project --project-root /path/to/project --force
+```
+
+同期先は配布物であり、編集元ではない。改善するときは `skills/<skill-name>/SKILL.md` を変更し、
+検証後にもう一度同期する。既存の管理対象ディレクトリが1つでもあれば、同期は既定で
+競合として書き込み前に停止する。`-Force` / `--force`（`--replace`も同義）は全対象を
+ステージして検証した後、ディレクトリ単位で置換する。失敗時は触れた全対象をロールバックする。
+各同期先の `.third-party-notices/` には、完全なMITライセンス、出典情報、SHA-256
+manifest、ホスト互換性文書も配置される。
+
+```bash
+python -m pip install -r requirements-validation.txt
+python scripts/validate-skills.py
+python -m unittest discover -s tests -v
+```
+
+本文をホスト別にforkする前に、互換性レイヤーと評価で差を吸収する。SkillOpt の論文では、
 Codex で訓練したスキルを Claude Code に移した際に 22.1 → 81.8 (+59.7) と、
 直接訓練した場合(80.4)と同等の性能が出ている。分岐は「評価で有意差が出てから」でよい。
+
+`handoff` は、Codexでタスク管理機能を利用できる場合は新しいタスクを直接作成する。
+ChatGPTなど同等の機能がない環境では、コピー可能な引き継ぎの文書をフォールバックする。
+ChatGPTとCodexのSkillは自動同期されないため、それぞれ個別にインストールする。
 
 ## SkillOpt による定期改善
 
@@ -120,5 +184,7 @@ Claude Code 内で `/skillopt-sleep` を、Codex でスキルとして呼び出�
 
 - [microsoft/SkillOpt](https://github.com/microsoft/SkillOpt)
 - [SkillOpt-Sleep README](https://github.com/microsoft/SkillOpt/blob/main/docs/sleep/README.md) / [RESULTS.md](https://github.com/microsoft/SkillOpt/blob/main/docs/sleep/RESULTS.md)
+- [Codex Session Handoff Skill — tegnike](https://gist.github.com/tegnike/09dbb98711d8b91e66de21611f5b88ff) — [MITライセンス](third_party/handoff-gist/LICENSE) / [出典情報](third_party/handoff-gist/source.json)
+- [ホスト互換性契約](docs/host-compatibility.md) / [機械可読contract](compatibility/host-contract.json)
 - [CLI リファレンス](https://github.com/microsoft/SkillOpt/blob/main/docs/reference/cli.md)
 - [SkillOpt: Agent skills as trainable parameters — Microsoft Research](https://www.microsoft.com/en-us/research/blog/skillopt-agent-skills-as-trainable-parameters/)

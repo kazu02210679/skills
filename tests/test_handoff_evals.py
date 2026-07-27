@@ -1,0 +1,406 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import yaml
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+EVAL_ROOT = REPOSITORY_ROOT / "evals" / "handoff"
+RUNNER_PATH = EVAL_ROOT / "run.py"
+
+
+def load_runner():
+    spec = importlib.util.spec_from_file_location("handoff_eval_runner", RUNNER_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load {RUNNER_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class HandoffEvaluationIsolationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runner = load_runner()
+        cls.criteria = yaml.safe_load(
+            (EVAL_ROOT / "criteria.yaml").read_text(encoding="utf-8")
+        )
+
+    def test_raw_inputs_are_separate_from_evaluator_criteria(self) -> None:
+        case_ids = set(self.criteria["cases"])
+        input_ids = {
+            path.stem
+            for path in (EVAL_ROOT / "inputs").glob("*.md")
+        }
+        self.assertEqual(case_ids, input_ids)
+
+        criteria_only_markers = (
+            "pass_conditions",
+            "universal_pass_conditions",
+            "genuinely new non-fork task",
+            "Facts:",
+            "Inferences:",
+            "Unknowns:",
+            "Recoverable artifacts:",
+            "do not reproduce diffs or logs",
+            "Show the complete",
+            "Show the user-facing result",
+        )
+        for input_path in (EVAL_ROOT / "inputs").glob("*.md"):
+            text = input_path.read_text(encoding="utf-8")
+            with self.subTest(input=input_path.name):
+                for marker in criteria_only_markers:
+                    self.assertNotIn(marker, text)
+
+    def test_evaluator_criteria_accept_absent_locators_and_mock_evidence(
+        self,
+    ) -> None:
+        conditions = "\n".join(
+            self.criteria["universal_pass_conditions"]
+            + [
+                condition
+                for case in self.criteria["cases"].values()
+                for condition in case["pass_conditions"]
+            ]
+        ).lower()
+        self.assertIn("absent from the source", conditions)
+        self.assertIn("unknown", conditions)
+        self.assertIn("simulated capability invocation/result", conditions)
+        self.assertIn("not a forbidden", conditions)
+        self.assertIn("acknowledgment is expected to be pending", conditions)
+        self.assertIn("need not already have occurred", conditions)
+
+    def test_execution_prompts_do_not_include_evaluator_criteria(self) -> None:
+        criteria_text = (EVAL_ROOT / "criteria.yaml").read_text(encoding="utf-8")
+        for case_id in self.criteria["cases"]:
+            prompt = self.runner.build_execution_prompt(
+                Path("candidate/SKILL.md"),
+                Path(f"inputs/{case_id}.md"),
+            )
+            with self.subTest(case_id=case_id):
+                self.assertNotIn("criteria.yaml", prompt)
+                self.assertNotIn(criteria_text, prompt)
+                self.assertNotIn("pass_conditions", prompt)
+                self.assertNotRegex(prompt, r"[A-Za-z]:\\Users\\")
+                self.assertFalse(prompt.startswith("/"))
+                self.assertIn("Do not emit debug or tool logs", prompt)
+                self.assertIn("observable mock capability action/result", prompt)
+
+    def test_evidence_manifest_records_candidate_and_exact_prompts(self) -> None:
+        prompts = {
+            case_id: self.runner.build_execution_prompt(
+                Path("candidate/SKILL.md"),
+                Path(f"inputs/{case_id}.md"),
+            )
+            for case_id in self.criteria["cases"]
+        }
+        manifest = self.runner.build_evidence_manifest(
+            candidate_commit="a" * 40,
+            skill_sha256="b" * 64,
+            codex_version="codex-cli test",
+            model="test-model",
+            execution_prompts=prompts,
+        )
+        self.assertEqual("a" * 40, manifest["candidate"]["commit"])
+        self.assertEqual("b" * 64, manifest["candidate"]["skill_sha256"])
+        self.assertEqual(prompts, manifest["execution_prompts"])
+        json.dumps(manifest)
+
+    def test_candidate_binding_rejects_content_not_in_recorded_commit(self) -> None:
+        digest = self.runner.assert_candidate_content(
+            b"same candidate\n",
+            b"same candidate\n",
+        )
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            self.runner.assert_candidate_content(
+                b"recorded candidate\n",
+                b"dirty candidate\n",
+            )
+
+    def test_simulated_temp_root_is_resolved_outside_repository(self) -> None:
+        with self.assertRaisesRegex(ValueError, "outside the repository"):
+            self.runner._safe_simulated_temp_root(REPOSITORY_ROOT)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            requested = Path(temporary_directory) / "simulated-root"
+            resolved = self.runner._safe_simulated_temp_root(requested)
+            self.assertEqual(requested.resolve(), resolved)
+            self.assertTrue(resolved.is_dir())
+
+    def test_cli_accepts_simulated_temp_root(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            [
+                "run.py",
+                "--output-dir",
+                "evidence",
+                "--candidate-commit",
+                "a" * 40,
+                "--simulated-temp-root",
+                "safe-temp",
+            ],
+        ):
+            arguments = self.runner.parse_args()
+        self.assertEqual("safe-temp", arguments.simulated_temp_root)
+
+    def test_long_evaluator_prompt_is_passed_via_utf8_stdin(self) -> None:
+        long_prompt = self.runner.build_evaluator_prompt(
+            "case-long",
+            "入力データ\n" * 400,
+            "候補応答\n" * 400,
+            ["Universal condition."],
+            ["Case condition."],
+        )
+        self.assertGreater(len(long_prompt.encode("utf-8")), 6_000)
+
+        command = self.runner._codex_command(
+            "codex",
+            long_prompt,
+            Path("assessment.json"),
+            model="test-model",
+        )
+        self.assertEqual("-", command[-1])
+        self.assertNotIn(long_prompt, command)
+
+        result = self.runner._run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write(sys.stdin.read())",
+            ],
+            cwd=REPOSITORY_ROOT,
+            input_text=long_prompt,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(long_prompt, result.stdout)
+
+    def test_dry_run_binds_linked_worktree_commit_and_writes_evidence(self) -> None:
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPOSITORY_ROOT,
+            text=True,
+        ).strip()
+        resolved_commit, committed_skill = self.runner._read_committed_candidate(
+            head
+        )
+        received_prompts: list[str] = []
+        execution_inputs: dict[str, str] = {}
+        case_three_temp_directories: list[Path] = []
+
+        def fake_run(
+            command: list[str],
+            *,
+            cwd: Path,
+            input_text: str | None = None,
+        ):
+            if command[-1] == "--version":
+                self.assertIsNone(input_text)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="codex-cli dry-run\n",
+                    stderr="",
+                )
+
+            self.assertEqual("-", command[-1])
+            self.assertIsNotNone(input_text)
+            self.assertNotIn(input_text, command)
+            received_prompts.append(input_text)
+            output_path = Path(command[command.index("-o") + 1])
+            prompt = input_text
+            if prompt.startswith("Act as a strict behavioral evaluator."):
+                payload = json.loads(prompt.split("\n\n", 1)[1])
+                output_path.write_text(
+                    json.dumps(
+                        {
+                            "case_id": payload["case_id"],
+                            "pass": True,
+                            "findings": [],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                input_files = list((cwd / "inputs").glob("*.md"))
+                self.assertEqual(1, len(input_files))
+                execution_inputs[input_files[0].stem] = input_files[0].read_text(
+                    encoding="utf-8"
+                )
+                if input_files[0].stem == "case-3":
+                    match = re.search(
+                        r"operating system's temporary directory is\s+"
+                        r"`([^`]+)`",
+                        execution_inputs["case-3"],
+                    )
+                    self.assertIsNotNone(match)
+                    case_three_temp_directory = Path(match.group(1))
+                    self.assertTrue(case_three_temp_directory.is_dir())
+                    case_three_temp_directories.append(
+                        case_three_temp_directory
+                    )
+                output_path.write_text(
+                    "Simulated candidate response.\n",
+                    encoding="utf-8",
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"type":"dry-run"}\n',
+                stderr="",
+            )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            candidate_path = temporary_root / "SKILL.md"
+            candidate_path.write_bytes(committed_skill)
+            output_directory = temporary_root / "evidence"
+            simulated_temp_root = temporary_root / "simulated-temp"
+            arguments = argparse.Namespace(
+                output_dir=str(output_directory),
+                candidate_commit=head,
+                model="dry-run-model",
+                codex="codex-dry-run",
+                simulated_temp_root=str(simulated_temp_root),
+            )
+
+            with (
+                mock.patch.object(
+                    self.runner,
+                    "CANDIDATE_PATH",
+                    candidate_path,
+                ),
+                mock.patch.object(
+                    self.runner,
+                    "_run",
+                    side_effect=fake_run,
+                ),
+            ):
+                result = self.runner.run_evaluation(arguments)
+
+            self.assertEqual(0, result)
+            evidence = json.loads(
+                (output_directory / "evidence.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(resolved_commit, evidence["candidate"]["commit"])
+            self.assertEqual(
+                hashlib.sha256(committed_skill).hexdigest(),
+                evidence["candidate"]["skill_sha256"],
+            )
+            self.assertEqual(
+                {"passed": 3, "total": 3},
+                evidence["summary"],
+            )
+            self.assertEqual(
+                set(self.criteria["cases"]),
+                set(evidence["execution_prompts"]),
+            )
+            case_three = evidence["cases"]["case-3"]
+            self.assertIn("environment", case_three)
+            self.assertEqual(
+                str(simulated_temp_root.resolve()),
+                case_three["environment"]["simulated_temp_root"],
+            )
+            os_temp_directory = case_three["environment"]["os_temp_directory"]
+            self.assertEqual(
+                simulated_temp_root.resolve(),
+                Path(os_temp_directory).parent,
+            )
+            self.assertRegex(
+                Path(os_temp_directory).name,
+                r"^handoff-eval-case-3-",
+            )
+            self.assertEqual(
+                [Path(os_temp_directory)],
+                case_three_temp_directories,
+            )
+            self.assertIn(os_temp_directory, execution_inputs["case-3"])
+            self.assertNotIn(
+                "{{OS_TEMP_DIRECTORY}}",
+                execution_inputs["case-3"],
+            )
+            effective_input = (
+                output_directory / case_three["artifacts"]["input"]
+            ).read_text(encoding="utf-8")
+            self.assertEqual(execution_inputs["case-3"], effective_input)
+            for index, case_id in enumerate(sorted(self.criteria["cases"])):
+                with self.subTest(case_id=case_id):
+                    case_evidence = evidence["cases"][case_id]
+                    self.assertEqual(
+                        evidence["execution_prompts"][case_id],
+                        received_prompts[index * 2],
+                    )
+                    self.assertEqual(
+                        case_evidence["evaluator_prompt"],
+                        received_prompts[index * 2 + 1],
+                    )
+                    self.assertEqual(
+                        "-",
+                        case_evidence["execution_command"][-1],
+                    )
+                    self.assertEqual(
+                        "-",
+                        case_evidence["evaluator_command"][-1],
+                    )
+                    self.assertTrue(
+                        (
+                            output_directory
+                            / case_evidence["artifacts"]["response"]
+                        ).is_file()
+                    )
+            self.assertFalse(Path(os_temp_directory).exists())
+
+    def test_backup_retention_requires_destination_acknowledgment(self) -> None:
+        skill_text = (
+            REPOSITORY_ROOT / "skills" / "handoff" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "destination has received and acknowledged the handoff",
+            skill_text,
+        )
+        self.assertIn("source-task result", skill_text)
+        self.assertIn(
+            "retained pending destination receipt and acknowledgment",
+            skill_text,
+        )
+        self.assertIn(
+            "cleanup occurs only after acknowledgment",
+            skill_text,
+        )
+        self.assertIn("explicit user request", skill_text)
+        self.assertNotIn(
+            "source task confirms that the handoff is current",
+            skill_text,
+        )
+
+    def test_tracked_eval_files_have_no_machine_specific_paths(self) -> None:
+        for path in EVAL_ROOT.rglob("*"):
+            if (
+                not path.is_file()
+                or "__pycache__" in path.parts
+                or path.suffix == ".pyc"
+            ):
+                continue
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.relative_to(REPOSITORY_ROOT)):
+                self.assertIsNone(re.search(r"[A-Za-z]:\\Users\\", text))
+                self.assertNotIn("/Users/", text)
+                self.assertNotIn("/home/", text)
+
+
+if __name__ == "__main__":
+    unittest.main()
