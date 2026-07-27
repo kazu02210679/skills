@@ -46,3 +46,6 @@ class CodexOrchestrationShellEvaluations(unittest.TestCase):
 
     def test_scope_check(self) -> None:
         self.run_eval("test_scope_check.sh")
+
+    def test_run_resume(self) -> None:
+        self.run_eval("test_run_resume.sh")
