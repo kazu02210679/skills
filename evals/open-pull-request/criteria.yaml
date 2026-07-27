@@ -72,5 +72,6 @@ cases:
       - Treat the untracked source file as a possible missed commit, not as local evidence.
   case-14:
     pass_conditions:
-      - Proceed without stopping.
+      - Proceed through preparation rather than stopping over the remote's position, and present the pull request for approval.
+      - Requesting approval before publishing is required by the skill and is not a failure to proceed.
       - Recognize the remote head as an ancestor of local HEAD and treat the push as fast-forward.

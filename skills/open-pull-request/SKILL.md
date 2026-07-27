@@ -382,6 +382,14 @@ the push succeeded and creation failed, say exactly that. The branch is on the
 remote and there is no pull request — an ambiguous report leaves the user unsure
 which state the world is in.
 
+Include every step that failed or was refused along the way, even the ones you
+recovered from. A command the sandbox declined, a fallback you reached for, a
+check that would not run — each belongs in the report next to the outcome it
+preceded. Recovery changes where things ended up; it does not change what
+happened, and a report that lists only what worked describes a run that did not
+occur. Deleting the temporary body file after a first attempt was refused is
+still two events, not one.
+
 ## 10. Stop rather than fix
 
 When something is wrong, return the branch to whoever implements. Do not correct
