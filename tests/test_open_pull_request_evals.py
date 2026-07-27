@@ -206,6 +206,36 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         self.assertIn("allowMutations", prompt)
         self.assertIn("harness noise", prompt)
 
+    def test_execution_evidence_bounds_a_runaway_command_output(self) -> None:
+        # One command returned a megabyte and pushed the evaluator prompt past
+        # the model's input limit, aborting the run after all fourteen cases
+        # had already executed. The cut must be visible: a silently truncated
+        # output would be judged as though it were the whole thing.
+        huge = "x" * 2_000_000
+        evidence = self.runner.extract_execution_evidence(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "powershell -Command dump",
+                        "aggregated_output": huge,
+                        "exit_code": 0,
+                        "status": "completed",
+                    },
+                }
+            )
+            + "\n"
+        )
+        prompt = self.runner.build_evaluator_prompt(
+            "case-14", "x", {}, "response", "log\n", evidence, ["u"], ["c"]
+        )
+
+        output = evidence[0]["aggregated_output"]
+        self.assertLess(len(output), 6000)
+        self.assertIn("omitted by the evaluation harness", output)
+        self.assertLess(len(prompt), 1_048_576)
+
     def test_execution_evidence_includes_completed_file_changes(self) -> None:
         evidence = self.runner.extract_execution_evidence(
             json.dumps(

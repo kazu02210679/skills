@@ -108,6 +108,30 @@ def build_evaluator_prompt(
     )
 
 
+MAX_COMMAND_OUTPUT_CHARACTERS = 4000
+MAX_EVIDENCE_ENTRIES = 400
+
+
+def _bounded_output(value: Any) -> Any:
+    """Cap one command's output, marking the cut so it cannot pass as whole.
+
+    A single command once returned a megabyte and pushed the evaluator prompt
+    past the model's input limit, which aborted the run after every case had
+    already executed. Silent truncation would be worse than the crash: the
+    evaluator would weigh a fragment believing it had the lot.
+    """
+
+    if not isinstance(value, str) or len(value) <= MAX_COMMAND_OUTPUT_CHARACTERS:
+        return value
+    kept = MAX_COMMAND_OUTPUT_CHARACTERS // 2
+    omitted = len(value) - kept * 2
+    return (
+        value[:kept]
+        + f"\n...[{omitted} characters omitted by the evaluation harness]...\n"
+        + value[-kept:]
+    )
+
+
 def extract_execution_evidence(transcript: str) -> list[dict[str, Any]]:
     """Extract completed command and file-change records from the transcript."""
 
@@ -127,15 +151,12 @@ def extract_execution_evidence(transcript: str) -> list[dict[str, Any]]:
             evidence.append(
                 {
                     "type": item_type,
-                    **{
-                        key: item.get(key)
-                        for key in (
-                            "command",
-                            "aggregated_output",
-                            "exit_code",
-                            "status",
-                        )
-                    },
+                    "command": _bounded_output(item.get("command")),
+                    "aggregated_output": _bounded_output(
+                        item.get("aggregated_output")
+                    ),
+                    "exit_code": item.get("exit_code"),
+                    "status": item.get("status"),
                 }
             )
         elif item_type == "file_change":
@@ -146,6 +167,15 @@ def extract_execution_evidence(transcript: str) -> list[dict[str, Any]]:
                     "status": item.get("status"),
                 }
             )
+    if len(evidence) > MAX_EVIDENCE_ENTRIES:
+        omitted = len(evidence) - MAX_EVIDENCE_ENTRIES
+        evidence = evidence[:MAX_EVIDENCE_ENTRIES]
+        evidence.append(
+            {
+                "type": "harness_note",
+                "detail": f"{omitted} further records omitted by the harness",
+            }
+        )
     return evidence
 
 
@@ -996,10 +1026,29 @@ def run_evaluation(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
         if evaluation.returncode != 0:
-            raise RuntimeError(
-                f"{case_id} evaluator failed ({evaluation.returncode}); "
-                f"see {case_output}"
+            # One evaluator failure used to abort the run and discard every
+            # verdict already earned, including the manifest. Record it as a
+            # failed case and carry on: the other thirteen results are real
+            # and a lost run costs an hour of Codex calls to reproduce.
+            assessment = {
+                "case_id": case_id,
+                "pass": False,
+                "findings": [
+                    f"Evaluator failed with exit code {evaluation.returncode}; "
+                    "this is a harness failure, not a candidate verdict. See "
+                    f"{case_output / 'evaluator-stderr.txt'}."
+                ],
+            }
+            (case_output / "assessment.json").write_text(
+                json.dumps(assessment, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
             )
+            manifest["cases"][case_id] = {
+                "pass": False,
+                "findings": assessment["findings"],
+                "evaluator_returncode": evaluation.returncode,
+            }
+            continue
         assessment = _parse_assessment(
             evaluator_output.read_text(encoding="utf-8"),
             case_id,
