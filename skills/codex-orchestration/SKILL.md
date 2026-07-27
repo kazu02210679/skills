@@ -3,103 +3,97 @@ name: codex-orchestration
 description: Delegate implementation from Claude Code to OpenAI Codex while Claude remains the requirements owner and acceptance reviewer. Use in Claude Code when the user asks to let Codex implement a sizeable change, have Claude direct and verify Codex, or continue a Codex run with targeted guidance after a blocker. In Codex, use only to inspect or maintain this orchestration workflow; do not recursively delegate to another Codex session unless the user explicitly requests it.
 ---
 
-# Claude ⇄ Codex orchestration
+# Guarded Codex orchestration
 
-Keep Claude Code as the orchestrator and reviewer. Let Codex investigate,
-design, implement, test, and report. Do not let either model's report substitute
-for verification.
+Keep the orchestrator responsible for requirements, scope, independent review,
+and delivery. Let Codex investigate, implement, test, and report. Treat every
+Codex report as a claim until the orchestrator verifies it.
 
-Resolve `SKILL_DIR` as the directory containing this `SKILL.md`. The wrappers
-are `SKILL_DIR/scripts/codex_run.sh` and
-`SKILL_DIR/scripts/codex_resume.sh`; do not assume a Claude plugin root.
+Set `SKILL_DIR` to this Skill's directory. Invoke the bundled scripts from
+`SKILL_DIR/scripts/`; do not depend on a plugin root, marketplace package,
+slash command, or reviewer agent.
 
-## 1. Define the boundary
+## Plan and run tasks
 
-Turn the request into:
+Use a task plan for sizeable work. Follow this order:
 
-- requirements with genuine ambiguities resolved;
-- explicit in-scope and out-of-scope items;
-- a verifiable acceptance checklist;
-- the target repository's build, test, lint, type-check, and dependency rules.
+1. Define plan-level requirements, constraints, and observable acceptance criteria.
+2. Split the work into independently reviewable `T<N>` tasks.
+3. Give every task an explicit product-file allowlist and test command.
+4. Run `codex_status.sh` to identify the next uncommitted task.
+5. Run `codex_run.sh`, then independently inspect its evidence and the diff.
+6. Use `codex_resume.sh` only for a targeted, bounded retry.
+7. Run `codex_commit.sh` only after independent verification passes.
+8. Repeat until `codex_status.sh` reports the plan complete.
 
-Each acceptance item must name an observable check. Do not add features outside
-the agreed boundary.
+Read [the task-plan contract](references/task-plan-contract.md) before creating
+or running a plan. It defines the required files, frozen run contract, exit
+statuses, and commit evidence.
 
-## 2. Write the task packet
+Keep task packets precise. State the task requirement, in-scope and out-of-scope
+work, acceptance checks, test policy, and a stuck protocol: document the cause
+and smallest alternative, then stop instead of making an unrequested change.
+Tell Codex not to modify Git history or `.codex-instructions/`.
 
-Create `.codex-instructions/<task>.md` in the target repository. Include:
+## Run the guarded loop
 
-1. the top-level requirement and a prohibition on unrequested features;
-2. in-scope and out-of-scope work;
-3. the acceptance checklist;
-4. a test policy covering relevant boundaries, timeouts, invalid states, and
-   reproducibility;
-5. this stuck protocol:
-
-   > If you hit a blocker or a spec/API conflict, do not make large
-   > unrequested changes. Document the problem, cause, and minimal alternative
-   > in the report, then stop.
-
-Keep task packets and later hint files auditable. Commit them only when the
-repository's policy allows generated coordination artifacts.
-
-## 3. Delegate
-
-Run:
+Use a non-default branch with no uncommitted product changes. Metadata under
+`.codex-instructions/` is an exception because it records the plan; product
+files are not. Do not override the branch or dirty-tree preflight without an
+explicit reason and user authorization.
 
 ```bash
-"SKILL_DIR/scripts/codex_run.sh" \
-  .codex-instructions/<task>.md \
-  <workdir>
+"$SKILL_DIR/scripts/codex_status.sh" <plan-dir> <workdir>
+"$SKILL_DIR/scripts/codex_run.sh" <plan-dir>/T<N>.md <workdir>
 ```
 
-The wrapper prints paths for `report.md`, `events.jsonl`, and `meta.json`.
-`CODEX_SANDBOX` defaults to `workspace-write`; use `read-only` for a trial.
-Use `danger-full-access` only in an isolated environment after the user has
-authorized that risk.
+The run prints `RUNDIR`. Read the latest `attempt-N/report.md`,
+`events.jsonl`, `stderr.log`, `meta.json`, and `scope.txt` there. The wrapper
+freezes the task, allowlist, tests, plan identity, and baseline before Codex
+runs. A changed plan or frozen contract is a failure, not a retry signal.
 
-## 4. Verify independently
+If review identifies a narrow, evidence-backed correction, write
+`T<N>.hint-M.md` in the plan directory and resume the recorded run:
 
-Read [acceptance-review.md](references/acceptance-review.md), then:
+```bash
+"$SKILL_DIR/scripts/codex_resume.sh" \
+  <plan-dir>/T<N>.hint-M.md <workdir> <rundir>
+```
 
-1. read the task packet and derive the acceptance checklist;
-2. read `report.md` as a claim, not evidence;
-3. run every applicable check yourself;
-4. inspect the diff for scope creep, weakened tests, and bypassed guardrails;
-5. return `DELIVER` only when every required item passes.
+The default cap is three attempts. Stop and ask the user to decide when the
+same blocker persists or the cap is exhausted.
 
-If verification cannot run, mark the affected item unresolved. Do not turn a
-missing check into a pass.
+After all task checks pass, record any stable interface in `interfaces.md`,
+then commit the task:
 
-## 5. Unblock with a bounded loop
+```bash
+"$SKILL_DIR/scripts/codex_commit.sh" <plan-dir> T<N> <workdir> <rundir>
+```
 
-When Codex is blocked or verification fails:
+The commit gate reruns frozen tests and scope checks, verifies the plan and
+baseline, and publishes one task commit to the named branch ref it pinned at
+the start of publication. It adds `Codex-Plan:` and `Codex-Task:` trailers.
+Do not create, amend, rebase, or publish task commits outside this gate.
 
-1. diagnose the root cause from `events.jsonl`, `stderr.log`, the diff, and
-   failing output;
-2. write `.codex-instructions/<task>.hint-N.md` with the root cause, concrete
-   guidance, and the minimal path forward;
-3. resume:
+## Review and finish
 
-   ```bash
-   "SKILL_DIR/scripts/codex_resume.sh" \
-     .codex-instructions/<task>.hint-N.md \
-     <workdir> \
-     <outdir>
-   ```
+Read [the acceptance-review checklist](references/acceptance-review.md).
+Run every task and plan-level acceptance check yourself. Re-run the scope gate
+with the frozen allowlist, inspect the trailers and history, and return
+`UNRESOLVED` whenever a required check cannot run.
 
-4. return to independent verification.
-
-Cap the loop at three attempts by default. Stop earlier when the same blocker
-repeats without new evidence. Tell the user what failed, what was tried, and
-the smallest recommended decision.
+When status reports all tasks committed, run the full plan-level acceptance
+suite. This Skill ends with a verified local branch. Pushing, opening a pull
+request, merging, deploying, or changing permissions requires separate user
+authorization and an appropriate workflow.
 
 ## Guardrails
 
+- Keep the sandbox at the smallest level that works; `workspace-write` is the
+  default and `danger-full-access` requires an isolated environment and user authorization.
+- Treat exit `2` as an unsafe preflight or usage failure, `3` as a scope or
+  pending-task failure, `4` as plan or contract tampering, `5` as a moved HEAD
+  or publication conflict, and `6` as contract drift before commit.
 - Do not use this workflow for a trivial change unless the user explicitly
   wants delegation.
-- Never trust generated reports without rerunning the acceptance checks.
-- Keep the sandbox no broader than the task requires.
-- Do not publish, merge, deploy, or change repository permissions unless the
-  user separately asks for that action.
-- Do not invoke this workflow recursively from Codex by default.
+- Do not let a generated report replace independent verification.

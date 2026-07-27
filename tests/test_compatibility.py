@@ -23,8 +23,11 @@ class HostCompatibilityTests(unittest.TestCase):
         compatibility = (
             REPOSITORY_ROOT / "docs" / "host-compatibility.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("完全なruntime parityは主張しません", compatibility)
-        self.assertIn("$ARGUMENTS", compatibility)
+        self.assertIn(
+            "does not claim that the hosts have identical runtime behavior",
+            compatibility,
+        )
+        self.assertIn("intentionally retired", compatibility)
 
     def test_codex_orchestration_uses_skill_relative_wrappers(self) -> None:
         skill_root = REPOSITORY_ROOT / "skills" / "codex-orchestration"
@@ -72,6 +75,34 @@ class HostCompatibilityTests(unittest.TestCase):
             },
             skill_names,
         )
+        root_readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("neither vendored nor cataloged here", root_readme)
+        self.assertIn(
+            "[`phuryn/pm-skills`](https://github.com/phuryn/pm-skills)",
+            root_readme,
+        )
+
+    def test_task_plan_contract_permits_untracked_active_plan(self) -> None:
+        contract = (
+            REPOSITORY_ROOT
+            / "skills"
+            / "codex-orchestration"
+            / "references"
+            / "task-plan-contract.md"
+        ).read_text(encoding="utf-8")
+        normalized_contract = " ".join(contract.split())
+        self.assertIn("may be untracked during an active run", normalized_contract)
+        self.assertIn(
+            "codex_commit.sh` stages the active plan directory",
+            normalized_contract,
+        )
+
+    def test_codex_orchestration_documents_retired_plugin_interfaces(self) -> None:
+        readme = (
+            REPOSITORY_ROOT / "skills" / "codex-orchestration" / "README.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("intentionally retired", readme)
+        self.assertIn("legacy plugin repository is retired or deleted", readme)
 
 
 if __name__ == "__main__":

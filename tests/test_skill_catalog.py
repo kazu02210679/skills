@@ -53,11 +53,20 @@ class SkillCatalogTests(unittest.TestCase):
                 )
 
     def test_codex_orchestration_is_in_the_canonical_catalog(self) -> None:
-        names = {
-            name
-            for name, _ in GENERATOR.skill_records(REPOSITORY_ROOT)
-        }
-        self.assertIn("codex-orchestration", names)
+        names = [name for name, _ in GENERATOR.skill_records(REPOSITORY_ROOT)]
+        self.assertEqual(
+            [
+                "co-create-plan",
+                "codex-orchestration",
+                "complexity-aware-execution",
+                "create-project-map",
+                "handoff",
+                "open-pull-request",
+                "review-implementation-html",
+                "writing-style",
+            ],
+            names,
+        )
 
 
 if __name__ == "__main__":

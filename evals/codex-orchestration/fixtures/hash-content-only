@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Test-only SHA-256 backend that deliberately omits file names from multi-file
+# output. The production fingerprint must bind paths independently of backend
+# formatting, not inherit that property from sha256sum/shasum.
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  exec sha256sum
+fi
+
+for file in "$@"; do
+  sha256sum <"$file" | cut -d' ' -f1
+done
