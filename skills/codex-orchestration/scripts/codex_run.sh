@@ -189,6 +189,7 @@ cp "$INSTRUCTION" "$RUNDIR/task.md"
 [ -z "$ALLOWLIST" ] || cp "$ALLOWLIST" "$RUNDIR/allowlist"
 # Recorded so codex_resume.sh fingerprints the same plan rather than guessing.
 printf '%s' "$PLAN_DIR" >"$RUNDIR/plan_dir"
+[ ! -f "$PLAN_DIR/plan-id" ] || cp "$PLAN_DIR/plan-id" "$RUNDIR/plan-id"
 
 TASK_ID="$(basename "$INSTRUCTION" .md)"
 FROZEN_TEST="$(codex_test_file "$PLAN_DIR" "$TASK_ID")"

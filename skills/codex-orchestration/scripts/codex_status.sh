@@ -38,9 +38,20 @@ while IFS= read -r -d $'\x1e' rec; do
   rec="${rec#"${rec%%[![:space:]]*}"}"; [ -n "$rec" ] || continue
   sha="${rec%%$'\x1f'*}"; rest="${rec#*$'\x1f'}"
   subject="${rest%%$'\x1f'*}"; body="${rest#*$'\x1f'}"
-  plan="$(printf '%s\n' "$body" | sed -n 's/^Codex-Plan:[[:space:]]*\([^[:space:]]*\).*/\1/p' | head -1)"
-  task="$(printf '%s\n' "$body" | sed -n 's/^Codex-Task:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' | head -1)"
-  [ "$plan" = "$PLAN_ID" ] && [ -n "$task" ] && [ -z "${sha_of[$task]:-}" ] && {
+  # Only the final paragraph can be a canonical trailer block. This avoids
+  # treating lookalike lines in commit prose as evidence of task completion.
+  while [[ "$body" == *$'\n' ]]; do body="${body%$'\n'}"; done
+  trailers="${body##*$'\n\n'}"
+  plans=(); tasks=()
+  while IFS= read -r trailer; do
+    case "$trailer" in
+      Codex-Plan:*) plans+=("${trailer#Codex-Plan: }") ;;
+      Codex-Task:*) tasks+=("${trailer#Codex-Task: }") ;;
+    esac
+  done <<<"$trailers"
+  [ "${#plans[@]}" -eq 1 ] && [ "${#tasks[@]}" -eq 1 ] || continue
+  plan="${plans[0]}"; task="${tasks[0]}"
+  [ "$plan" = "$PLAN_ID" ] && [[ "$task" =~ ^[A-Za-z0-9_-]+$ ]] && [ -z "${sha_of[$task]:-}" ] && {
     sha_of[$task]="$sha"; subject_of[$task]="$subject";
   }
 done <"$history"

@@ -48,8 +48,36 @@ codex_is_meta_path() {
 # did nothing. Also used to build the staging list, which is why renames are
 # expanded rather than detected: `--name-only` reports only a rename's
 # destination, so staging from it would leave the source's deletion behind.
+codex_dirty_product0() {
+  local wd="$1" base="${2:-HEAD}" f tmp key i j
+  local -a files=()
+  local -A seen=()
+  tmp="$(mktemp)" || { printf 'codex: could not create a temporary file for the dirty-product check.\n' >&2; return 2; }
+  [ -n "$tmp" ] || { printf 'codex: could not create a temporary file for the dirty-product check.\n' >&2; return 2; }
+  if ! git -C "$wd" diff --no-renames --name-only -z "$base" -- >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"; printf 'codex: could not determine changed product files from %s.\n' "$wd" >&2; return 2
+  fi
+  if ! git -C "$wd" ls-files --others --exclude-standard -z >>"$tmp" 2>/dev/null; then
+    rm -f "$tmp"; printf 'codex: could not determine untracked product files from %s.\n' "$wd" >&2; return 2
+  fi
+  while IFS= read -r -d '' f; do
+    [ -n "$f" ] || continue
+    codex_is_meta_path "$f" || seen["$f"]=1
+  done <"$tmp"
+  rm -f "$tmp"
+  files=("${!seen[@]}")
+  for ((i = 1; i < ${#files[@]}; i++)); do
+    key="${files[$i]}"; j=$((i - 1))
+    while [ "$j" -ge 0 ] && [[ "${files[$j]}" > "$key" ]]; do
+      files[$((j + 1))]="${files[$j]}"; j=$((j - 1))
+    done
+    files[$((j + 1))]="$key"
+  done
+  for f in "${files[@]}"; do printf '%s\0' "$f"; done
+}
+
 codex_dirty_product() {
-  local wd="$1" base="${2:-HEAD}" f tmp sort_status
+  local wd="$1" base="${2:-HEAD}" f tmp rc
   tmp="$(mktemp)" || {
     printf 'codex: could not create a temporary file for the dirty-product check.\n' >&2
     return 2
@@ -58,27 +86,13 @@ codex_dirty_product() {
     printf 'codex: could not create a temporary file for the dirty-product check.\n' >&2
     return 2
   }
-  if ! git -C "$wd" diff --no-renames --name-only "$base" -- >"$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    printf 'codex: could not determine changed product files from %s.\n' "$wd" >&2
-    return 2
-  fi
-  if ! git -C "$wd" ls-files --others --exclude-standard >>"$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    printf 'codex: could not determine untracked product files from %s.\n' "$wd" >&2
-    return 2
-  fi
-  LC_ALL=C sort -u "$tmp" | while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    codex_is_meta_path "$f" && continue
-    printf '%s\n' "$f"
-  done
-  sort_status=${PIPESTATUS[0]}
+  set +e
+  codex_dirty_product0 "$wd" "$base" >"$tmp"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then rm -f "$tmp"; return "$rc"; fi
+  while IFS= read -r -d '' f; do printf '%s\n' "$f"; done <"$tmp"
   rm -f "$tmp"
-  [ "$sort_status" -eq 0 ] || {
-    printf 'codex: could not sort changed product files.\n' >&2
-    return 2
-  }
 }
 
 # codex_plan_id <plandir>
@@ -153,7 +167,7 @@ codex_contract_anchor() {
 
 # Fixed frozen-contract members. Missing optional members are recorded too, so
 # deleting an allowlist or adding a test file is itself a contract mutation.
-CODEX_CONTRACT_FILES=(base_commit task.md allowlist test plan_dir test_source workdir)
+CODEX_CONTRACT_FILES=(base_commit task.md allowlist test plan_dir plan-id test_source workdir)
 
 # codex_contract_write <rundir> <workdir> <is_git>
 codex_contract_write() {
@@ -211,7 +225,7 @@ codex_contract_check() {
   while IFS=' ' read -r kind hash rel extra || [ -n "${kind:-}" ]; do
     [ -z "${extra:-}" ] || { printf 'codex: malformed frozen contract entry.\n' >&2; return 1; }
     case "$rel" in
-      base_commit|task.md|allowlist|test|plan_dir|test_source|workdir) ;;
+      base_commit|task.md|allowlist|test|plan_dir|plan-id|test_source|workdir) ;;
       *) printf 'codex: unexpected frozen contract member: %s\n' "$rel" >&2; return 1 ;;
     esac
     [ -z "${seen[$rel]+_}" ] || { printf 'codex: duplicate frozen contract member: %s\n' "$rel" >&2; return 1; }

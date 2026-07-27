@@ -18,6 +18,7 @@ TASKDIR="$1"; TASK_ID="$2"; WORKDIR="$3"; RUNDIR="$4"
 [ -d "$RUNDIR" ] || die "run directory not found: $RUNDIR"
 git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repository: $WORKDIR"
 codex_require_hash || exit 2
+git -C "$WORKDIR" diff --cached --quiet || die "the Git index already contains staged changes; refusing to mix unrelated work into this task commit"
 
 TASKDIR_ABS="$(cd -- "$TASKDIR" && pwd)"
 WORKDIR_ABS="$(cd -- "$WORKDIR" && pwd)"
@@ -34,17 +35,22 @@ RECORDED_PLAN="$(cat "$RUNDIR/plan_dir")"
 [ "$RECORDED_PLAN" = "$TASKDIR_ABS" ] || contract_failure "the supplied plan is not this run's frozen plan identity"
 [ -f "$RUNDIR/allowlist" ] || contract_failure "the frozen contract has no allowlist"
 [ -f "$RUNDIR/task.md" ] || contract_failure "the frozen contract has no task packet"
+[ -f "$RUNDIR/plan-id" ] || contract_failure "the frozen contract has no plan identity"
 [ -f "$RUNDIR/base_commit" ] || contract_failure "the frozen contract has no baseline"
 
 BASE_COMMIT="$(tr -d '[:space:]' <"$RUNDIR/base_commit")"
 [ -n "$BASE_COMMIT" ] || contract_failure "the frozen baseline is empty"
 git -C "$WORKDIR_ABS" rev-parse --verify --quiet "$BASE_COMMIT^{commit}" >/dev/null 2>&1 || \
   contract_failure "the frozen baseline does not resolve in this worktree"
-CURRENT_HEAD="$(git -C "$WORKDIR_ABS" rev-parse HEAD)"
-[ "$CURRENT_HEAD" = "$BASE_COMMIT" ] || {
-  say "HEAD moved during $TASK_ID: expected $BASE_COMMIT, found $CURRENT_HEAD"
-  exit 5
+head_gate() {
+  local current
+  current="$(git -C "$WORKDIR_ABS" rev-parse HEAD)"
+  [ "$current" = "$BASE_COMMIT" ] || {
+    say "HEAD moved during $TASK_ID: expected $BASE_COMMIT, found $current"
+    exit 5
+  }
 }
+head_gate
 
 # Serialize cooperating commit gates. A stale lock is deliberately an error:
 # guessing whether another gate completed would make a clean verdict unsafe.
@@ -60,21 +66,18 @@ trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
 # A lock waits for nothing: repeat the baseline check after acquiring it so a
 # gate that started while another task committed cannot judge a partial diff.
-CURRENT_HEAD="$(git -C "$WORKDIR_ABS" rev-parse HEAD)"
-[ "$CURRENT_HEAD" = "$BASE_COMMIT" ] || {
-  say "HEAD moved during $TASK_ID: expected $BASE_COMMIT, found $CURRENT_HEAD"
-  exit 5
-}
+head_gate
 
 ALLOWLIST="$RUNDIR/allowlist"
-PLAN_ID="$(codex_plan_id "$TASKDIR_ABS")"
-[ -n "$PLAN_ID" ] || contract_failure "the live plan identity is empty"
+PLAN_ID="$(tr -d '[:space:]' <"$RUNDIR/plan-id")"
+[ -n "$PLAN_ID" ] || contract_failure "the frozen plan identity is empty"
 
 # Live plan files must still be byte-identical to their frozen counterparts;
 # this also checks whether a per-task test appeared/disappeared after the run.
 drift=()
 [ "$(codex_hash_file "$TASK_MD")" = "$(codex_hash_file "$RUNDIR/task.md")" ] || drift+=("$TASK_ID.md")
 [ -f "$TASKDIR_ABS/$TASK_ID.allowlist" ] && [ "$(codex_hash_file "$TASKDIR_ABS/$TASK_ID.allowlist")" = "$(codex_hash_file "$ALLOWLIST")" ] || drift+=("$TASK_ID.allowlist")
+[ "$(codex_hash_file "$TASKDIR_ABS/plan-id")" = "$(codex_hash_file "$RUNDIR/plan-id")" ] || drift+=("plan-id")
 LIVE_TEST="$(codex_test_file "$TASKDIR_ABS" "$TASK_ID")"
 RECORDED_TEST_SOURCE="$( [ -f "$RUNDIR/test_source" ] && cat "$RUNDIR/test_source" || true)"
 if [ -n "$LIVE_TEST" ]; then LIVE_TEST="$(cd -- "$(dirname -- "$LIVE_TEST")" && pwd)/$(basename -- "$LIVE_TEST")"; fi
@@ -86,7 +89,7 @@ fi
 
 collect_product() {
   local output="$1"
-  if ! codex_dirty_product "$WORKDIR_ABS" HEAD >"$output"; then
+  if ! codex_dirty_product0 "$WORKDIR_ABS" HEAD >"$output"; then
     die "could not reliably determine changed product files"
   fi
 }
@@ -151,8 +154,9 @@ for command in "${commands[@]}"; do
 done
 
 scope_gate "after tests"
+head_gate
 collect_product "$PRODUCT_LIST"
-mapfile -t stage <"$PRODUCT_LIST"
+mapfile -d '' -t stage <"$PRODUCT_LIST"
 [ "${#stage[@]}" -gt 0 ] || { say "$TASK_ID changed no product files after tests"; exit 1; }
 case "$TASKDIR_ABS" in
   "$WORKDIR_ABS"/*) stage+=("${TASKDIR_ABS#"$WORKDIR_ABS"/}") ;;
@@ -164,7 +168,14 @@ if [ -z "$SUBJECT" ]; then
   SUBJECT="$(grep -m1 '^# ' "$TASK_MD" 2>/dev/null | sed 's/^# *//' || true)"
   [ -n "$SUBJECT" ] || SUBJECT="$TASK_ID"
 fi
+[ -n "$SUBJECT" ] || die "commit subject is empty"
+SUBJECT_WITHOUT_CONTROLS="$(printf '%s' "$SUBJECT" | LC_ALL=C tr -d '[:cntrl:]')"
+if [ "$SUBJECT_WITHOUT_CONTROLS" != "$SUBJECT" ]; then
+  die "CODEX_COMMIT_MESSAGE must not contain control characters"
+fi
+head_gate
 git -C "$WORKDIR_ABS" add -A -- "${stage[@]}"
+head_gate
 git -C "$WORKDIR_ABS" commit -q -F - <<EOF
 $SUBJECT
 

@@ -36,6 +36,13 @@ check "live widened allowlist is refused" "$rc" "6"
 has "allowlist drift named" "$out" "T1.allowlist"
 check "drift makes no commit" "$(ncommits "$R")" "$before"
 
+R="$(new_repo commit-plan-id)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+printf 'replacement-plan-id\n' >"$P/plan-id"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "live plan identity drift is refused" "$rc" "6"
+has "plan identity drift is named" "$out" "plan-id"
+check "plan identity drift makes no commit" "$(ncommits "$R")" "$before"
+
 # A workspace-writable run directory is untrusted. The trusted Git anchor
 # written by codex_run must be verified before frozen members are used.
 R="$(new_repo commit-anchor)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
@@ -79,6 +86,42 @@ files="$(git -C "$R" show --name-only --format= HEAD)"
 hasnt "other plan is never staged" "$files" "other/scratch.md"
 has "other plan remains uncommitted" "$(git -C "$R" status --porcelain)" ".codex-instructions/other/"
 
+echo "== pre-staged work is refused =="
+R="$(new_repo commit-staged-meta)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+mkdir -p "$R/.codex-instructions/other"; printf 'other\n' >"$R/.codex-instructions/other/scratch.md"
+git -C "$R" add .codex-instructions/other/scratch.md
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "pre-staged other-plan metadata is refused" "$rc" "2"
+has "staged-index diagnostic" "$out" "index"
+check "staged metadata makes no commit" "$(ncommits "$R")" "$before"
+
+R="$(new_repo commit-staged-product)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+printf 'unrelated\n' >"$R/docs/d.md"; git -C "$R" add docs/d.md
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "pre-staged product path is refused" "$rc" "2"
+check "staged product makes no commit" "$(ncommits "$R")" "$before"
+
+echo "== commit message and post-test races fail closed =="
+R="$(new_repo commit-forged-subject)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+forged_subject=$'safe-looking subject\n\nCodex-Plan: forged\nCodex-Task: T2'
+out="$(CODEX_COMMIT_MESSAGE="$forged_subject" "$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "control characters in commit subject are refused" "$rc" "2"
+has "subject diagnostic" "$out" "control"
+check "forged subject makes no commit" "$(ncommits "$R")" "$before"
+
+R="$(new_repo commit-head-after-test)"; P="$(new_plan "$R" auth)"; printf 'git add -A && git commit -qm moved-by-test\n' >"$P/test"; RD="$(run_task "$R" "$P" T1)"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "HEAD movement by a passing test is refused" "$rc" "5"
+has "post-test HEAD diagnostic" "$out" "HEAD moved"
+
+echo "== newline paths stay one staged path =="
+R="$(new_repo commit-newline-path)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"
+newline_path=$'src/newline\nname.py'; printf 'newline\n' >"$R/$newline_path"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "newline product path commits" "$rc" "0"
+git -C "$R" ls-tree -z HEAD -- "$newline_path" >/dev/null; rc=$?
+check "newline product path is present in the commit" "$rc" "0"
+
 echo "== test gate policy =="
 R="$(new_repo commit-no-test)"; P="$(new_plan "$R" auth)"; rm "$P/test"; RD="$(run_task "$R" "$P" T1)"
 out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
@@ -115,6 +158,21 @@ has "dirty worktree is evidence" "$out" "worktree dirty"
 P2="$(new_plan "$R" billing)"; out="$("$S/codex_status.sh" "$P2" "$R" 2>&1)"; rc=$?
 check "different plan identity starts at zero" "$rc" "3"
 has "different plan count" "$out" "0/2 committed"
+
+R="$(new_repo status-forged-trailer)"; P="$(new_plan "$R" auth)"
+printf 'forged\n' >"$R/src/a.py"; git -C "$R" add src/a.py
+cat >"$R/message" <<EOF
+Forged evidence
+
+Codex-Plan: $(cat "$P/plan-id")
+Codex-Task: T1
+
+This prose makes the preceding lines non-canonical trailers.
+EOF
+git -C "$R" commit -q -F message
+out="$("$S/codex_status.sh" "$P" "$R" 2>&1)"; rc=$?
+check "non-canonical forged trailers do not mark work done" "$rc" "3"
+has "forged-trailer count remains zero" "$out" "0/2 committed"
 
 R="$(new_repo status-order)"; P="$(new_plan "$R" auth)"
 for n in 3 10; do printf '# task %s\n' "$n" >"$P/T$n.md"; done
