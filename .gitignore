@@ -1,3 +1,11 @@
 # SkillOpt-Sleep のログ・ステージング状態(ローカル実行専用、コミット対象外)
 .skillopt-sleep/
 .worktrees/
+
+# 評価証跡と実行時スクラッチ(ローカル実行専用、コミット対象外)
+# evals/*/run.py は出力先として .superpowers/ を許可しており、無視される前提で書かれている
+.superpowers/
+
+# Python のバイトコードキャッシュ
+__pycache__/
+*.py[cod]

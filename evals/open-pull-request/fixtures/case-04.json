@@ -1,0 +1,32 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/export",
+  "commits": [
+    {
+      "message": "Add export",
+      "files": {
+        "src/export.py": "def export():\n    return 'ok'\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    }
+  ],
+  "remote": {
+    "headSha": "equal"
+  },
+  "githubState": {
+    "defaultBranch": "main",
+    "remoteUrls": {
+      "origin": "https://github.com/example/project.git"
+    },
+    "pullRequests": [
+      {
+        "number": 42,
+        "state": "OPEN",
+        "isDraft": false,
+        "headRefName": "feature/export",
+        "baseRefName": "main",
+        "url": "https://github.com/example/project/pull/42"
+      }
+    ]
+  }
+}

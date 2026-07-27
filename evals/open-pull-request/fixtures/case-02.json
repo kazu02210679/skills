@@ -1,0 +1,19 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "main",
+  "commits": [
+    {
+      "message": "Add direct change",
+      "files": {
+        "src/direct.py": "value = 1\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    },
+    {
+      "message": "Add direct test",
+      "files": {
+        "tests/test_direct.py": "def test_value():\n    assert True\n"
+      }
+    }
+  ]
+}
