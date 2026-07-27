@@ -323,6 +323,102 @@ class InspectContextTests(unittest.TestCase):
                 set(context),
             )
 
+    def test_display_ref_strips_any_remote_not_only_origin(self) -> None:
+        # Stripping only `origin/` made a branch tracking `upstream/main`
+        # report a base ref of `upstream/main`, which never equals the head
+        # ref — so isDefaultBranch was false on the default branch itself and
+        # the stop protecting the trunk did not fire.
+        self.assertEqual(
+            "main", self.module._display_ref("upstream/main", ["origin", "upstream"])
+        )
+        self.assertEqual("main", self.module._display_ref("refs/remotes/fork/main"))
+        self.assertEqual("main", self.module._display_ref("refs/heads/main"))
+        self.assertEqual(
+            "feature/search",
+            self.module._display_ref(
+                "refs/remotes/origin/feature/search", ["origin"]
+            ),
+        )
+
+    def test_reports_default_branch_when_upstream_is_another_remote(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin_path = root / "origin"
+            origin_path.mkdir()
+            make_repository(origin_path)
+            repository = root / "clone"
+            git(root, "clone", "--quiet", str(origin_path), str(repository))
+            git(repository, "remote", "rename", "origin", "upstream")
+            git(repository, "fetch", "--quiet", "upstream")
+            git(repository, "branch", "--set-upstream-to", "upstream/main", "main")
+
+            context = self.module.inspect(repository)
+
+            self.assertEqual("main", context["headRef"])
+            self.assertEqual("main", context["baseRef"])
+            self.assertTrue(context["isDefaultBranch"])
+
+    def test_collects_plan_trailers_without_the_git_2_24_placeholder(self) -> None:
+        # Parsing bodies here rather than asking git for %(trailers:key=...)
+        # keeps the answer correct on git older than 2.24, where that
+        # placeholder is emitted literally and every commit looks
+        # trailer-free — an empty list meaning "no plans" instead of "cannot
+        # answer".
+        with tempfile.TemporaryDirectory() as directory:
+            repository = make_repository(Path(directory))
+            git(repository, "checkout", "--quiet", "-b", "feature")
+            for index, plan in enumerate(("plan-alpha", "plan-beta", "plan-alpha")):
+                path = repository / f"f{index}.txt"
+                path.write_text("x\n", encoding="utf-8")
+                git(repository, "add", str(path.name))
+                git(
+                    repository,
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    f"Work {index}\n\nCodex-Plan: {plan}\nCodex-Task: T{index}",
+                )
+
+            context = self.module.inspect(repository, base="main")
+
+            self.assertEqual(["plan-alpha", "plan-beta"], context["codexPlanIds"])
+
+    def test_repository_label_does_not_invent_a_slug_from_a_local_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = make_repository(Path(directory))
+            git(repository, "remote", "add", "origin", "/srv/git/acme-widgets.git")
+
+            label = self.module.inspect(repository, base="main")["repository"]
+
+            self.assertNotEqual("git/acme-widgets", label)
+            self.assertEqual(str(Path(repository).resolve()), label)
+
+    def test_repository_label_keeps_forge_slugs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = make_repository(Path(directory))
+            git(
+                repository,
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/project.git",
+            )
+
+            self.assertEqual(
+                "example/project",
+                self.module.inspect(repository, base="main")["repository"],
+            )
+
+    def test_repository_label_keeps_scp_style_slugs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = make_repository(Path(directory))
+            git(repository, "remote", "add", "origin", "git@github.com:example/project.git")
+
+            self.assertEqual(
+                "example/project",
+                self.module.inspect(repository, base="main")["repository"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

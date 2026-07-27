@@ -344,8 +344,32 @@ if (
         print(modelled_url)
         raise SystemExit(0)
 
-if tool == "gh" and arguments[:2] in (["pr", "list"], ["pr", "view"]):
+if tool == "gh" and arguments[:2] == ["pr", "list"]:
     print(json.dumps(state.get("pullRequests", []), ensure_ascii=False))
+    raise SystemExit(0)
+if tool == "gh" and arguments[:2] == ["pr", "view"]:
+    # The real `gh pr view --json` returns one object, not a list. Returning
+    # the list payload here taught the candidate a shape it will never meet.
+    pull_requests = state.get("pullRequests", [])
+    selector = arguments[2] if len(arguments) > 2 else ""
+    selected = None
+    for pull_request in pull_requests:
+        if not selector or selector.startswith("-"):
+            selected = pull_request
+            break
+        if str(pull_request.get("number")) == selector:
+            selected = pull_request
+            break
+        if selector in (
+            pull_request.get("headRefName"),
+            pull_request.get("url"),
+        ):
+            selected = pull_request
+            break
+    if selected is None:
+        print("no pull requests found", file=sys.stderr)
+        raise SystemExit(1)
+    print(json.dumps(selected, ensure_ascii=False))
     raise SystemExit(0)
 if tool == "gh" and arguments[:2] == ["auth", "status"]:
     print("github.com: authenticated as open-pull-request-eval")

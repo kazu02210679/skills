@@ -30,6 +30,11 @@ def _run_git(
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(FIXED_IDENTITY)
+    # Point git at config files that do not exist, so a developer's ambient
+    # `commit.gpgsign` or `core.hooksPath` cannot reach into a fixture and
+    # make it unbuildable on their machine but fine on CI.
+    environment["GIT_CONFIG_GLOBAL"] = os.devnull
+    environment["GIT_CONFIG_SYSTEM"] = os.devnull
     if commit_number is not None:
         date = FIRST_COMMIT_DATE + timedelta(seconds=commit_number)
         timestamp = date.isoformat().replace("+00:00", "Z")
@@ -93,13 +98,12 @@ def _initialize_bare(
 
 def _publish_remote(
     repository: Path,
-    destination: Path,
     specification: dict[str, Any],
     default_branch: str,
     head_branch: str,
     commit_number: int,
 ) -> None:
-    primary = destination.parent / f"{destination.name}-remote.git"
+    primary = repository.parent / f"{repository.name}-remote.git"
     _initialize_bare(
         primary,
         default_branch,
@@ -109,7 +113,7 @@ def _publish_remote(
 
     fork = bool(specification.get("fork"))
     if fork:
-        origin = destination.parent / f"{destination.name}-origin.git"
+        origin = repository.parent / f"{repository.name}-origin.git"
         _initialize_bare(
             origin,
             default_branch,
@@ -163,14 +167,24 @@ def _publish_remote(
             step=f"resolve remote ancestor {distance}",
         ).stdout.strip()
     elif requested_head == "diverged":
-        empty_tree = _run_git(
-            ["mktree"],
+        # Real divergence shares a base and then parts, which is what a branch
+        # someone else pushed to actually looks like. A parentless commit has
+        # no merge base at all — `--is-ancestor` rejects both alike, but only
+        # one of them is a situation the Skill will ever meet.
+        base_tree = _run_git(
+            ["rev-parse", f"{base_sha}^{{tree}}"],
             cwd=repository,
-            step="create empty tree for diverged remote",
-            input_text="",
+            step="resolve base tree for diverged remote",
         ).stdout.strip()
         published_head = _run_git(
-            ["commit-tree", empty_tree, "-m", "Diverged remote fixture"],
+            [
+                "commit-tree",
+                base_tree,
+                "-p",
+                base_sha,
+                "-m",
+                "Diverged remote fixture",
+            ],
             cwd=repository,
             step="create diverged remote commit",
             commit_number=commit_number,
@@ -303,7 +317,6 @@ def build_repository(
     remote = specification.get("remote")
     if remote is not None:
         _publish_remote(
-            destination,
             destination,
             remote,
             default_branch,

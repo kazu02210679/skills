@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -43,8 +44,28 @@ def _resolve(repository: Path, revision: str) -> str:
     return _git_output(repository, "rev-parse", "--verify", f"{revision}^{{commit}}")
 
 
-def _display_ref(reference: str) -> str:
-    for prefix in ("refs/heads/", "refs/remotes/origin/", "origin/"):
+def _remote_names(repository: Path) -> list[str]:
+    output = _git_output(repository, "remote")
+    return [name for name in output.splitlines() if name.strip()]
+
+
+def _display_ref(reference: str, remotes: list[str] | None = None) -> str:
+    """Reduce a ref to its branch name, for any remote rather than origin only.
+
+    Stripping `origin/` alone made a branch tracking, say, `upstream/main`
+    report a base ref of `upstream/main`. That never equals the head ref, so
+    `isDefaultBranch` came back false on the default branch itself and the
+    stop that protects the trunk quietly did not fire.
+    """
+
+    if reference.startswith("refs/heads/"):
+        return reference[len("refs/heads/") :]
+    if reference.startswith("refs/remotes/"):
+        remainder = reference[len("refs/remotes/") :]
+        _, separator, branch = remainder.partition("/")
+        return branch if separator else remainder
+    for remote in sorted(remotes or ["origin"], key=len, reverse=True):
+        prefix = f"{remote}/"
         if reference.startswith(prefix):
             return reference[len(prefix) :]
     return reference
@@ -72,6 +93,7 @@ def _resolve_base(repository: Path, base: str | None) -> tuple[str, str, str]:
         "--short",
         "HEAD",
     )
+    remotes = _remote_names(repository)
     upstream = _git_output(
         repository,
         "rev-parse",
@@ -79,8 +101,8 @@ def _resolve_base(repository: Path, base: str | None) -> tuple[str, str, str]:
         "--symbolic-full-name",
         "@{upstream}",
     )
-    if upstream and _display_ref(upstream) != head_ref:
-        return _display_ref(upstream), upstream, "upstream"
+    if upstream and _display_ref(upstream, remotes) != head_ref:
+        return _display_ref(upstream, remotes), upstream, "upstream"
 
     origin_head = _git_output(
         repository,
@@ -90,7 +112,7 @@ def _resolve_base(repository: Path, base: str | None) -> tuple[str, str, str]:
         "refs/remotes/origin/HEAD",
     )
     if origin_head:
-        return _display_ref(origin_head), origin_head, "origin-head"
+        return _display_ref(origin_head, remotes), origin_head, "origin-head"
 
     for candidate in ("main", "master"):
         result = _git(
@@ -107,23 +129,40 @@ def _resolve_base(repository: Path, base: str | None) -> tuple[str, str, str]:
 
 
 def _repository_label(repository: Path) -> str:
+    """Return an `owner/name` slug, but only when the remote really is a forge.
+
+    The last two path segments of anything produced a slug — so a remote of
+    `/srv/git/acme.git` came back as `git/acme`, which reads like a GitHub
+    repository and is not one. That value reaches `gh pr create --repo` and is
+    shown to the user for approval, so a plausible-looking wrong answer is
+    worse than an honest path.
+    """
+
     remote = _git_output(repository, "config", "--get", "remote.origin.url")
+    local = str(repository.resolve())
     if not remote:
-        return str(repository.resolve())
+        return local
 
     normalized = remote.rstrip("/")
     if normalized.endswith(".git"):
         normalized = normalized[:-4]
-    if ":" in normalized and "://" not in normalized:
-        normalized = normalized.split(":", 1)[1]
+
+    scheme, separator, rest = normalized.partition("://")
+    if separator:
+        if scheme.lower() == "file":
+            return local
+        path = rest.partition("/")[2]
+    elif re.fullmatch(r"[^/\\:]+@[^/\\:]+:.+", normalized):
+        # scp-style: user@host:owner/name
+        path = normalized.partition(":")[2]
     else:
-        normalized = normalized.rsplit("://", 1)[-1]
-        parts = normalized.split("/", 1)
-        normalized = parts[1] if len(parts) == 2 else normalized
-    path_parts = normalized.replace("\\", "/").split("/")
-    if len(path_parts) >= 2:
-        return "/".join(path_parts[-2:])
-    return str(repository.resolve())
+        # A bare filesystem path — no host, so no owner to speak of.
+        return local
+
+    segments = [segment for segment in path.replace("\\", "/").split("/") if segment]
+    if len(segments) < 2:
+        return local
+    return "/".join(segments[-2:])
 
 
 def _untracked_paths(repository: Path) -> list[str]:
@@ -140,19 +179,27 @@ def _untracked_paths(repository: Path) -> list[str]:
 def _codex_plan_ids(repository: Path, base_revision: str) -> list[str]:
     if not base_revision:
         return []
+    # Read raw bodies and parse the trailer here rather than asking git for
+    # `%(trailers:key=...)`, which needs git 2.24. On anything older that
+    # placeholder is emitted literally, every commit looks trailer-free, and
+    # the result is an empty list that means "no plans" rather than "this git
+    # cannot answer" — a wrong answer with no way to tell it apart.
     result = _git(
         repository,
         "log",
         "--reverse",
-        "--format=%(trailers:key=Codex-Plan,valueonly,separator=%x1f)%x1e",
+        "--format=%B%x1e",
         f"{base_revision}..HEAD",
     )
     if result.returncode != 0:
         return []
 
     plan_ids: list[str] = []
-    for commit_values in result.stdout.split("\x1e"):
-        for value in commit_values.strip().split("\x1f"):
+    for message in result.stdout.split("\x1e"):
+        for line in message.splitlines():
+            key, separator, value = line.partition(":")
+            if not separator or key.strip().lower() != "codex-plan":
+                continue
             plan_id = value.strip()
             if plan_id and plan_id not in plan_ids:
                 plan_ids.append(plan_id)

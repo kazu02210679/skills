@@ -298,8 +298,37 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 "HEAD",
             )
 
+            # --is-ancestor alone is also true for `equal`, since a commit is
+            # its own ancestor, so it would stay green if ancestor:N silently
+            # regressed to publishing HEAD. Pin the distance too.
+            distance = run_git(
+                repository, "rev-list", "--count", "origin/feature..HEAD"
+            )
+
             self.assertEqual(0, remote_head.returncode, remote_head.stderr)
             self.assertEqual(0, ancestry.returncode, ancestry.stderr)
+            self.assertEqual("2", distance.stdout.strip())
+
+    def test_diverged_remote_shares_a_base_with_local_head(self) -> None:
+        # Real divergence shares history and then parts. A parentless commit
+        # also fails --is-ancestor, but it is not a state the skill will meet.
+        with tempfile.TemporaryDirectory() as directory:
+            repository = self.build(
+                Path(directory),
+                {
+                    "headBranch": "feature",
+                    "commits": [
+                        {"message": "Local", "files": {"local.txt": "l\n"}}
+                    ],
+                    "remote": {"headSha": "diverged"},
+                },
+            )
+            merge_base = run_git(
+                repository, "merge-base", "origin/feature", "HEAD"
+            )
+
+            self.assertEqual(0, merge_base.returncode, merge_base.stderr)
+            self.assertTrue(merge_base.stdout.strip())
 
     def test_diverged_remote_head_is_not_ancestor_of_local_head(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -587,6 +616,40 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             )
             self.assertEqual(0, upstream.returncode, upstream.stderr)
             self.assertEqual("origin/feature", upstream.stdout.strip())
+
+    def test_gh_pr_view_returns_an_object_like_the_real_cli(self) -> None:
+        # The real `gh pr view --json` returns one object. Echoing the list
+        # payload taught the candidate a shape it will never meet in practice.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = {
+                "pullRequests": [
+                    {"number": 7, "state": "OPEN", "headRefName": "feature"}
+                ]
+            }
+            shim_directory = self.runner.write_command_shims(root / "shims", state)
+            environment = os.environ.copy()
+            environment["PATH"] = self.runner.shimmed_path(
+                shim_directory, environment.get("PATH", "")
+            )
+
+            listed = subprocess.run(
+                "gh pr list --json number",
+                env=environment, shell=True, text=True,
+                encoding="utf-8", errors="replace",
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            viewed = subprocess.run(
+                "gh pr view 7 --json number",
+                env=environment, shell=True, text=True,
+                encoding="utf-8", errors="replace",
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+
+            self.assertIsInstance(json.loads(listed.stdout), list)
+            payload = json.loads(viewed.stdout)
+            self.assertIsInstance(payload, dict)
+            self.assertEqual(7, payload["number"])
 
     def test_gh_shim_refuses_commands_the_fixture_does_not_model(self) -> None:
         # An unmodelled gh command must never reach the operator's real,
