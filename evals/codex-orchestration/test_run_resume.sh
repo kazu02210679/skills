@@ -12,6 +12,15 @@ check "refuses the default branch" "$rc" "2"
 has "says which branch" "$out" "default branch"
 git -C "$R" checkout -q work
 
+R="$(new_repo run1trunk)"; P="$(new_plan "$R" auth)"
+git -C "$R" checkout -q main
+git -C "$R" branch -m trunk
+out=$("$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
+check "refuses a conventional trunk default branch" "$rc" "2"
+has "identifies trunk as the default branch" "$out" "default branch ('trunk')"
+
+R="$(new_repo run1work)"; P="$(new_plan "$R" auth)"
+
 echo dirt >>"$R/src/a.py"
 out=$("$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
 check "refuses a dirty product tree" "$rc" "2"
@@ -28,7 +37,7 @@ echo "== artifacts =="
 RD="$(rundir_of "$R")"
 for f in attempt-1/report.md attempt-1/events.jsonl attempt-1/stderr.log \
          attempt-1/meta.json attempt-1/scope.txt base_commit allowlist \
-         thread_id .gitignore; do
+         contract.sha256 workdir thread_id .gitignore; do
   [ -f "$RD/$f" ] && ok "artifact $f" || bad "missing $f"
 done
 check "thread id captured" "$(cat "$RD/thread_id")" "thr-abc123"
@@ -91,6 +100,39 @@ out=$(FAKE_CODEX_TOUCH="src/a.py .codex-instructions/billing/T1.md" \
   "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
 check "another plan changing underfoot is not tampering" "$rc" "0"
 hasnt "no false alarm" "$out" "modified the plan directory"
+
+echo "== plan fingerprints bind file names =="
+R="$(new_repo run4names)"; P="$(new_plan "$R" auth)"
+BARRIER="$TMPROOT/plan-swap"; mkdir -p "$BARRIER"
+CODEX_HASH_CMD="$TESTS_DIR/fixtures/hash-content-only" \
+  FAKE_CODEX_BARRIER="$BARRIER" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" >"$TMPROOT/plan-swap.out" 2>&1 & pid=$!
+for i in $(seq 1 200); do
+  ls "$BARRIER"/ready-* >/dev/null 2>&1 && break
+  sleep 0.05
+done
+mv "$P/T1.md" "$P/task.swap"
+mv "$P/T2.md" "$P/T1.md"
+mv "$P/task.swap" "$P/T2.md"
+: >"$BARRIER/release"
+wait "$pid"; rc=$?
+check "swapping plan file contents is detected" "$rc" "4"
+has "plan swap reports contract tampering" "$(cat "$TMPROOT/plan-swap.out")" "modified the plan directory"
+
+echo "== frozen contract tampering is fatal =="
+R="$(new_repo run4contract)"; P="$(new_plan "$R" auth)"
+RD="$R/.codex-runs/frozen-run"; BARRIER="$TMPROOT/frozen-run"; mkdir -p "$BARRIER"
+FAKE_CODEX_BARRIER="$BARRIER" FAKE_CODEX_TOUCH="docs/d.md" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" "$RD" >"$TMPROOT/frozen-run.out" 2>&1 & pid=$!
+for i in $(seq 1 200); do
+  ls "$BARRIER"/ready-* >/dev/null 2>&1 && break
+  sleep 0.05
+done
+printf '*\n' >"$RD/allowlist"
+: >"$BARRIER/release"
+wait "$pid"; rc=$?
+check "widening the frozen allowlist fails the run" "$rc" "4"
+has "frozen allowlist tampering is explained" "$(cat "$TMPROOT/frozen-run.out")" "frozen contract"
 
 echo "== run directories cannot collide =="
 # The default name used to be a timestamp to the second, so two tasks started
@@ -216,6 +258,19 @@ out=$(CODEX_MAX_ATTEMPTS=0 FAKE_CODEX_TOUCH="src/a.py" \
   "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
 check "cap can be lifted deliberately" "$rc" "0"
 
+echo "== resume: the attempt cap is validated =="
+R="$(new_repo res4invalid)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"
+for invalid in bogus -1 1.5; do
+  LOG="$TMPROOT/invalid-${invalid//[^[:alnum:]]/_}"; : >"$LOG"
+  out=$(CODEX_MAX_ATTEMPTS="$invalid" FAKE_CODEX_LOG="$LOG" \
+    "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
+  check "rejects CODEX_MAX_ATTEMPTS=$invalid" "$rc" "2"
+  has "explains invalid cap $invalid" "$out" "nonnegative integer"
+  check "invalid cap $invalid launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
+done
+
 echo "== resume: a rejected call must not burn an attempt =="
 # Attempts are counted by directory, so creating one before the mode checks
 # pass would leave an empty attempt behind and consume a slot off the cap
@@ -231,6 +286,29 @@ CODEX_RESUME_MODE=bogus "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" >/dev/
 FAKE_CODEX_TOUCH="src/a.py" "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" >/dev/null 2>&1
 [ -d "$RD/attempt-2" ] && ok "a real resume still opens attempt-2" || bad "attempt-2 missing"
 
+echo "== resume: concurrent attempts reserve unique evidence =="
+R="$(new_repo res6concurrent)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"
+BARRIER="$TMPROOT/resume-concurrent"; mkdir -p "$BARRIER"
+FAKE_CODEX_BARRIER="$BARRIER" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" >"$TMPROOT/concurrent-1.out" 2>&1 & p1=$!
+FAKE_CODEX_BARRIER="$BARRIER" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" >"$TMPROOT/concurrent-2.out" 2>&1 & p2=$!
+for i in $(seq 1 200); do
+  ready=$(ls "$BARRIER"/ready-* 2>/dev/null | wc -l | tr -d '[:space:]')
+  [ "$ready" -ge 2 ] && break
+  sleep 0.05
+done
+: >"$BARRIER/release"
+wait "$p1"; rc1=$?
+wait "$p2"; rc2=$?
+check "first concurrent resume succeeds" "$rc1" "0"
+check "second concurrent resume succeeds" "$rc2" "0"
+[ -d "$RD/attempt-2" ] && [ -d "$RD/attempt-3" ] \
+  && ok "concurrent resumes get distinct attempt directories" \
+  || bad "concurrent resumes did not reserve attempt-2 and attempt-3"
+
 echo "== the contract is frozen at run time =="
 R="$(new_repo res7)"; P="$(new_plan "$R" auth)"
 printf 'pytest -q\n' >"$P/T1.test"
@@ -241,6 +319,46 @@ for f in task.md allowlist test; do
 done
 check "per-task test file wins" "$(cat "$RD/test")" "pytest -q"
 check "frozen packet matches" "$(cat "$RD/task.md")" "$(cat "$P/T1.md")"
+
+echo "== resume: frozen run identity and scope prerequisites =="
+R="$(new_repo res7identity)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"
+OTHER="$(new_repo res7other)"
+LOG="$TMPROOT/wrong-workdir"; : >"$LOG"
+out=$(FAKE_CODEX_LOG="$LOG" "$S/codex_resume.sh" "$P/T1.hint-1.md" "$OTHER" "$RD" 2>&1); rc=$?
+check "resume rejects a different workdir" "$rc" "2"
+has "different workdir is explained" "$out" "does not match"
+check "different workdir launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
+
+R="$(new_repo res7nogit)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"
+mv "$R/.git" "$R/git.saved"
+LOG="$TMPROOT/no-git"; : >"$LOG"
+out=$(FAKE_CODEX_LOG="$LOG" "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
+check "resume refuses a workdir that is no longer Git" "$rc" "2"
+has "missing Git workdir is explained" "$out" "not a git repository"
+check "missing Git workdir launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
+
+R="$(new_repo res7base)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"; : >"$RD/base_commit"
+LOG="$TMPROOT/no-base"; : >"$LOG"
+out=$(FAKE_CODEX_LOG="$LOG" "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
+check "resume refuses a missing frozen base" "$rc" "2"
+has "missing frozen base is explained" "$out" "base commit"
+check "missing frozen base launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
+
+echo "== resume: frozen task tampering is fatal before launch =="
+R="$(new_repo res7contract)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"; printf 'rewritten\n' >"$RD/task.md"
+LOG="$TMPROOT/tampered-task"; : >"$LOG"
+out=$(FAKE_CODEX_LOG="$LOG" "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
+check "resume rejects a rewritten frozen task" "$rc" "4"
+has "rewritten frozen task is explained" "$out" "frozen contract"
+check "rewritten frozen task launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
 
 echo "== resume: scope baseline stays the task's start =="
 R="$(new_repo res5)"; P="$(new_plan "$R" auth)"

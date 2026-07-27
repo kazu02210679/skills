@@ -28,9 +28,13 @@ BASH = find_bash()
 @unittest.skipUnless(BASH, "Bash 4.4+ is required")
 class CodexOrchestrationShellEvaluations(unittest.TestCase):
     def run_eval(self, name: str) -> None:
+        env = os.environ.copy()
+        if os.name == "nt":
+            env["PATH"] = os.pathsep.join((str(Path(BASH).parent), env.get("PATH", "")))
         result = subprocess.run(
             [BASH, str(EVAL_DIR / name)],
             cwd=ROOT,
+            env=env,
             text=True,
             capture_output=True,
             encoding="utf-8",

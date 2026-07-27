@@ -51,14 +51,43 @@ codex_require_hash || exit 2
 [ -d "$WORKDIR" ] || die "workdir not found: $WORKDIR"
 [ -d "$RUNDIR" ]  || die "run directory not found: $RUNDIR (pass the RUNDIR printed by codex_run.sh)"
 
+WORKDIR_ABS="$(cd -- "$WORKDIR" && pwd)"
+git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || die "$WORKDIR is not a git repository. Resume cannot enforce the frozen scope without Git."
+[ -s "$RUNDIR/workdir" ] || die "run directory has no recorded workdir: $RUNDIR/workdir"
+RECORDED_WORKDIR="$(cat "$RUNDIR/workdir")"
+[ "$WORKDIR_ABS" = "$RECORDED_WORKDIR" ] \
+  || die "supplied workdir '$WORKDIR_ABS' does not match this run's recorded workdir '$RECORDED_WORKDIR'"
+[ -s "$RUNDIR/base_commit" ] || die "run directory has no frozen base commit: $RUNDIR/base_commit"
+BASE_COMMIT="$(tr -d '[:space:]' <"$RUNDIR/base_commit")"
+git -C "$WORKDIR" rev-parse --verify --quiet "$BASE_COMMIT^{commit}" >/dev/null 2>&1 \
+  || die "frozen base commit does not resolve in the recorded workdir: '$BASE_COMMIT'"
+
+if ! codex_contract_check "$RUNDIR" "$WORKDIR"; then
+  printf 'codex_resume: FAIL 窶・the frozen contract is missing or changed.\n' >&2
+  exit 4
+fi
+
 # --- locate the previous attempt, open the next one -------------------------
-LAST_N=0
-for d in "$RUNDIR"/attempt-*; do
-  [ -d "$d" ] || continue
-  n="${d##*/attempt-}"
-  case "$n" in ''|*[!0-9]*) continue ;; esac
-  [ "$n" -gt "$LAST_N" ] && LAST_N="$n"
-done
+last_attempt_number() {
+  local d n last=0
+  for d in "$RUNDIR"/attempt-*; do
+    [ -d "$d" ] || continue
+    n="${d##*/attempt-}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    [ "$n" -gt "$last" ] && last="$n"
+  done
+  printf '%s\n' "$last"
+}
+
+MAX="${CODEX_MAX_ATTEMPTS:-3}"
+case "$MAX" in
+  ''|*[!0-9]*) die "CODEX_MAX_ATTEMPTS must be a nonnegative integer, got '$MAX'" ;;
+esac
+while [ "${MAX#0}" != "$MAX" ]; do MAX="${MAX#0}"; done
+[ -n "$MAX" ] || MAX=0
+
+LAST_N="$(last_attempt_number)"
 [ "$LAST_N" -gt 0 ] || die "no attempt-N directory under $RUNDIR — run codex_run.sh first"
 
 PREV="$RUNDIR/attempt-$LAST_N"
@@ -67,7 +96,6 @@ N=$((LAST_N + 1))
 # The skill caps the hint loop at three attempts and escalates. Enforce it here
 # too: a cap that lives only in prose is one an agent can lose track of, and
 # each extra attempt costs a full Codex run.
-MAX="${CODEX_MAX_ATTEMPTS:-3}"
 if [ "$MAX" != "0" ] && [ "$N" -gt "$MAX" ]; then
   die "attempt $N would exceed CODEX_MAX_ATTEMPTS=$MAX. Codex is not converging — stop and escalate to the user with the reports in $RUNDIR, or raise the cap deliberately."
 fi
@@ -79,11 +107,6 @@ PREV_REPORT="${4:-$PREV/report.md}"
 # directory, so creating one before the mode checks below have passed would
 # leave an empty attempt behind on a usage error and burn a slot off the cap
 # without Codex ever running.
-
-# The scope baseline is the pre-run commit of attempt 1: scope is judged over
-# the whole task, not just this attempt's incremental edits.
-BASE_COMMIT=""
-[ -f "$RUNDIR/base_commit" ] && BASE_COMMIT="$(cat "$RUNDIR/base_commit")"
 
 # The plan this run belongs to, recorded by codex_run.sh. The integrity check
 # is scoped to it so a second agent working a different plan in the same
@@ -99,22 +122,15 @@ esac
 THREAD_ID=""
 [ -f "$RUNDIR/thread_id" ] && THREAD_ID="$(tr -d '[:space:]' <"$RUNDIR/thread_id")"
 
-ALLOWLIST="${CODEX_ALLOWLIST:-}"
-if [ -z "$ALLOWLIST" ] && [ -f "$RUNDIR/allowlist" ]; then
-  ALLOWLIST="$RUNDIR/allowlist"
+ALLOWLIST=""
+if [ -f "$RUNDIR/allowlist" ]; then ALLOWLIST="$RUNDIR/allowlist"; fi
+if [ -n "${CODEX_ALLOWLIST:-}" ] && [ "$CODEX_ALLOWLIST" != "$ALLOWLIST" ]; then
+  die "CODEX_ALLOWLIST cannot replace this run's frozen allowlist; use $ALLOWLIST"
 fi
 
 CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"
 CODEX_TIMEOUT="${CODEX_TIMEOUT:-3600}"
 CODEX_RESUME_MODE="${CODEX_RESUME_MODE:-auto}"
-
-# Shared options belong to `exec`, so they go between `exec` and the `resume`
-# subcommand. Placing them after `resume` makes the CLI reject them.
-common=(--cd "$WORKDIR" --sandbox "$CODEX_SANDBOX"
-        --output-last-message "$ATTEMPT/report.md" --json)
-[ -n "${CODEX_MODEL:-}" ] && common+=(-m "$CODEX_MODEL")
-# shellcheck disable=SC2206
-[ -n "${CODEX_EXTRA_ARGS:-}" ] && common+=(${CODEX_EXTRA_ARGS})
 
 TIMEOUT_CMD=()
 while IFS= read -r t; do [ -n "$t" ] && TIMEOUT_CMD+=("$t"); done < <(codex_timeout_prefix "$CODEX_TIMEOUT")
@@ -171,8 +187,28 @@ case "$CODEX_RESUME_MODE" in
   *) die "unknown CODEX_RESUME_MODE: '$CODEX_RESUME_MODE' (expected auto|resume|last|fresh)" ;;
 esac
 
-# Every check that can reject this call has now run, so the attempt is real.
-mkdir -p "$ATTEMPT"
+# Every check that can reject this call has now run. Reserve the attempt with
+# atomic mkdir; a concurrent resume that won the same number makes us rescan.
+while :; do
+  LAST_N="$(last_attempt_number)"
+  [ "$LAST_N" -gt 0 ] || die "no prior attempt remains under $RUNDIR"
+  N=$((LAST_N + 1))
+  if [ "$MAX" != "0" ] && [ "$N" -gt "$MAX" ]; then
+    die "attempt $N would exceed CODEX_MAX_ATTEMPTS=$MAX. Codex is not converging 窶・stop and escalate to the user with the reports in $RUNDIR, or raise the cap deliberately."
+  fi
+  ATTEMPT="$RUNDIR/attempt-$N"
+  if mkdir "$ATTEMPT" 2>/dev/null; then break; fi
+done
+PREV="$RUNDIR/attempt-$LAST_N"
+PREV_REPORT="${4:-$PREV/report.md}"
+
+# Shared options belong to `exec`, so they go between `exec` and the `resume`
+# subcommand. Placing them after `resume` makes the CLI reject them.
+common=(--cd "$WORKDIR" --sandbox "$CODEX_SANDBOX"
+        --output-last-message "$ATTEMPT/report.md" --json)
+[ -n "${CODEX_MODEL:-}" ] && common+=(-m "$CODEX_MODEL")
+# shellcheck disable=SC2206
+[ -n "${CODEX_EXTRA_ARGS:-}" ] && common+=(${CODEX_EXTRA_ARGS})
 
 printf 'codex_resume: continuing from attempt-%s\n  hint    : %s\n  mode    : %s%s\n  attempt : %s (cap %s)\n  scope   : %s\n' \
   "$LAST_N" "$HINT" "$MODE" "${THREAD_ID:+ [$THREAD_ID]}" "$ATTEMPT" "$MAX" "${ALLOWLIST:-(none)}" >&2
@@ -201,9 +237,15 @@ if [ -n "$PLAN_WATCH" ] && [ "$META_BEFORE" != "$(codex_meta_fingerprint "$PLAN_
   printf 'codex_resume: FAIL — Codex modified the plan directory during the run:\n  %s\n' "$PLAN_DIR" >&2
 fi
 
+CONTRACT_OK=true
+if ! codex_contract_check "$RUNDIR" "$WORKDIR"; then
+  CONTRACT_OK=false
+  printf 'codex_resume: FAIL 窶・the frozen contract changed during the resume.\n' >&2
+fi
+
 # --- scope gate -------------------------------------------------------------
 SCOPE_RC=0
-if [ -n "$ALLOWLIST" ] && git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if [ "$CONTRACT_OK" = "true" ] && [ -n "$ALLOWLIST" ]; then
   set +e
   "$SCRIPT_DIR/codex_scope_check.sh" "$ALLOWLIST" "$WORKDIR" "$BASE_COMMIT" \
     >"$ATTEMPT/scope.txt" 2>&1
@@ -224,6 +266,7 @@ cat >"$ATTEMPT/meta.json" <<JSON
   "base_commit": "$BASE_COMMIT",
   "allowlist": "${ALLOWLIST:-}",
   "meta_intact": $META_OK,
+  "contract_intact": $CONTRACT_OK,
   "scope_ok": $([ "$SCOPE_RC" -eq 0 ] && echo true || echo false),
   "sandbox": "$CODEX_SANDBOX",
   "model": "${CODEX_MODEL:-default}",
@@ -235,7 +278,7 @@ JSON
 printf 'codex_resume: done (exit=%s)\n  REPORT: %s\n  EVENTS: %s\n  META  : %s\n' \
   "$RC" "$ATTEMPT/report.md" "$ATTEMPT/events.jsonl" "$ATTEMPT/meta.json" >&2
 
-[ "$META_OK" = "true" ] || exit 4
+[ "$META_OK" = "true" ] && [ "$CONTRACT_OK" = "true" ] || exit 4
 if [ "$RC" -eq 0 ] && [ "$SCOPE_RC" -ne 0 ]; then
   exit 3
 fi

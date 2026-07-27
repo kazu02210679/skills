@@ -136,6 +136,108 @@ codex_hash_file() {
   "${CODEX_HASH[@]}" <"$1" | cut -d' ' -f1
 }
 
+# codex_contract_anchor <workdir> <rundir>
+# Trusted copy of a run contract, kept under Git metadata rather than the
+# workspace-writable .codex-runs directory.
+codex_contract_anchor() {
+  local wd="$1" rundir="$2" gitdir key rundir_abs
+  gitdir="$(git -C "$wd" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$gitdir" in
+    /*|[A-Za-z]:/*) ;;
+    *) gitdir="$(cd -- "$wd/$gitdir" && pwd)" || return 1 ;;
+  esac
+  rundir_abs="$(cd -- "$(dirname -- "$rundir")" && pwd)/$(basename -- "$rundir")" || return 1
+  key="$(printf '%s' "$rundir_abs" | "${CODEX_HASH[@]}" | cut -d' ' -f1)" || return 1
+  printf '%s/codex-orchestration-contracts/%s.sha256\n' "$gitdir" "$key"
+}
+
+# Fixed frozen-contract members. Missing optional members are recorded too, so
+# deleting an allowlist or adding a test file is itself a contract mutation.
+CODEX_CONTRACT_FILES=(base_commit task.md allowlist test plan_dir test_source workdir)
+
+# codex_contract_write <rundir> <workdir> <is_git>
+codex_contract_write() {
+  local rundir="$1" wd="$2" is_git="$3" rel hash manifest anchor tmp
+  manifest="$rundir/contract.sha256"
+  tmp="$manifest.tmp.$$"
+  : >"$tmp" || return 1
+  for rel in "${CODEX_CONTRACT_FILES[@]}"; do
+    if [ -f "$rundir/$rel" ]; then
+      hash="$(codex_hash_file "$rundir/$rel")" || { rm -f "$tmp"; return 1; }
+      printf 'F %s %s\n' "$hash" "$rel" >>"$tmp" || { rm -f "$tmp"; return 1; }
+    else
+      printf 'M - %s\n' "$rel" >>"$tmp" || { rm -f "$tmp"; return 1; }
+    fi
+  done
+  mv "$tmp" "$manifest" || return 1
+
+  [ "$is_git" = "1" ] || return 0
+  anchor="$(codex_contract_anchor "$wd" "$rundir")" || return 1
+  mkdir -p "$(dirname -- "$anchor")" || return 1
+  tmp="$anchor.tmp.$$"
+  cp "$manifest" "$tmp" && mv "$tmp" "$anchor"
+}
+
+# codex_contract_check <rundir> <workdir> [expected_manifest_hash]
+# Git-backed runs compare the visible manifest against the trusted .git copy.
+# A one-off non-Git run may pass the in-process manifest hash captured before
+# Codex started.
+codex_contract_check() {
+  local rundir="$1" wd="$2" expected="${3:-}" manifest anchor source
+  local kind hash rel actual count=0
+  local -A seen=()
+  manifest="$rundir/contract.sha256"
+  [ -f "$manifest" ] || { printf 'codex: frozen contract manifest is missing.\n' >&2; return 1; }
+
+  if git -C "$wd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    anchor="$(codex_contract_anchor "$wd" "$rundir")" || {
+      printf 'codex: trusted frozen contract anchor cannot be resolved.\n' >&2
+      return 1
+    }
+    [ -f "$anchor" ] || { printf 'codex: trusted frozen contract anchor is missing.\n' >&2; return 1; }
+    cmp -s "$manifest" "$anchor" || {
+      printf 'codex: frozen contract manifest does not match its trusted anchor.\n' >&2
+      return 1
+    }
+    source="$anchor"
+  else
+    [ -n "$expected" ] && [ "$(codex_hash_file "$manifest")" = "$expected" ] || {
+      printf 'codex: frozen contract manifest changed during the run.\n' >&2
+      return 1
+    }
+    source="$manifest"
+  fi
+
+  while IFS=' ' read -r kind hash rel extra || [ -n "${kind:-}" ]; do
+    [ -z "${extra:-}" ] || { printf 'codex: malformed frozen contract entry.\n' >&2; return 1; }
+    case "$rel" in
+      base_commit|task.md|allowlist|test|plan_dir|test_source|workdir) ;;
+      *) printf 'codex: unexpected frozen contract member: %s\n' "$rel" >&2; return 1 ;;
+    esac
+    [ -z "${seen[$rel]+_}" ] || { printf 'codex: duplicate frozen contract member: %s\n' "$rel" >&2; return 1; }
+    seen[$rel]=1
+    count=$((count + 1))
+    case "$kind" in
+      F)
+        [ -f "$rundir/$rel" ] || { printf 'codex: frozen contract member is missing: %s\n' "$rel" >&2; return 1; }
+        actual="$(codex_hash_file "$rundir/$rel")" || return 1
+        [ "$actual" = "$hash" ] || { printf 'codex: frozen contract member changed: %s\n' "$rel" >&2; return 1; }
+        ;;
+      M)
+        [ "$hash" = "-" ] && [ ! -e "$rundir/$rel" ] || {
+          printf 'codex: frozen contract member appeared unexpectedly: %s\n' "$rel" >&2
+          return 1
+        }
+        ;;
+      *) printf 'codex: malformed frozen contract state for %s\n' "$rel" >&2; return 1 ;;
+    esac
+  done <"$source"
+  [ "$count" -eq "${#CODEX_CONTRACT_FILES[@]}" ] || {
+    printf 'codex: frozen contract manifest is incomplete.\n' >&2
+    return 1
+  }
+}
+
 # codex_meta_fingerprint <plandir>
 # A single hash over every file in ONE plan directory. Compared across a Codex
 # run to prove Codex did not rewrite its own instructions — most importantly
@@ -147,13 +249,29 @@ codex_hash_file() {
 # this check, and reporting "Codex tampered with the plan" for someone else's
 # hint file is a false alarm that trains you to ignore a real one.
 codex_meta_fingerprint() {
-  local d="$1"
+  local d="$1" f key i j
+  local LC_ALL=C
+  local files=()
   if [ ! -d "$d" ]; then printf 'absent\n'; return 0; fi
-  # POSIX find + sort only: `sort -z` and `xargs -r` are GNU extensions that
-  # macOS does not have, and silently producing a different fingerprint there
-  # would turn the integrity check into noise.
-  ( cd "$d" && find . -type f -exec "${CODEX_HASH[@]}" {} + 2>/dev/null \
-      | LC_ALL=C sort | "${CODEX_HASH[@]}" | cut -d' ' -f1 )
+  # Bind normalized relative paths independently of the hash backend's output
+  # format. NUL delimiters keep file names containing whitespace or newlines
+  # unambiguous. An in-shell insertion sort avoids GNU-only `sort -z`.
+  (
+    cd "$d" || exit 1
+    while IFS= read -r -d '' f; do files+=("$f"); done < <(find . -type f -print0)
+    for ((i = 1; i < ${#files[@]}; i++)); do
+      key="${files[$i]}"
+      j=$((i - 1))
+      while [ "$j" -ge 0 ] && [[ "${files[$j]}" > "$key" ]]; do
+        files[$((j + 1))]="${files[$j]}"
+        j=$((j - 1))
+      done
+      files[$((j + 1))]="$key"
+    done
+    for f in "${files[@]}"; do
+      printf '%s\0%s\0' "$f" "$(codex_hash_file "$f")"
+    done
+  ) | "${CODEX_HASH[@]}" | cut -d' ' -f1
 }
 
 # codex_thread_id <events.jsonl>

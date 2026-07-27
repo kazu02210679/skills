@@ -11,6 +11,7 @@ trap 'rm -rf "$TMPROOT"' EXIT
 # Git for Windows starts a non-login Bash with the inherited Windows PATH.
 export PATH="/usr/bin:/bin:$TESTS_DIR/fixtures:$PATH"
 chmod +x "$TESTS_DIR/fixtures/codex" 2>/dev/null || true
+chmod +x "$TESTS_DIR/fixtures/hash-content-only" 2>/dev/null || true
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"; }

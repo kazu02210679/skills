@@ -44,6 +44,12 @@ done
 
 [ -n "${FAKE_CODEX_LOG:-}" ] && printf 'PROMPT:%s\n' "$prompt" >>"$FAKE_CODEX_LOG"
 
+if [ -n "${FAKE_CODEX_BARRIER:-}" ]; then
+  mkdir -p "$FAKE_CODEX_BARRIER"
+  : >"$FAKE_CODEX_BARRIER/ready-$$"
+  while [ ! -e "$FAKE_CODEX_BARRIER/release" ]; do sleep 0.05; done
+fi
+
 for f in ${FAKE_CODEX_TOUCH:-}; do
   mkdir -p "$cd_dir/$(dirname "$f")"
   printf 'edited by fake codex (%s)\n' "$MODE" >>"$cd_dir/$f"

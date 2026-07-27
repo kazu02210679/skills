@@ -85,6 +85,7 @@ codex_require_hash || exit 2
 CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"
 CODEX_TIMEOUT="${CODEX_TIMEOUT:-3600}"
 PLAN_DIR="$(cd -- "$(dirname -- "$INSTRUCTION")" && pwd)"
+WORKDIR_ABS="$(cd -- "$WORKDIR" && pwd)"
 
 # The integrity check watches the plan directory — but only when the packet
 # really lives in one. A one-off packet kept somewhere else has no plan to
@@ -122,7 +123,15 @@ if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 
   DEFAULT_BRANCH="$(git -C "$WORKDIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
   if [ -z "$DEFAULT_BRANCH" ]; then
-    case "$BRANCH" in main|master) DEFAULT_BRANCH="$BRANCH" ;; *) DEFAULT_BRANCH="" ;; esac
+    CONFIGURED_DEFAULT="$(git -C "$WORKDIR" config --get init.defaultBranch 2>/dev/null || true)"
+    if [ -n "$CONFIGURED_DEFAULT" ] && git -C "$WORKDIR" show-ref --verify --quiet "refs/heads/$CONFIGURED_DEFAULT"; then
+      DEFAULT_BRANCH="$CONFIGURED_DEFAULT"
+    else
+      case "$BRANCH" in
+        main|master|trunk|default|develop|development) DEFAULT_BRANCH="$BRANCH" ;;
+        *) DEFAULT_BRANCH="" ;;
+      esac
+    fi
   fi
   if [ -n "$DEFAULT_BRANCH" ] && [ "$BRANCH" = "$DEFAULT_BRANCH" ] \
      && [ "${CODEX_ALLOW_DEFAULT_BRANCH:-0}" != "1" ]; then
@@ -171,6 +180,7 @@ mkdir -p "$ATTEMPT"
 printf '*\n' >"$RUNDIR/.gitignore"
 
 printf '%s' "$BASE_COMMIT" >"$RUNDIR/base_commit"
+printf '%s' "$WORKDIR_ABS" >"$RUNDIR/workdir"
 
 # --- freeze the contract ----------------------------------------------------
 # The gates read these copies, never the plan's live files. Codex can reach the
@@ -189,6 +199,10 @@ if [ -n "$FROZEN_TEST" ]; then
   cp "$FROZEN_TEST" "$RUNDIR/test"
   printf '%s' "$FROZEN_TEST" >"$RUNDIR/test_source"
 fi
+
+codex_contract_write "$RUNDIR" "$WORKDIR" "$IS_GIT" \
+  || die "could not freeze and anchor the run contract"
+CONTRACT_MANIFEST_HASH="$(codex_hash_file "$RUNDIR/contract.sha256")"
 
 # --- assemble the prompt ----------------------------------------------------
 # Each task is a separate `codex exec` with no memory of the last one, so
@@ -253,9 +267,16 @@ if [ -n "$PLAN_WATCH" ] && [ "$META_BEFORE" != "$(codex_meta_fingerprint "$PLAN_
   printf '  a run that edits them can widen its own scope. Inspect the diff before continuing.\n' >&2
 fi
 
+CONTRACT_OK=true
+if ! codex_contract_check "$RUNDIR" "$WORKDIR" "$CONTRACT_MANIFEST_HASH"; then
+  CONTRACT_OK=false
+  printf 'codex_run: FAIL 窶・the frozen contract changed during the run.\n' >&2
+  printf '  Task, allowlist, test, workdir and base evidence must remain immutable.\n' >&2
+fi
+
 # --- scope gate -------------------------------------------------------------
 SCOPE_RC=0
-if [ -n "$ALLOWLIST" ] && [ "$IS_GIT" = "1" ]; then
+if [ "$CONTRACT_OK" = "true" ] && [ -n "$ALLOWLIST" ] && [ "$IS_GIT" = "1" ]; then
   set +e
   "$SCRIPT_DIR/codex_scope_check.sh" "$RUNDIR/allowlist" "$WORKDIR" "$BASE_COMMIT" \
     >"$ATTEMPT/scope.txt" 2>&1
@@ -275,6 +296,7 @@ cat >"$ATTEMPT/meta.json" <<JSON
   "allowlist": "${ALLOWLIST:-}",
   "interfaces_injected": $([ -n "$INTERFACES" ] && [ -s "$INTERFACES" ] && echo true || echo false),
   "meta_intact": $META_OK,
+  "contract_intact": $CONTRACT_OK,
   "scope_ok": $([ "$SCOPE_RC" -eq 0 ] && echo true || echo false),
   "sandbox": "$CODEX_SANDBOX",
   "model": "${CODEX_MODEL:-default}",
@@ -288,7 +310,7 @@ printf 'codex_run: done (exit=%s)\n  RUNDIR: %s\n  REPORT: %s\n  EVENTS: %s\n  M
 
 # Tampering outranks everything: if the contract moved, no other verdict here
 # can be trusted.
-[ "$META_OK" = "true" ] || exit 4
+[ "$META_OK" = "true" ] && [ "$CONTRACT_OK" = "true" ] || exit 4
 # A clean Codex exit with an out-of-scope diff is still a failure — surface it
 # distinctly so the orchestrator never reads exit 0 as "ready to accept".
 if [ "$RC" -eq 0 ] && [ "$SCOPE_RC" -ne 0 ]; then
