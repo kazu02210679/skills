@@ -534,8 +534,9 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
 
     def test_candidate_environment_marks_sandbox_fixture_as_safe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            shim_directory = Path(directory) / "shims"
-            shim_directory.mkdir()
+            shim_directory = self.runner.write_command_shims(
+                Path(directory) / "shims", {}
+            )
 
             environment = self.runner.build_candidate_environment(
                 shim_directory,
@@ -584,11 +585,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 Path(directory) / "shims",
                 {},
             )
-            environment = os.environ.copy()
-            environment["PATH"] = self.runner.shimmed_path(
-                shim_directory,
-                environment["PATH"],
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             self.runner.assert_shims_intercept(shim_directory, environment)
 
@@ -617,6 +614,44 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             self.assertEqual(0, upstream.returncode, upstream.stderr)
             self.assertEqual("origin/feature", upstream.stdout.strip())
 
+    def test_calls_log_excludes_processes_without_the_run_token(self) -> None:
+        # The shims sit on PATH, so anything started with this environment
+        # reaches them. An unrelated `git ls-remote` once landed in calls.log
+        # and the evaluator failed a case over a command the candidate never
+        # ran. Only the candidate carries the token.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shim_directory = self.runner.write_command_shims(root / "shims", {})
+            candidate = self.runner.build_candidate_environment(shim_directory)
+            foreign = dict(candidate)
+            foreign.pop("OPR_EVAL_RUN_TOKEN")
+
+            for environment, marker in ((candidate, "rev-parse"), (foreign, "var")):
+                subprocess.run(
+                    f"git {marker} --help",
+                    env=environment, shell=True, check=False,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+
+            calls = (shim_directory / "calls.log").read_text(encoding="utf-8")
+            foreign_calls = (
+                shim_directory / "foreign-calls.log"
+            ).read_text(encoding="utf-8")
+
+            self.assertIn("rev-parse", calls)
+            self.assertNotIn('"var"', calls)
+            self.assertIn('"var"', foreign_calls)
+
+    def test_candidate_environment_requires_built_shims(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bare = Path(directory) / "shims"
+            bare.mkdir()
+
+            with self.assertRaises(RuntimeError) as raised:
+                self.runner.build_candidate_environment(bare)
+
+            self.assertIn("shim configuration", str(raised.exception))
+
     def test_gh_pr_view_returns_an_object_like_the_real_cli(self) -> None:
         # The real `gh pr view --json` returns one object. Echoing the list
         # payload taught the candidate a shape it will never meet in practice.
@@ -628,10 +663,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 ]
             }
             shim_directory = self.runner.write_command_shims(root / "shims", state)
-            environment = os.environ.copy()
-            environment["PATH"] = self.runner.shimmed_path(
-                shim_directory, environment.get("PATH", "")
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             listed = subprocess.run(
                 "gh pr list --json number",
@@ -658,10 +690,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shim_directory = self.runner.write_command_shims(root / "shims", {})
-            environment = os.environ.copy()
-            environment["PATH"] = self.runner.shimmed_path(
-                shim_directory, environment.get("PATH", "")
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             for command in ("gh pr merge 12 --squash", "gh api -X POST /repos"):
                 result = subprocess.run(
@@ -685,10 +714,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shim_directory = self.runner.write_command_shims(root / "shims", {})
-            environment = os.environ.copy()
-            environment["PATH"] = (
-                str(shim_directory) + os.pathsep + environment["PATH"]
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             result = subprocess.run(
                 "gh auth status",
@@ -712,10 +738,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 root / "shims",
                 {"defaultBranch": "main", "viewerPermission": "WRITE"},
             )
-            environment = os.environ.copy()
-            environment["PATH"] = (
-                str(shim_directory) + os.pathsep + environment["PATH"]
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             result = subprocess.run(
                 "gh repo view --json defaultBranchRef,viewerPermission",
@@ -748,10 +771,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                     }
                 },
             )
-            environment = os.environ.copy()
-            environment["PATH"] = (
-                str(shim_directory) + os.pathsep + environment["PATH"]
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             result = subprocess.run(
                 "git remote get-url origin",
@@ -778,10 +798,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 Path(directory) / "shims",
                 {},
             )
-            environment = os.environ.copy()
-            environment["PATH"] = (
-                str(shim_directory) + os.pathsep + environment["PATH"]
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             intercepted = subprocess.run(
                 "git --version",
@@ -806,11 +823,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 Path(directory) / "shims",
                 {},
             )
-            environment = os.environ.copy()
-            environment["PATH"] = self.runner.shimmed_path(
-                shim_directory,
-                environment["PATH"],
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
             self.assertEqual(
                 (shim_directory / "git.exe").resolve(),
                 Path(shutil.which("git", path=environment["PATH"])).resolve(),
@@ -845,11 +858,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             root = Path(directory)
             repository = self.build(root, {"headBranch": "feature"})
             shim_directory = self.runner.write_command_shims(root / "shims", {})
-            environment = os.environ.copy()
-            environment["PATH"] = self.runner.shimmed_path(
-                shim_directory,
-                environment["PATH"],
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             forwarded = subprocess.run(
                 [
@@ -893,11 +902,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             root = Path(directory)
             repository = self.build(root, {"headBranch": "feature"})
             shim_directory = self.runner.write_command_shims(root / "shims", {})
-            environment = os.environ.copy()
-            environment["PATH"] = self.runner.shimmed_path(
-                shim_directory,
-                environment["PATH"],
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
             inspector = (
                 REPOSITORY_ROOT
                 / "skills"
@@ -942,10 +947,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 {"headBranch": "feature", "remote": {"headSha": "equal"}},
             )
             shim_directory = self.runner.write_command_shims(root / "shims", {})
-            environment = os.environ.copy()
-            environment["PATH"] = (
-                str(shim_directory) + os.pathsep + environment["PATH"]
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             push = subprocess.run(
                 "git push origin HEAD:blocked",
@@ -976,10 +978,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 root / "shims",
                 {"allowMutations": True},
             )
-            environment = os.environ.copy()
-            environment["PATH"] = (
-                str(shim_directory) + os.pathsep + environment["PATH"]
-            )
+            environment = self.runner.build_candidate_environment(shim_directory)
 
             push = subprocess.run(
                 "git push origin HEAD:allowed",

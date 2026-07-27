@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -288,7 +289,9 @@ def write_command_shims(
     """Write cross-platform Git and GitHub CLI wrappers into ``directory``."""
 
     directory.mkdir(parents=True, exist_ok=True)
+    run_token = secrets.token_hex(16)
     configuration = {
+        "runToken": run_token,
         "githubState": github_state,
         "realExecutables": {
             "git": shutil.which("git"),
@@ -303,6 +306,7 @@ def write_command_shims(
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -313,8 +317,17 @@ configuration = json.loads(
     (directory / "shim-config.json").read_text(encoding="utf-8")
 )
 tool, *arguments = sys.argv[1:]
-with (directory / "calls.log").open("a", encoding="utf-8", newline="\n") as log:
-    log.write(json.dumps([tool, *arguments], ensure_ascii=False) + "\n")
+# The shims sit on PATH, so any process started with this environment reaches
+# them — not only the candidate. An unrelated `git ls-remote` once landed in
+# calls.log and the evaluator held the candidate to it, failing a case for a
+# command it never ran. Only the candidate carries the run token, so anything
+# without it is recorded separately and kept out of the authoritative log.
+_entry = json.dumps([tool, *arguments], ensure_ascii=False) + "\n"
+_expected = configuration.get("runToken", "")
+_is_candidate = bool(_expected) and os.environ.get("OPR_EVAL_RUN_TOKEN") == _expected
+_log_name = "calls.log" if _is_candidate else "foreign-calls.log"
+with (directory / _log_name).open("a", encoding="utf-8", newline="\n") as log:
+    log.write(_entry)
 
 state = configuration["githubState"]
 is_git_push = tool == "git" and "push" in arguments
@@ -483,6 +496,7 @@ raise SystemExit(completed.returncode)
     if os.name == "nt":
         _write_windows_executable_shims(directory)
     (directory / "calls.log").touch()
+    (directory / "foreign-calls.log").touch()
     return directory
 
 
@@ -520,6 +534,19 @@ def build_candidate_environment(shim_directory: Path) -> dict[str, str]:
         shim_directory,
         environment.get("PATH", ""),
     )
+    # The shims log only invocations carrying this token, so a process that
+    # merely inherits the shimmed PATH cannot have its commands attributed to
+    # the candidate. calls.log is handed to the evaluator as authoritative;
+    # without the token that claim is not true.
+    configuration_path = shim_directory / "shim-config.json"
+    if not configuration_path.is_file():
+        raise RuntimeError(
+            f"No shim configuration at {configuration_path}. Build the shims "
+            "with write_command_shims first; without the run token the shims "
+            "record nothing and calls.log would look empty rather than clean."
+        )
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    environment["OPR_EVAL_RUN_TOKEN"] = configuration["runToken"]
     # Windows Codex commands run as a low-privilege sandbox account, while the
     # fixture is created by the host account. Mark only this evaluation process
     # as accepting such repositories; never mutate the user's global Git config.
