@@ -114,13 +114,46 @@ out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
 check "HEAD movement by a passing test is refused" "$rc" "5"
 has "post-test HEAD diagnostic" "$out" "HEAD moved"
 
+echo "== publication is compare-and-swap =="
+R="$(new_repo commit-publication-race)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+race_hook="$TMPROOT/advance-ref-before-publish"
+cat >"$race_hook" <<EOF
+#!/usr/bin/env bash
+git -C "$R" add -A
+git -C "$R" commit -qm competing-publisher
+EOF
+chmod +x "$race_hook"
+out="$(CODEX_COMMIT_TEST_BEFORE_PUBLISH="$race_hook" "$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "publication race is refused without overwrite" "$rc" "5"
+has "publication conflict diagnostic" "$out" "publication"
+check "race leaves only the competing commit published" "$(ncommits "$R")" "$((before + 1))"
+check "competing commit remains HEAD" "$(git -C "$R" log -1 --format=%s)" "competing-publisher"
+
+R="$(new_repo commit-detached-head)"; P="$(new_plan "$R" auth)"; git -C "$R" checkout -q --detach; RD="$(run_task "$R" "$P" T1)"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "detached HEAD is refused before publication" "$rc" "2"
+has "detached HEAD diagnostic" "$out" "symbolic"
+
 echo "== newline paths stay one staged path =="
 R="$(new_repo commit-newline-path)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"
 newline_path=$'src/newline\nname.py'; printf 'newline\n' >"$R/$newline_path"
+mapfile -d '' -t untracked_before < <(git -C "$R" ls-files --others --exclude-standard -z)
+newline_git_path=""
+for untracked_path in "${untracked_before[@]}"; do
+  case "$untracked_path" in src/*) [ "$untracked_path" = src/a.py ] || newline_git_path="$untracked_path" ;; esac
+done
+[ -n "$newline_git_path" ] || { bad "newline path is visible to Git before commit"; newline_git_path="$newline_path"; }
 out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
 check "newline product path commits" "$rc" "0"
-git -C "$R" ls-tree -z HEAD -- "$newline_path" >/dev/null; rc=$?
-check "newline product path is present in the commit" "$rc" "0"
+newline_names="$TMPROOT/newline-committed-names"
+git -C "$R" ls-tree -r -z --name-only HEAD >"$newline_names"; rc=$?
+check "newline object listing succeeds" "$rc" "0"
+mapfile -d '' -t committed_paths <"$newline_names"
+newline_found=false
+for committed_path in "${committed_paths[@]}"; do
+  [ "$committed_path" = "$newline_git_path" ] && newline_found=true
+done
+check "newline product path exactly matches a committed object name" "$newline_found" "true"
 
 echo "== test gate policy =="
 R="$(new_repo commit-no-test)"; P="$(new_plan "$R" auth)"; rm "$P/test"; RD="$(run_task "$R" "$P" T1)"

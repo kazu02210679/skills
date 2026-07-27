@@ -52,6 +52,14 @@ head_gate() {
 }
 head_gate
 
+# A CAS publication needs a concrete branch ref. `git commit` updates whatever
+# HEAD points at after it has prepared the commit, which leaves a final race;
+# detached or otherwise unresolved symbolic HEAD has no safe ref to compare.
+HEAD_REF="$(git -C "$WORKDIR_ABS" symbolic-ref -q HEAD)" || \
+  die "HEAD is detached or has no resolvable symbolic ref; refusing atomic publication"
+git -C "$WORKDIR_ABS" rev-parse --verify --quiet "$HEAD_REF^{commit}" >/dev/null 2>&1 || \
+  die "symbolic HEAD ref does not resolve to a commit: $HEAD_REF"
+
 # Serialize cooperating commit gates. A stale lock is deliberately an error:
 # guessing whether another gate completed would make a clean verdict unsafe.
 LOCK_DIR="$(git -C "$WORKDIR_ABS" rev-parse --git-path codex-orchestration-commit.lock)" || die "could not locate Git metadata"
@@ -136,7 +144,8 @@ CODEX_TEST_TIMEOUT="${CODEX_TEST_TIMEOUT:-900}"
 TIMEOUT_CMD=()
 while IFS= read -r token; do [ -n "$token" ] && TIMEOUT_CMD+=("$token"); done < <(codex_timeout_prefix "$CODEX_TEST_TIMEOUT")
 TEST_OUT="$(mktemp)" || die "could not create a test-output file"
-trap 'rm -f "$PRODUCT_LIST" "$TEST_OUT"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+MESSAGE_FILE="$(mktemp)" || die "could not create a commit-message file"
+trap 'rm -f "$PRODUCT_LIST" "$TEST_OUT" "$MESSAGE_FILE"; rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 for command in "${commands[@]}"; do
   record "--- $command"
   set +e
@@ -176,13 +185,43 @@ fi
 head_gate
 git -C "$WORKDIR_ABS" add -A -- "${stage[@]}"
 head_gate
-git -C "$WORKDIR_ABS" commit -q -F - <<EOF
+CURRENT_REF="$(git -C "$WORKDIR_ABS" symbolic-ref -q HEAD)" || \
+  die "HEAD is detached or has no resolvable symbolic ref; refusing atomic publication"
+[ "$CURRENT_REF" = "$HEAD_REF" ] || {
+  say "publication conflict: symbolic HEAD changed from $HEAD_REF to $CURRENT_REF"
+  exit 5
+}
+REF_HEAD="$(git -C "$WORKDIR_ABS" rev-parse --verify --quiet "$HEAD_REF^{commit}" 2>/dev/null || true)"
+[ "$REF_HEAD" = "$BASE_COMMIT" ] || {
+  say "publication conflict: $HEAD_REF moved from $BASE_COMMIT to ${REF_HEAD:-unresolved}"
+  exit 5
+}
+cat >"$MESSAGE_FILE" <<EOF
 $SUBJECT
 
 Codex-Plan: $PLAN_ID
 Codex-Task: $TASK_ID
 Codex-Tests: ${#commands[@]} command(s) passed
 EOF
-SHA="$(git -C "$WORKDIR_ABS" rev-parse --short HEAD)"
+TREE="$(git -C "$WORKDIR_ABS" write-tree)" || die "could not write the staged tree for publication"
+CANDIDATE="$(git -C "$WORKDIR_ABS" commit-tree "$TREE" -p "$BASE_COMMIT" <"$MESSAGE_FILE")" || \
+  die "could not create the candidate task commit"
+
+# Test-only seam: a real competing commit can advance the branch after the
+# candidate exists but before the CAS. Normal runs leave this unset.
+if [ -n "${CODEX_COMMIT_TEST_BEFORE_PUBLISH:-}" ]; then
+  [ -x "$CODEX_COMMIT_TEST_BEFORE_PUBLISH" ] || die "CODEX_COMMIT_TEST_BEFORE_PUBLISH is not an executable file"
+  "$CODEX_COMMIT_TEST_BEFORE_PUBLISH" || die "pre-publication test hook failed"
+fi
+
+set +e
+git -C "$WORKDIR_ABS" update-ref "$HEAD_REF" "$CANDIDATE" "$BASE_COMMIT"
+PUBLISH_RC=$?
+set -e
+if [ "$PUBLISH_RC" -ne 0 ]; then
+  say "publication conflict: $HEAD_REF changed after candidate creation; task commit was not published"
+  exit 5
+fi
+SHA="$(git -C "$WORKDIR_ABS" rev-parse --short "$CANDIDATE")"
 say "$TASK_ID committed as $SHA (${#commands[@]} test command(s) green)"
 printf '%s\n' "$SHA"
