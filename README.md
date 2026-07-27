@@ -93,6 +93,6 @@ third_party/            # 実際に収録する第三者由来資産のライセ
 
 ## 外部Skillとライセンス
 
-68件の [`phuryn/pm-skills`](https://github.com/phuryn/pm-skills) はこの正本から外しました。必要な場合は配布元のpluginまたはrepositoryから導入してください。
+68件の [`phuryn/pm-skills`](https://github.com/phuryn/pm-skills) はこの正本から外しました。必要になったSkillだけを、その都度、元の配布プラグインからインストールしてください。
 
 `handoff` は [`tegnike` のCodex Session Handoff Skill](https://gist.github.com/tegnike/09dbb98711d8b91e66de21611f5b88ff) を基にしています。MIT license、出典、固定hashは `third_party/handoff-gist/` に保持しています。
