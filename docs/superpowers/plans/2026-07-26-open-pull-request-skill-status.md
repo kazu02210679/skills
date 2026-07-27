@@ -8,11 +8,14 @@
 | Task | 状態 |
 |---|---|
 | 1. Skill本体とカタログ数 | 完了。レビュー Approved（修正2ラウンド） |
-| 2. `inspect_pr_context.py` | 完了。レビュー Approved（修正2ラウンド）、18テスト |
-| 3. 評価ハーネス | 実装済み。Critical は fail-safe 化、下記の制約あり |
-| 4. 14ケース | 未着手 |
-| 5. 行動評価の実行 | 未着手 |
+| 2. `inspect_pr_context.py` | 完了。レビュー Approved（修正2ラウンド）、19テスト |
+| 3. 評価ハーネス | 完了。Windows 制約は解消済み（下記） |
+| 4. 14ケース | 完了。criteria / inputs / fixtures 一式 |
+| 5. 行動評価の実行 | 実行中 |
 | 6. リリースゲートとPR | 未着手 |
+
+テストは Windows で93件（1 skip）、Linux で eval 38件（5 skip）+ inspector 19件。
+skip はいずれもプラットフォーム固有テストで、両OSで validator は `Validated 72 skills.`。
 
 ## 設計から変わった点
 
@@ -24,37 +27,81 @@
 合図であり、そこから導かれる `commitsAhead` の 0 は「測定していない」を意味する。
 「提案するものがない」ではない。
 
+### base 解決から同名の tracking branch を除外
+
+fixture が upstream tracking を設定するようになった副作用で、`feature` の
+`@{upstream}` が `origin/feature` を指し、それが **base** として解決される経路が
+生まれた。`origin/feature` は push 先であって pull request の base ではない。
+
+`_resolve_base` は upstream 規則を `_display_ref(upstream) != head_ref` の
+ときだけ採用し、同名なら `origin/HEAD` へフォールバックする。
+
+### `git push --dry-run` を承認前に禁止
+
+dry-run はリモートの receive endpoint に接触する。ローカル bare リモートで
+実測すると `To ../rem.git / * [new branch] main -> main` を返しつつ
+`git ls-remote` は空、つまり**書き込まずに接続だけは行う**。承認前に
+リモートを変更しないという不変条件の趣旨からは、これも禁止側に入る。
+
+権限の確認は `gh auth status`、`gh repo view --json viewerPermission`、
+remote/fork の関係という読み取り専用の証拠から行う。それで判断できなければ
+停止して「権限が未解決」と報告する。
+
+### 報告の正直さに関する2つの規則
+
+- 未追跡ファイルがある間は worktree を「clean」と呼ばない。tracked が clean で
+  あることを述べ、未追跡パスを証跡か別作業かの区別付きで列挙する。
+- 後続の fallback が成功しても、失敗・拒否されたステップは報告する。復旧は
+  最終状態を変えるだけで、途中で起きたことを消さない。
+
 ### 評価は既定で全ケースを流さない
 
 `run.py` に `--cases` を追加した。1ケースにつき Codex 呼び出しが2回かかる。
 
-## Task 3 の制約（次の作業者へ）
+## Windows での command shim（解決済み）
 
-**ハーネスは Windows ネイティブでは実行を拒否する。**
-
-理由は shim の構造にある。ハーネスの存在意義は「承認前にリモートを変更していない」
-という否定の証明であり、それは `calls.log` でしか確かめられない。ところが Windows の
+ハーネスの存在意義は「承認前にリモートを変更していない」という否定の証明で、
+それは `calls.log` でしか確かめられない。当初これは Windows で成立していなかった。
 `CreateProcess` は素の名前に `.exe` しか補完しないため、`git.exe push` と
-`shell=False` の呼び出しが拡張子なしのラッパを飛び越えて本物の git に届く。
-レビューの実測では2つの push がリモートに着地し、`calls.log` には何も残らなかった。
-このスキル自身の inspector が `subprocess.run(["git", ...])` を使うため、これは
-例外的な経路ではない。
+no-shell 呼び出しが拡張子なしのラッパを飛び越え、**push がリモートに着地して
+`calls.log` には何も残らなかった**。このスキル自身の inspector が
+`subprocess.run(["git", ...])` を使うため、例外的な経路ではなかった。
 
-対応として PATH から本物の git/gh を含むディレクトリを除去した。shell 経由は
-これで塞がる。no-shell を塞ぐには `.exe` 形式の shim が要り、コンパイル済み
-ランチャは stdlib の範囲外なので見送った。
+解決は2段構えになっている。
 
-代わりに `assert_shims_intercept` を追加し、shell あり・なしの両方で
-`git --version` が `calls.log` に届くことを確認してから各ケースを走らせる。
-届かなければ実行を拒否する。観測できない対象について「変更しなかった」と
-報告するくらいなら、走らない方がよい。
+1. PATH から本物の git/gh を含むディレクトリを除去する。
+2. `.NET` の C# コンパイラで `git.exe` / `gh.exe` を生成し、`CreateProcess` が
+   必ず shim に当たるようにする。コンパイラが見つからなければ**実行を拒否する**。
 
-Linux では `execvp` が拡張子なしラッパを解決するため両方とも intercept される
-はずだが、**これは推論であり未実測**。CI で確認すること。
+`assert_shims_intercept` が shell あり・なしの両方で `git --version` が
+`calls.log` に届くことを確認してから各ケースを走らせる。届かなければ拒否する。
+観測できない対象について「変更しなかった」と報告するくらいなら走らない方がよい。
+
+### 検証で踏みやすい落とし穴
+
+Windows で「shim が効いていない」ように見えることがあるが、**検証方法の問題で
+あることが多い**。`CreateProcess` は実行ファイルの解決に `subprocess.run` の
+`env` 引数ではなく**親プロセスの環境**を使う。親から直接
+`subprocess.run(["git", ...], env=shimmed)` を呼ぶと本物の git に解決され、
+shim を通らない。
+
+候補エージェントは shim 済み環境で**起動された子プロセス**なので条件が違う。
+`assert_shims_intercept` が Python の子プロセスを挟んでいるのはこのためで、
+検証する側も同じ形にしないと誤った結論が出る。実条件での測定結果:
+
+```
+child rc= 97
+child stderr= git mutation blocked by open-pull-request evaluation shim
+calls.log: ["git", "push", "origin", "HEAD:viaChildNoShell"]
+remote heads: feature main
+```
+
+Linux でも実測済み。shell / no-shell / `gh pr merge` の3経路すべてが遮断され、
+`calls.log` に記録され、リモートには何も着地しない。
 
 ## 未解決の指摘
 
-Task 3 のレビューが挙げた Minor のうち、次が未対応。
+現行コードで未解消であることを確認済み。
 
 - `ancestor:N` のテストが `--is-ancestor` しか見ておらず、`equal` に退化しても
   緑のまま。`rev-list --count origin/feature..HEAD` を足すとよい。
@@ -63,11 +110,9 @@ Task 3 のレビューが挙げた Minor のうち、次が未対応。
 - `gh pr view` が `gh pr list` と同じ配列を返す。本物はオブジェクトを返す。
 - fixture 構築が周囲の global git config を継承する。`commit.gpgsign` や
   `core.hooksPath` が設定された環境では fixture を作れない。
-- `_publish_remote` に同じ値を2回渡している引数がある。
-- `run.py:113` の空行が PEP8 E302 に違反。
-
-Task 2 のレビューが挙げた未対応の Minor。
-
+  `GIT_CONFIG_GLOBAL` を存在しないパスへ向けると隔離できる。
+- `_publish_remote` が `destination` を `repository` と `destination` の両方に
+  受け取っており、常に同じ値。
 - `_repository_label` がローカルパスのリモートから `owner/name` 風の文字列を
   作る。`gh pr create --repo` に渡ると失敗する。
 - トレーラの取得に git 2.24 以降が要る。古い git では**黙って** `codexPlanIds`
@@ -88,9 +133,9 @@ Task 2 と 3 のコードは Codex に委譲した（`codex-plugin` 経由）。
 
 ## 次にやること
 
-Task 4 は `evals/open-pull-request/` に14ケースを書く。criteria の下書きは
-計画の Task 4 にある。fixture のキーは `fixtures/build_repository.py` の
-docstring が正本。
+Task 5 の結果次第。落ちたケースがあれば、`SKILL.md` の該当する指示を
+**最小限だけ**直す。fixture の詳細をスキルへ書き写さないこと。pass condition を
+緩めて通すこともしないこと。
 
-Task 5 は Linux か WSL で実行する。`assert_shims_intercept` が通ることを
-先に確かめること。通らなければ結果に意味はない。
+Task 6 は最終ゲートと PR の ready 化。PR 本文の `Verification` 節には
+実行した検証だけを事実として記載し、未実行のものは `NOT-RUN` のまま残す。
