@@ -62,7 +62,7 @@ macOS / Linux:
 4. `python scripts/generate-skill-catalog.py` でこの一覧を更新する。
 5. validator、focused test、全testを実行する。
 
-Skillは原則として1件1PRに分けます。`graph-engineering` と `loop-engineering` も、実装・評価単位が固まるまでは別Skillとして追加します。
+Skillは原則として1件1PRに分けます。
 
 ## 品質管理
 
