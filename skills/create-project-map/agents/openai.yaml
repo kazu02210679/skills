@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Project Map"
+  short_description: "Create and update a living architecture map"
+  default_prompt: "Use $create-project-map to turn the approved plan into an interactive architecture map and machine-readable JSON."

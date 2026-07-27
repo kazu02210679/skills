@@ -186,52 +186,54 @@ class CatalogInvariantTests(unittest.TestCase):
     def test_current_catalog_satisfies_all_invariants(self) -> None:
         self.assertEqual([], VALIDATOR.validate_repository(REPOSITORY_ROOT))
 
-    def test_rejects_catalog_count_drift(self) -> None:
+    def test_rejects_catalog_drift_after_skill_removal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = Path(temporary_directory)
             self.copy_catalog(repository)
-            shutil.rmtree(repository / "skills" / "ab-test-analysis")
+            shutil.rmtree(repository / "skills" / "writing-style")
             errors = VALIDATOR.validate_repository(repository)
-            self.assertTrue(any("expected 72 skills" in error for error in errors))
-            self.assertTrue(any("expected 68 PM Skills" in error for error in errors))
+            self.assertTrue(any("README Skill catalog is stale" in error for error in errors))
 
-    def test_rejects_readme_count_drift(self) -> None:
+    def test_rejects_hand_edited_catalog(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = Path(temporary_directory)
             self.copy_catalog(repository)
             readme = repository / "README.md"
             readme.write_text(
                 readme.read_text(encoding="utf-8").replace(
-                    "次の72個",
-                    "次の71個",
+                    "| Skill | 説明 |",
+                    "| Skill | 手書きの説明 |",
                 ),
                 encoding="utf-8",
             )
             errors = VALIDATOR.validate_repository(repository)
-            self.assertTrue(any("README catalog count" in error for error in errors))
+            self.assertTrue(any("README Skill catalog is stale" in error for error in errors))
 
-    def test_rejects_provenance_count_drift(self) -> None:
+    def test_rejects_missing_human_readme(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = Path(temporary_directory)
             self.copy_catalog(repository)
-            source_path = repository / "third_party" / "pm-skills" / "source.json"
-            source_path.write_text(
-                source_path.read_text(encoding="utf-8").replace(
-                    '"imported_skill_count": 68',
-                    '"imported_skill_count": 67',
-                ),
-                encoding="utf-8",
-            )
+            (repository / "skills" / "writing-style" / "README.md").unlink()
             errors = VALIDATOR.validate_repository(repository)
             self.assertTrue(
-                any("imported_skill_count must be 68" in error for error in errors)
+                any("writing-style: missing human-facing README.md" in error for error in errors)
             )
 
-    def test_rejects_manifest_hash_drift(self) -> None:
+    def test_rejects_vendored_pm_skill_collection(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             repository = Path(temporary_directory)
             self.copy_catalog(repository)
-            skill_path = repository / "skills" / "ab-test-analysis" / "SKILL.md"
+            (repository / "third_party" / "pm-skills").mkdir()
+            errors = VALIDATOR.validate_repository(repository)
+            self.assertTrue(
+                any("vendored pm-skills must not be stored" in error for error in errors)
+            )
+
+    def test_rejects_handoff_manifest_hash_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = Path(temporary_directory)
+            self.copy_catalog(repository)
+            skill_path = repository / "skills" / "handoff" / "SKILL.md"
             skill_path.write_text(
                 skill_path.read_text(encoding="utf-8") + "\nchanged\n",
                 encoding="utf-8",

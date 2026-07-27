@@ -1,0 +1,48 @@
+[
+  {
+    "id": "initial-plan-map",
+    "prompt": "Use $create-project-map to visualize the approved plan.",
+    "fixture": "fixtures/valid-map.json",
+    "expect": {
+      "files": ["architecture-map.json", "architecture-map.html"],
+      "validator_exit": 0,
+      "required_statuses": ["planned", "implemented"]
+    }
+  },
+  {
+    "id": "preserve-layout-on-update",
+    "prompt": "Update the project map with the newly approved worker plan.",
+    "fixture": "fixtures/valid-map.json",
+    "expect": {
+      "preserve_positions_for_existing_ids": true,
+      "merge_by_id": true
+    }
+  },
+  {
+    "id": "do-not-promote-from-plan-only",
+    "prompt": "Mark the new worker path shown in the plan.",
+    "fixture": "fixtures/valid-map.json",
+    "expect": {
+      "plan_only_status": "planned",
+      "implemented_requires_code_or_runtime_evidence": true
+    }
+  },
+  {
+    "id": "retain-coverage-gap",
+    "prompt": "Map the dependency even though its runtime contract is not confirmed.",
+    "fixture": "fixtures/valid-map.json",
+    "expect": {
+      "explicit_coverage_gap": true,
+      "invented_contracts": false
+    }
+  },
+  {
+    "id": "reject-broken-reference",
+    "prompt": "Validate this existing project map before updating it.",
+    "fixture": "fixtures/invalid-edge-map.json",
+    "expect": {
+      "validator_exit": 1,
+      "overwrite_existing_map": false
+    }
+  }
+]

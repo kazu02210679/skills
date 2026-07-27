@@ -1,0 +1,43 @@
+{
+  "project": {
+    "id": "sample-project",
+    "title": "Sample Project",
+    "summary": "An invalid project-map fixture."
+  },
+  "sources": [{"path": "plans/sample.md", "kind": "plan"}],
+  "categories": [{"id": "service", "label": "Service", "color": "#69a7ff"}],
+  "nodes": [
+    {
+      "id": "api",
+      "label": "API",
+      "category": "service",
+      "status": "planned",
+      "phase": "phase-1",
+      "description": "Accepts requests.",
+      "responsibilities": [],
+      "inputs": [],
+      "outputs": [],
+      "sourcePaths": [],
+      "evidence": ["plans/sample.md"],
+      "coverageGap": "Implementation has not started.",
+      "position": {"x": 120, "y": 180}
+    }
+  ],
+  "edges": [
+    {
+      "id": "api-to-missing",
+      "source": "api",
+      "target": "missing-node",
+      "label": "dispatches",
+      "contract": "Command"
+    }
+  ],
+  "flows": [],
+  "phases": [
+    {
+      "id": "phase-1",
+      "label": "Phase 1",
+      "description": "Initial implementation."
+    }
+  ]
+}

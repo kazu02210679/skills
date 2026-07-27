@@ -1,0 +1,441 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Implementation review</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090b0f;
+      --surface: #11141a;
+      --surface-2: #171b23;
+      --line: #2a303a;
+      --text: #f4f5f7;
+      --soft: #bdc3ce;
+      --muted: #7e8795;
+      --accent: #efbd51;
+      --blocking: #ff5f64;
+      --high: #ff8b52;
+      --medium: #e7c45c;
+      --low: #65a9ef;
+      --note: #8f98a7;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { min-width: 320px; margin: 0; background: var(--bg); color: var(--text); }
+    button, textarea { font: inherit; }
+    button, .nav-link {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface-2);
+      color: var(--text);
+    }
+    button { cursor: pointer; }
+    button:hover, .nav-link:hover { border-color: #596271; }
+    button:focus-visible, textarea:focus-visible, a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .topbar {
+      position: sticky;
+      z-index: 10;
+      top: 0;
+      min-height: 60px;
+      padding: 11px clamp(16px, 3vw, 36px);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(9, 11, 15, .94);
+      backdrop-filter: blur(12px);
+    }
+    .brand { margin-right: auto; }
+    .brand strong { display: block; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+    .brand span { color: var(--muted); font-size: 10px; }
+    .action { min-height: 36px; padding: 8px 11px; font-size: 11px; }
+    .shell { width: min(1440px, 100%); margin: 0 auto; padding: 0 clamp(16px, 3vw, 36px) 80px; }
+    .hero { padding: 54px 0 38px; border-bottom: 1px solid var(--line); }
+    .eyebrow { margin: 0 0 10px; color: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { max-width: 980px; margin: 0; font-size: clamp(31px, 5vw, 63px); line-height: 1.02; letter-spacing: -.035em; }
+    .overview { max-width: 850px; margin: 18px 0 0; color: var(--soft); font-size: 15px; line-height: 1.7; }
+    .meta-row { margin-top: 24px; display: flex; flex-wrap: wrap; gap: 8px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 25px;
+      padding: 4px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--soft);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .badge[data-tone="blocking"] { border-color: color-mix(in srgb, var(--blocking) 60%, var(--line)); color: var(--blocking); }
+    .badge[data-tone="high"] { border-color: color-mix(in srgb, var(--high) 60%, var(--line)); color: var(--high); }
+    .badge[data-tone="medium"] { color: var(--medium); }
+    .badge[data-tone="low"] { color: var(--low); }
+    .badge[data-tone="passed"] { color: #70d7a1; }
+    .badge[data-tone="failed"], .badge[data-tone="blocked"] { color: var(--blocking); }
+    .workspace { display: grid; grid-template-columns: minmax(220px, 270px) minmax(0, 1fr); gap: clamp(24px, 4vw, 56px); padding-top: 34px; }
+    .side { min-width: 0; }
+    .side-inner { position: sticky; top: 86px; }
+    .section-label { margin: 0 0 10px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+    .nav-list { display: grid; gap: 8px; }
+    .nav-link {
+      padding: 11px 12px;
+      display: block;
+      text-decoration: none;
+    }
+    .nav-link strong { display: block; font-size: 12px; }
+    .nav-link span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; }
+    .coverage-card { margin-top: 24px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+    .coverage-card p { margin: 7px 0 0; color: var(--soft); font-size: 11px; line-height: 1.55; }
+    .content { min-width: 0; }
+    .intent { scroll-margin-top: 82px; margin-bottom: 26px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); overflow: hidden; }
+    .intent-header { padding: 20px; border-bottom: 1px solid var(--line); }
+    .intent-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
+    h2 { margin: 0; font-size: 23px; }
+    .intent-header p { margin: 8px 0 0; color: var(--soft); font-size: 13px; line-height: 1.6; }
+    .intent-body { padding: 20px; }
+    .subsection { margin-bottom: 26px; }
+    .subsection:last-child { margin-bottom: 0; }
+    h3 { margin: 0 0 11px; font-size: 11px; letter-spacing: .09em; text-transform: uppercase; }
+    .finding { margin-bottom: 10px; padding: 15px; border: 1px solid var(--line); border-left: 3px solid var(--severity, var(--note)); border-radius: 9px; background: var(--surface-2); }
+    .finding-head { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+    .finding-head strong { margin-right: auto; font-size: 13px; line-height: 1.45; }
+    .finding-grid { margin-top: 13px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .fact small { display: block; margin-bottom: 5px; color: var(--muted); font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .fact p { margin: 0; color: var(--soft); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+    .location { margin-top: 11px; color: var(--muted); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    details { margin-bottom: 9px; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+    summary { padding: 12px 14px; cursor: pointer; background: var(--surface-2); font-size: 11px; font-weight: 700; }
+    .hunk-explanation { margin: 0; padding: 12px 14px; color: var(--soft); font-size: 11px; line-height: 1.6; border-top: 1px solid var(--line); }
+    pre { margin: 0; padding: 14px; overflow: auto; background: #090b10; color: #cfd4dd; font: 10px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
+    .comment-block { margin-top: 15px; }
+    .comment-block label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+    textarea {
+      width: 100%;
+      min-height: 86px;
+      padding: 11px 12px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0c0f14;
+      color: var(--text);
+      line-height: 1.55;
+    }
+    .verification-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .verification { padding: 14px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+    .verification strong { display: block; margin-bottom: 6px; font-size: 12px; }
+    .verification p { margin: 9px 0 0; color: var(--soft); font-size: 11px; line-height: 1.55; }
+    .global-section { margin-top: 34px; padding-top: 27px; border-top: 1px solid var(--line); }
+    .manual-copy { margin-top: 12px; padding: 14px; border: 1px solid var(--accent); border-radius: 9px; background: rgba(239, 189, 81, .08); }
+    .manual-copy[hidden] { display: none; }
+    .manual-copy p { margin: 0 0 8px; color: var(--soft); font-size: 11px; }
+    #copyStatus { min-width: 80px; color: var(--muted); font-size: 10px; }
+    .empty { padding: 28px; border: 1px dashed var(--line); border-radius: 9px; color: var(--muted); text-align: center; }
+    @media (max-width: 820px) {
+      .topbar { position: static; flex-wrap: wrap; }
+      .brand { width: 100%; }
+      .shell { padding-bottom: 50px; }
+      .hero { padding-top: 34px; }
+      .workspace { display: block; }
+      .side-inner { position: static; }
+      .nav-list { grid-template-columns: 1fr; }
+      .coverage-card { margin-bottom: 28px; }
+      .finding-grid, .verification-grid { grid-template-columns: 1fr; }
+      .intent { scroll-margin-top: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <script id="reviewData" type="application/json">{{REVIEW_DATA_JSON}}</script>
+  <header class="topbar">
+    <div class="brand">
+      <strong>Implementation review</strong>
+      <span id="repositoryLabel"></span>
+    </div>
+    <button class="action" id="exportComments" type="button">Export comments JSON</button>
+    <button class="action" id="copyCorrectionPrompt" type="button">Copy correction prompt</button>
+    <span id="copyStatus" role="status" aria-live="polite"></span>
+  </header>
+
+  <main class="shell">
+    <section class="hero" aria-labelledby="reviewTitle">
+      <p class="eyebrow">Explained diff · two-pass review</p>
+      <h1 id="reviewTitle"></h1>
+      <p class="overview" id="reviewOverview"></p>
+      <div class="meta-row" id="reviewMeta"></div>
+    </section>
+
+    <div class="workspace">
+      <aside class="side">
+        <div class="side-inner">
+          <p class="section-label">Intent groups · highest risk first</p>
+          <nav class="nav-list" id="reviewNav" aria-label="Review intent groups"></nav>
+          <div class="coverage-card" id="coverageCard"></div>
+        </div>
+      </aside>
+      <div class="content">
+        <div id="intentGroups"></div>
+        <section class="global-section" aria-labelledby="verificationHeading">
+          <h2 id="verificationHeading">Verification</h2>
+          <div class="verification-grid" id="verificationList"></div>
+        </section>
+        <section class="global-section" aria-labelledby="generalCommentHeading">
+          <h2 id="generalCommentHeading">General reviewer note</h2>
+          <div class="comment-block">
+            <label for="generalComment">Comment saved in this browser</label>
+            <textarea id="generalComment" data-comment-id="general" placeholder="Add an overall review note…"></textarea>
+          </div>
+        </section>
+        <section class="manual-copy" id="manualCopyFallback" aria-labelledby="manualCopyHeading" hidden>
+          <h2 id="manualCopyHeading">Copy manually</h2>
+          <p>Clipboard access was unavailable. Select and copy the prompt below.</p>
+          <textarea id="manualCopyText" readonly></textarea>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    "use strict";
+    const data = JSON.parse(document.getElementById("reviewData").textContent);
+    const severityRank = { blocking: 0, high: 1, medium: 2, low: 3, note: 4 };
+    const severityColor = {
+      blocking: "var(--blocking)", high: "var(--high)", medium: "var(--medium)",
+      low: "var(--low)", note: "var(--note)"
+    };
+    const storageKey = `review-comments:${data.meta.repository}:${data.meta.planSlug}`;
+    let stored = { revision: data.meta.head, updatedAt: null, comments: {} };
+    try {
+      const parsed = JSON.parse(localStorage.getItem(storageKey) || "null");
+      if (parsed && parsed.comments && typeof parsed.comments === "object") stored = parsed;
+    } catch (error) {
+      console.warn("Stored review comments could not be read.", error);
+    }
+
+    const el = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = String(text);
+      return node;
+    };
+    const badge = (text, tone) => {
+      const node = el("span", "badge", text);
+      node.dataset.tone = tone || "";
+      return node;
+    };
+    const saveComments = () => {
+      stored.revision = data.meta.head;
+      stored.updatedAt = new Date().toISOString();
+      localStorage.setItem(storageKey, JSON.stringify(stored));
+    };
+    const addComment = (parent, id, labelText) => {
+      const block = el("div", "comment-block");
+      const label = el("label", "", labelText);
+      const textarea = el("textarea");
+      const inputId = `comment-${id}`;
+      label.htmlFor = inputId;
+      textarea.id = inputId;
+      textarea.dataset.commentId = id;
+      textarea.placeholder = "Add a reviewer comment…";
+      textarea.value = stored.comments[id] || "";
+      textarea.addEventListener("input", () => {
+        stored.comments[id] = textarea.value;
+        saveComments();
+      });
+      block.append(label, textarea);
+      parent.append(block);
+    };
+    const appendFact = (parent, label, value) => {
+      const fact = el("div", "fact");
+      fact.append(el("small", "", label), el("p", "", value || "—"));
+      parent.append(fact);
+    };
+
+    document.getElementById("repositoryLabel").textContent =
+      `${data.meta.repository} · ${data.meta.base} → ${data.meta.head}`;
+    document.getElementById("reviewTitle").textContent = data.summary.headline;
+    document.getElementById("reviewOverview").textContent = data.summary.overview;
+    const meta = document.getElementById("reviewMeta");
+    meta.append(
+      badge(data.result.replaceAll("-", " "), data.result),
+      badge(`${data.findings.filter(item => item.status === "open").length} open findings`),
+      badge(`${data.intentGroups.length} intent groups`),
+      badge(`plan: ${data.meta.plan}`)
+    );
+
+    const groups = [...data.intentGroups].sort(
+      (a, b) => severityRank[a.risk] - severityRank[b.risk]
+    );
+    const findingsById = new Map(data.findings.map(item => [item.id, item]));
+    const hunksById = new Map(data.hunks.map(item => [item.id, item]));
+    const nav = document.getElementById("reviewNav");
+    const groupRoot = document.getElementById("intentGroups");
+    groups.forEach(group => {
+      const link = el("a", "nav-link");
+      link.href = `#intent-${group.id}`;
+      link.append(
+        el("strong", "", group.title),
+        el("span", "", `${group.risk} · ${group.findingIds.length} findings · ${group.hunkIds.length} hunks`)
+      );
+      nav.append(link);
+
+      const section = el("section", "intent");
+      section.id = `intent-${group.id}`;
+      const header = el("header", "intent-header");
+      const heading = el("div", "intent-heading");
+      heading.append(el("h2", "", group.title), badge(group.risk, group.risk));
+      header.append(heading, el("p", "", group.summary));
+      const body = el("div", "intent-body");
+
+      const findingSection = el("div", "subsection");
+      findingSection.append(el("h3", "", "Findings"));
+      const groupFindings = group.findingIds.map(id => findingsById.get(id)).filter(Boolean);
+      if (!groupFindings.length) findingSection.append(el("div", "empty", "No findings."));
+      groupFindings.forEach(finding => {
+        const card = el("article", "finding");
+        card.style.setProperty("--severity", severityColor[finding.severity]);
+        const head = el("div", "finding-head");
+        head.append(
+          el("strong", "", finding.title),
+          badge(finding.severity, finding.severity),
+          badge(finding.pass, finding.pass),
+          badge(finding.status, finding.status)
+        );
+        const grid = el("div", "finding-grid");
+        appendFact(grid, "Evidence", finding.evidence);
+        appendFact(grid, "Impact", finding.impact);
+        appendFact(grid, "Recommended action", finding.recommendedAction);
+        card.append(
+          head,
+          el("div", "location", `${finding.file}:${finding.line}`),
+          grid
+        );
+        addComment(card, `finding:${finding.id}`, "Comment on this finding");
+        findingSection.append(card);
+      });
+
+      const hunkSection = el("div", "subsection");
+      hunkSection.append(el("h3", "", "Explained diff"));
+      group.hunkIds.map(id => hunksById.get(id)).filter(Boolean).forEach(hunk => {
+        const details = el("details");
+        details.open = true;
+        details.append(
+          el("summary", "", `${hunk.file} · old ${hunk.oldStart} / new ${hunk.newStart}`),
+          el("p", "hunk-explanation", hunk.explanation),
+          el("pre", "", hunk.diff)
+        );
+        hunkSection.append(details);
+      });
+      addComment(body, `group:${group.id}`, "Comment on this intent group");
+      body.prepend(hunkSection);
+      body.prepend(findingSection);
+      section.append(header, body);
+      groupRoot.append(section);
+    });
+
+    const coverage = document.getElementById("coverageCard");
+    coverage.append(el("p", "section-label", "Coverage"));
+    coverage.append(el(
+      "p", "",
+      `${data.coverage.changedFilesReviewed.length}/${data.files.length} files · ` +
+      `${data.coverage.intentGroupsReviewed.length}/${data.intentGroups.length} intents`
+    ));
+    coverage.append(el(
+      "p", "",
+      data.coverage.gaps.length ? `Gaps: ${data.coverage.gaps.join("; ")}` : "No declared coverage gaps."
+    ));
+
+    const verificationRoot = document.getElementById("verificationList");
+    if (!data.verification.length) {
+      verificationRoot.append(el("div", "empty", "No verification was recorded."));
+    }
+    data.verification.forEach(check => {
+      const card = el("article", "verification");
+      card.append(el("strong", "", check.name), badge(check.status, check.status), el("p", "", check.details));
+      verificationRoot.append(card);
+    });
+
+    const general = document.getElementById("generalComment");
+    general.value = stored.comments.general || "";
+    general.addEventListener("input", () => {
+      stored.comments.general = general.value;
+      saveComments();
+    });
+
+    const commentExport = () => ({
+      repository: data.meta.repository,
+      planSlug: data.meta.planSlug,
+      revision: data.meta.head,
+      exportedAt: new Date().toISOString(),
+      comments: Object.fromEntries(
+        Object.entries(stored.comments).filter(([, value]) => String(value).trim())
+      )
+    });
+    document.getElementById("exportComments").addEventListener("click", () => {
+      const status = document.getElementById("copyStatus");
+      const blob = new Blob([JSON.stringify(commentExport(), null, 2) + "\n"], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${data.meta.planSlug}-review-comments.json`;
+      anchor.hidden = true;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      status.textContent = "Exported";
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    });
+
+    const correctionPrompt = () => {
+      const open = data.findings.filter(item => item.status === "open");
+      const comments = Object.entries(stored.comments).filter(([, value]) => String(value).trim());
+      const lines = [
+        `Please revise the implementation for ${data.meta.planSlug}.`,
+        `Repository: ${data.meta.repository}`,
+        `Revision: ${data.meta.head}`,
+        "",
+        "Open review findings:"
+      ];
+      if (!open.length) lines.push("- None.");
+      open.forEach(item => {
+        lines.push(
+          `- [${item.severity}] ${item.title} (${item.file}:${item.line})`,
+          `  Evidence: ${item.evidence}`,
+          `  Impact: ${item.impact}`,
+          `  Action: ${item.recommendedAction || "Propose and apply an appropriate correction."}`
+        );
+      });
+      lines.push("", "Human reviewer comments:");
+      if (!comments.length) lines.push("- None.");
+      comments.forEach(([id, value]) => lines.push(`- ${id}: ${String(value).trim()}`));
+      lines.push("", "After changes, rerun relevant verification and summarize the result.");
+      return lines.join("\n");
+    };
+    document.getElementById("copyCorrectionPrompt").addEventListener("click", async () => {
+      const prompt = correctionPrompt();
+      const status = document.getElementById("copyStatus");
+      const fallback = document.getElementById("manualCopyFallback");
+      const fallbackText = document.getElementById("manualCopyText");
+      fallbackText.value = prompt;
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("Clipboard unavailable");
+        await navigator.clipboard.writeText(prompt);
+        status.textContent = "Copied";
+        fallback.hidden = true;
+      } catch (error) {
+        status.textContent = "Copy manually";
+        fallback.hidden = false;
+        fallbackText.focus();
+        fallbackText.select();
+      }
+    });
+  </script>
+</body>
+</html>

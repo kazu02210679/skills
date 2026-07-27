@@ -1,40 +1,36 @@
 # Host compatibility
 
-The 68 vendored PM Skill bodies are distributed byte-for-byte as imported. This
-repository supplies a host compatibility layer around them instead of silently
-rewriting third-party instructions.
+`SKILL.md`の基本形式はClaude CodeとCodexで共有できますが、実行機能は同一ではありません。このrepositoryはSkill本文を正本として共有し、完全なruntime parityは主張しません。
 
-## Invocation arguments
+## 共通部分
 
-- Claude Code natively replaces `$ARGUMENTS` in a Skill with the arguments from
-  the invocation.
-- Codex documents explicit Skill invocation with `$skill-name`, but does not
-  document textual `$ARGUMENTS` substitution. On Codex, interpret a literal
-  `$ARGUMENTS` semantically as the current explicit Skill invocation or the
-  user's task input. The installer does not preprocess or mutate Skill bodies.
+- `skills/<name>/SKILL.md` をAgent向け実行仕様として扱う。
+- `scripts/`、`references/`、`assets/` はSkill directoryからの相対pathで参照する。
+- repository内で作業するときは、Codexは `AGENTS.md`、Claude Codeは `CLAUDE.md` を読む。
+- install先は配布物であり、編集元にしない。
 
-This convention preserves intent, but it is not a claim of full runtime parity.
-If an instruction truly depends on host-side textual substitution, the agent
-must ask for or infer the invocation input from the current user request rather
-than claiming that substitution occurred.
+## 呼び出し引数
 
-## Referenced upstream slash commands
+Claude CodeはSkill invocationの `$ARGUMENTS` をnativeに置換します。Codexでは同じtext置換を前提にせず、明示されたSkill invocationまたは現在のuser requestを入力として解釈します。
 
-The vendored `shipping-artifacts` Skill refers to upstream command files that
-are not redistributed. Use these repository-present procedures:
+この違いをinstallerが書き換えることはありません。textual substitutionが不可欠なSkillは、必要な入力を現在のrequestから解決できない場合に確認します。
 
-| Reference | Portable procedure |
-|---|---|
-| `/document-app` | Invoke `shipping-artifacts` and follow its documentation workflow. |
-| `/derive-tests` | Invoke `shipping-artifacts` to identify shipped behavior, then `test-scenarios` to derive coverage. |
-| `/ship-check` | Invoke `intended-vs-implemented`, then `shipping-artifacts` to assemble and verify release evidence. |
+## `codex-orchestration`
 
-The machine-readable contract is
-`compatibility/host-contract.json`.
+`codex-orchestration` の主用途はClaude CodeからCodex CLIへ実装を委譲することです。
+
+- Claude Code: natural-language invocationからworkflowを実行できる。
+- Codex: workflowの保守・review目的では使えるが、Codexから別のCodex sessionへ再帰的に委譲しない。
+- 旧 `Codex-plugin-Claude-Code` のslash commandsはcanonical interfaceではない。`SKILL.md` と同梱scriptを直接使う。
+- wrapper pathはplugin rootではなく、Skill directoryを基準に解決する。
+
+## Skillごとの差
+
+`agents/openai.yaml` はCodexのUI metadataです。Claude Codeはこのfileを必要としません。逆にClaude Code固有のplugin manifestやslash commandを、portable Skillの必須条件にはしません。
+
+ホスト差が実際の評価結果へ影響した場合だけ、Skill本文の分岐、補助script、またはhost-specific packageを追加します。推測だけで本文をforkしません。
 
 ## Documentation basis
 
-- Claude Code Skills documentation:
-  <https://code.claude.com/docs/en/skills>
-- OpenAI's Codex Skill-building documentation:
-  <https://learn.chatgpt.com/docs/build-skills>
+- [Claude Code Skills](https://code.claude.com/docs/en/skills)
+- [OpenAI Codex Skill building](https://learn.chatgpt.com/docs/build-skills)

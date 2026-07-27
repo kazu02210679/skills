@@ -134,7 +134,6 @@ def write_fixture_repository(root: Path, *, invalid: bool = False) -> None:
         )
 
     for source_name, copyright_line in (
-        ("pm-skills", "Copyright (c) 2026 PM Fixture"),
         ("handoff-gist", "Copyright (c) 2026 Handoff Fixture"),
     ):
         source = root / "third_party" / source_name
@@ -225,7 +224,7 @@ class InstallerSafetyTests(unittest.TestCase):
                     )
                     destination = project / ".agents" / "skills"
                     notices = destination / ".third-party-notices"
-                    for source_name in ("pm-skills", "handoff-gist"):
+                    for source_name in ("handoff-gist",):
                         for filename in ("LICENSE", "source.json", "SHA256SUMS"):
                             self.assertEqual(
                                 (

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Co-create Plan"
+  short_description: "Claude and Codex debate and agree on implementation plans"
+  default_prompt: "Use $co-create-plan to have Claude Code and Codex jointly produce an implementation plan ready for user approval."

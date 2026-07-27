@@ -71,7 +71,7 @@ foreach ($skill in $skills) {
     }
 }
 
-foreach ($sourceName in @("pm-skills", "handoff-gist")) {
+foreach ($sourceName in @("handoff-gist")) {
     foreach ($filename in @("LICENSE", "source.json", "SHA256SUMS")) {
         $noticeSource = Join-Path $noticesRoot "$sourceName\$filename"
         if (-not (Test-Path -LiteralPath $noticeSource -PathType Leaf)) {
@@ -143,7 +143,7 @@ try {
         }
 
         $noticeStage = Join-Path $stage ".third-party-notices"
-        foreach ($sourceName in @("pm-skills", "handoff-gist")) {
+        foreach ($sourceName in @("handoff-gist")) {
             $noticeDestination = Join-Path $noticeStage $sourceName
             New-Item -ItemType Directory -Path $noticeDestination -Force | Out-Null
             foreach ($filename in @("LICENSE", "source.json", "SHA256SUMS")) {
@@ -174,7 +174,7 @@ try {
     foreach ($transaction in $transactions) {
         if (-not $PSCmdlet.ShouldProcess(
             $transaction.Destination,
-            "Install $($skills.Count) Skills and third-party notices"
+            "Install $($skills.Count) Skills and retained provenance notices"
         )) {
             continue
         }
@@ -244,5 +244,5 @@ finally {
 }
 
 foreach ($destinationRoot in $completedDestinations) {
-    Write-Host "Installed $($skills.Count) skills and third-party notices to $destinationRoot"
+    Write-Host "Installed $($skills.Count) skills and retained provenance notices to $destinationRoot"
 }
