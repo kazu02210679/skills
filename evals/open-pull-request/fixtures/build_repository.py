@@ -64,7 +64,12 @@ def _write_files(repository: Path, files: dict[str, str]) -> None:
     for relative_path, content in files.items():
         path = repository / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        # newline="" keeps the bytes exactly as the fixture declares them.
+        # Without it Python rewrites \n to \r\n on Windows, `git diff --check`
+        # reports every added line as trailing whitespace, and the skill —
+        # correctly — pauses over a failing check the fixture invented.
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
 
 
 def _commit_message(commit: dict[str, Any]) -> str:

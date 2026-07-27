@@ -125,6 +125,28 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
 
         self.assertEqual("ancestor:1", specification["remote"]["headSha"])
 
+    def test_every_declared_fixture_passes_git_diff_check(self) -> None:
+        # Python rewrites \n to \r\n when writing text on Windows, so fixture
+        # files arrived with CRLF and `git diff --check` reported every added
+        # line as trailing whitespace. The skill then paused over a failing
+        # check the fixture had invented — correct behaviour, wrong premise.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for path in sorted((EVAL_ROOT / "fixtures").glob("case-*.json")):
+                specification = json.loads(path.read_text(encoding="utf-8"))
+                if not specification.get("commits"):
+                    continue
+                repository = self.builder.build_repository(
+                    specification, root / path.stem / "repo"
+                )
+                base = specification.get("defaultBranch", "main")
+                checked = run_git(
+                    repository, "diff", "--check", f"{base}...HEAD"
+                )
+                self.assertEqual(
+                    0, checked.returncode, f"{path.name}: {checked.stdout}"
+                )
+
     def test_every_fixture_with_commits_ignores_python_bytecode(self) -> None:
         # Running the repository's tests generates __pycache__. Without an
         # ignore it shows up as an untracked file, and every "proceed" case
