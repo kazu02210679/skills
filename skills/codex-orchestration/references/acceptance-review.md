@@ -1,23 +1,38 @@
 # Acceptance review
 
-Use this checklist after Codex reports that implementation is complete.
+Review the finished task independently. Do not repair production code during
+this review; return a focused correction or ask the user for a decision.
 
-1. Read the task packet before the implementation report.
-2. Map every acceptance item to a command, file inspection, or observable
-   runtime result.
-3. Run the real checks and record their exit status or concrete result.
-4. Inspect the diff for work outside the packet, weakened tests, disabled
-   checks, broad permission changes, and hidden generated artifacts.
-5. Return a compact table with:
-   - acceptance item;
-   - command or evidence;
-   - `PASS`, `FAIL`, or `UNRESOLVED`;
-   - the shortest useful explanation.
-6. Finish with one verdict:
-   - `DELIVER` when every required item passes;
-   - `SEND BACK` when a fix is needed;
-   - `ASK USER` when the remaining decision requires new authority or a
-     product choice.
+1. Read `packet.md`, the task packet, and its acceptance criteria before any
+   Codex report. Map each criterion to a command, inspection, or observable
+   result.
+2. Run every mapped check and record its command, exit status, and concise
+   result. Mark a check `UNRESOLVED` when it cannot run; never convert missing
+   evidence into a pass.
+3. Read the latest run evidence as claims: `report.md`, `events.jsonl`,
+   `stderr.log`, `meta.json`, and `scope.txt`.
+4. Re-run the scope check with the **frozen** allowlist and base commit from
+   `RUNDIR`, not the mutable plan file:
 
-Do not repair implementation code during this review. The orchestrator decides
-whether to send a targeted hint or ask the user.
+   ```bash
+   "<skill-dir>/scripts/codex_scope_check.sh" \
+     <rundir>/allowlist <workdir> "$(cat <rundir>/base_commit)"
+   ```
+
+   Treat a scope violation as `FAIL`. Treat an unavailable or indeterminate
+   result as `UNRESOLVED`.
+5. Inspect the diff for work outside the packet, weakened tests, disabled
+   checks, broad permission changes, and generated artifacts that bypass the
+   guardrails.
+6. Inspect task history. Verify that each completed task has exactly one commit
+   carrying one matching `Codex-Plan:` trailer and one matching `Codex-Task:`
+   trailer. A commit spanning tasks, multiple commits for one task, missing
+   trailers, or a trailer for another plan is a `FAIL`.
+7. Run `codex_status.sh <plan-dir> <workdir>`. A plan with pending tasks is not
+   ready for plan-level delivery.
+
+Return a compact table with the acceptance item, command or evidence, status
+(`PASS`, `FAIL`, or `UNRESOLVED`), and the shortest useful explanation. Finish
+with `DELIVER` only when every required item passes; otherwise return `SEND
+BACK` for an implementation fix or `ASK USER` for a decision requiring new
+authority.

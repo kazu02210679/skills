@@ -1,42 +1,54 @@
 # Codex Orchestration
 
-Claude Codeが要件と合格条件を決め、Codexへ実装を委譲し、最後にClaude Code自身が検証するためのSkillです。旧 `kazu02210679/Codex-plugin-Claude-Code` の中核を、共通Skillカタログへ移しました。
+Use this portable Skill to run a guarded implementation loop: define a plan,
+delegate one scoped task to Codex, review its evidence, commit through the
+gate, and repeat. The portable runtime replaces the retired Claude Code plugin
+interfaces; it does not require a marketplace manifest, slash commands, or a
+dedicated reviewer agent.
 
-## 使う場面
+## Workflow
 
-- 「Codexに実装させて、Claudeで確認してほしい」
-- 大きめの実装をタスクパケットで明確に委譲したい
-- Codexが詰まった原因をClaudeが診断し、最小限のヒントで再開したい
+1. Create `.codex-instructions/<plan>/` with a stable `plan-id`, plan packet,
+   task packets, allowlists, and test commands.
+2. Ask status for the next task.
+3. Run one task and inspect its report, logs, scope result, and diff.
+4. Resume only with a narrow, evidence-backed hint and within the attempt cap.
+5. Independently verify the task, record its interface additions, and commit it
+   through the gate.
+6. Repeat until status reports the plan complete, then run plan-level checks.
 
-## 入力と出力
+Read [the task-plan contract](references/task-plan-contract.md) for file
+layouts, exits, and guardrails. Read [the acceptance-review checklist](references/acceptance-review.md)
+before declaring delivery.
 
-- 入力: ユーザー要求、対象リポジトリ、検証可能な合格条件
-- 出力: `.codex-instructions/` のタスクパケット、`.codex-runs/` の実行証跡、独立した合否判定
+## Bundled scripts
 
-## 実行例
+| Script | Use |
+|---|---|
+| `scripts/codex_status.sh` | Report committed and pending tasks from Git trailers. |
+| `scripts/codex_run.sh` | Freeze a task contract, run Codex, and capture attempt evidence. |
+| `scripts/codex_resume.sh` | Add an immutable retry attempt to the recorded run. |
+| `scripts/codex_scope_check.sh` | Check product changes against the frozen allowlist. |
+| `scripts/codex_commit.sh` | Recheck scope and tests, then publish one guarded task commit. |
+| `scripts/codex_lib.sh` | Provide shared helpers for the five executable scripts. |
+
+Run scripts by their Skill-relative path:
 
 ```bash
+skills/codex-orchestration/scripts/codex_status.sh \
+  .codex-instructions/add-export /path/to/repository
+
 skills/codex-orchestration/scripts/codex_run.sh \
-  .codex-instructions/add-export.md \
-  /path/to/repository
+  .codex-instructions/add-export/T1.md /path/to/repository
 ```
 
-## ホストと制約
+Use a non-default branch with no uncommitted product files. The commit gate
+creates one commit per task with `Codex-Plan:` and `Codex-Task:` trailers and
+does not publish to a remote.
 
-主用途はClaude CodeからCodex CLIを呼ぶ運用です。Codex上では、再帰的なCodex委譲を避けるため暗黙起動を無効にしています。`danger-full-access` は隔離環境以外で使いません。
+## Retired interfaces
 
-## 関連Skill
-
-- `co-create-plan`: Claude CodeとCodexが対等に計画を作る
-- `review-implementation-html`: 実装差分をHTMLでレビューする
-- `open-pull-request`: 検証済みブランチをPRとして公開する
-
-## 旧pluginからの移行
-
-| 旧interface | このSkillでの置き換え |
-|---|---|
-| `/codex-spec` | `codex-orchestration` の境界定義とtask packet作成 |
-| `/codex-run` | `scripts/codex_run.sh` |
-| `/codex-accept` | `references/acceptance-review.md` による独立検証 |
-
-Claude Code固有のmarketplace manifestとslash commandは正本にせず、portableな `SKILL.md` と同梱resourceをinterfaceにします。
+The plugin-only manifest, slash-command files, and dedicated reviewer agent are
+intentionally retired. The six portable scripts and this Skill's references
+retain the supported workflow, so no live plugin dependency remains before the
+legacy plugin repository is retired or deleted.

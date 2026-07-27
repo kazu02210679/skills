@@ -1,12 +1,8 @@
 # Agent Engineering Skills
 
-Claude CodeとCodexで再利用する、独自Agent Skillの正本リポジトリです。
-
-ここで管理するのは、自分で設計・評価・改善するSkillだけです。外部のPM Skill集は正本へ複製せず、必要な環境へ配布元から直接インストールします。旧 [`Codex-plugin-Claude-Code`](https://github.com/kazu02210679/Codex-plugin-Claude-Code) の中核も `codex-orchestration` として統合しました。
-
-## Skill一覧
-
-この表は各 `SKILL.md` のYAML frontmatterから生成します。説明を変えたときやSkillを追加したときは、表を手編集せず `python scripts/generate-skill-catalog.py` を実行してください。
+This repository is the canonical catalog for eight independent reusable Skills.
+The catalog is generated from each Skill's frontmatter; regenerate it with
+`python scripts/generate-skill-catalog.py` after changing a description.
 
 <!-- BEGIN SKILL CATALOG -->
 | Skill | 説明 |
@@ -21,50 +17,53 @@ Claude CodeとCodexで再利用する、独自Agent Skillの正本リポジト�
 | [`writing-style`](skills/writing-style/README.md) | Use when drafting or revising Japanese explanatory prose, technical articles, essays, or chapters; when accurate, information-dense writing feels flat, monotonous, mechanical, or difficult to keep reading; or when openings, paragraph rhythm, section transitions, lists, and conclusions need stylistic diagnosis. |
 <!-- END SKILL CATALOG -->
 
-## 使い方
+## What this catalog contains
 
-このリポジトリでは `skills/<name>/SKILL.md` がAgent向けの実行仕様、同じディレクトリの `README.md` が人間向けの説明です。Skillを明示して使う場合は、Claude CodeまたはCodexで名前を指定します。
+Each catalog entry has a canonical `skills/<name>/SKILL.md` and a concise
+human-facing README. Install only the Skills needed for the host and project.
+The portable `codex-orchestration` Skill contains the guarded runtime formerly
+provided by a Claude Code plugin; no live legacy repository dependency remains.
 
-```text
-$co-create-plan で、この実装の計画をClaude CodeとCodexに共同作成させて
-$review-implementation-html で実装差分をレビューして
-```
+PM Skills are not vendored here. Install an individual PM Skill on demand from
+its source plugin, then keep it separate from this canonical catalog.
 
-ホストごとの引数や実行方法には差があります。対応範囲は [ホスト互換性](docs/host-compatibility.md) を参照してください。
+## Install
 
-## インストール
-
-| ホスト | プロジェクト用 | ユーザー用 |
+| Host | Project location | User location |
 |---|---|---|
 | Claude Code | `.claude/skills/` | `~/.claude/skills/` |
 | Codex | `.agents/skills/` | `~/.agents/skills/` |
 
-Windows PowerShell:
+On Windows, run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install-skills.ps1 `
   -Agent both -Scope user
 ```
 
-macOS / Linux:
+On macOS or Linux, run:
 
 ```bash
 ./scripts/install-skills.sh --agent both --scope user
 ```
 
-特定projectへ入れる場合は `-Scope project -ProjectRoot <path>` または `--scope project --project-root <path>` を使います。既存の管理対象Skillを置換する場合だけ `-Force` / `--force` を追加してください。インストール先は配布物であり、編集元ではありません。
+Use `-Scope project -ProjectRoot <path>` or `--scope project --project-root
+<path>` for a project install. Add `-Force` or `--force` only when replacing an
+existing installation is intended.
 
-## 新しいSkillを追加する
+Read [host compatibility](docs/host-compatibility.md) before relying on a
+host-specific behavior.
 
-1. `skills/<skill-name>/SKILL.md` を作り、`name` と `description` をfrontmatterに置く。
-2. 人間向けの目的、利用場面、入出力、制約を `skills/<skill-name>/README.md` に書く。
-3. 必要な場合だけ `scripts/`、`references/`、`assets/`、`agents/openai.yaml`、`evals/<skill-name>/` を追加する。
-4. `python scripts/generate-skill-catalog.py` でこの一覧を更新する。
-5. validator、focused test、全testを実行する。
+## Maintain a Skill
 
-Skillは原則として1件1PRに分けます。`graph-engineering` と `loop-engineering` も、実装・評価単位が固まるまでは別Skillとして追加します。
+1. Update `skills/<skill-name>/SKILL.md` with only `name` and `description` in
+   frontmatter.
+2. Keep its README concise and add only necessary scripts, references, assets,
+   or host metadata.
+3. Add or update a focused evaluation when behavior changes.
+4. Regenerate the catalog and run validation.
 
-## 品質管理
+## Verify
 
 ```bash
 python -m pip install -r requirements-validation.txt
@@ -73,26 +72,12 @@ python scripts/validate-skills.py
 python -m unittest discover -s tests -v
 ```
 
-`SKILL.md` はAgentの正本、各 `README.md` とこのcatalogは利用者向けの入口です。実行仕様を変えた場合は、該当Skillの評価またはfocused testも更新します。
-
-## SkillOpt
-
-SkillOptはSkillそのものではなく、既存Skillの改善候補を作る品質管理ツールです。このリポジトリへ本体をvendorせず、`requirements.txt` でversionを固定します。
-
-採用は自動化しません。機械判定できる評価を持つSkillだけを候補にし、複数回の検証で既存版を上回った変更を人間が確認して採用します。仕組み、適用条件、運用ルールは [SkillOptによる品質管理](docs/skillopt/README.md)、設定手順は [SKILLOPT-SLEEP.md](SKILLOPT-SLEEP.md) を参照してください。
-
-## ディレクトリ
+## Repository layout
 
 ```text
-skills/                 # 独自Skillの正本
-evals/                  # Skillごとの行動評価
-scripts/                # install、catalog生成、検証
-docs/                   # 運用・互換性・設計資料
-third_party/            # 実際に収録する第三者由来資産のライセンス
+skills/       canonical Skills
+evals/        Skill evaluations
+scripts/      installation, catalog, and validation tools
+docs/         compatibility and design records
+third_party/  redistributed third-party artifacts and licenses
 ```
-
-## 外部Skillとライセンス
-
-68件の [`phuryn/pm-skills`](https://github.com/phuryn/pm-skills) はこの正本から外しました。必要になったSkillだけを、その都度、元の配布プラグインからインストールしてください。
-
-`handoff` は [`tegnike` のCodex Session Handoff Skill](https://gist.github.com/tegnike/09dbb98711d8b91e66de21611f5b88ff) を基にしています。MIT license、出典、固定hashは `third_party/handoff-gist/` に保持しています。

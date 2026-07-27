@@ -29,12 +29,12 @@
     }
   },
   {
-    "id": "approved-plan-plugin-handoff",
-    "prompt": "共同 Plan を承認したので Codex-plugin-Claude-Code に渡して。",
+    "id": "approved-plan-orchestration-handoff",
+    "prompt": "共同 Plan を承認したので codex-orchestration に引き渡して。",
     "expect": {
-      "packet_path": ".codex-instructions/<task-slug>.md",
+      "packet_path": ".codex-instructions/<plan>/packet.md",
       "planning_status": "approved",
-      "next_command": "/codex-run",
+      "next_action": "skills/codex-orchestration/scripts/codex_status.sh",
       "rerun_codex_spec": false
     }
   },

@@ -23,8 +23,11 @@ class HostCompatibilityTests(unittest.TestCase):
         compatibility = (
             REPOSITORY_ROOT / "docs" / "host-compatibility.md"
         ).read_text(encoding="utf-8")
-        self.assertIn("完全なruntime parityは主張しません", compatibility)
-        self.assertIn("$ARGUMENTS", compatibility)
+        self.assertIn(
+            "does not claim that the hosts have identical runtime behavior",
+            compatibility,
+        )
+        self.assertIn("intentionally retired", compatibility)
 
     def test_codex_orchestration_uses_skill_relative_wrappers(self) -> None:
         skill_root = REPOSITORY_ROOT / "skills" / "codex-orchestration"
@@ -72,6 +75,16 @@ class HostCompatibilityTests(unittest.TestCase):
             },
             skill_names,
         )
+        root_readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("PM Skills are not vendored here.", root_readme)
+        self.assertIn("its source plugin", root_readme)
+
+    def test_codex_orchestration_documents_retired_plugin_interfaces(self) -> None:
+        readme = (
+            REPOSITORY_ROOT / "skills" / "codex-orchestration" / "README.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("intentionally retired", readme)
+        self.assertIn("legacy plugin repository is retired or deleted", readme)
 
 
 if __name__ == "__main__":
