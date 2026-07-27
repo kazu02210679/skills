@@ -463,41 +463,29 @@ raise SystemExit(completed.returncode)
 
 
 def shimmed_path(shim_directory: Path, original_path: str) -> str:
-    """Put shims first and apply Windows-only executable bypass hardening.
+    """Put the shims first and leave the rest of PATH intact.
 
-    Prepending alone is not enough on Windows. `CreateProcess` appends `.exe`
-    to a bare name, so a caller that does not go through a shell — including
-    `subprocess.run(["git", ...])`, which the Skill's own inspector uses —
-    walks straight past the extension-less shim and finds the real `git.exe`
-    further down PATH. The mutation then succeeds and never reaches calls.log,
-    which is precisely the blind spot this harness exists to rule out.
+    Prepending alone was once not enough on Windows: `CreateProcess` appends
+    `.exe` to a bare name, so `subprocess.run(["git", ...])` — the form the
+    Skill's own inspector uses — walked past the extension-less shim and found
+    the real `git.exe` further down PATH, mutating the remote without reaching
+    calls.log. This function used to drop every directory holding a real git
+    or gh so that a bypass failed loudly instead of succeeding silently.
 
-    Dropping those directories on Windows makes a bypass fail loudly instead
-    of silently succeeding. POSIX resolves the extension-less shim correctly,
-    so removing a directory such as `/usr/bin` there would also remove Python,
-    the shell, and standard utilities that the candidate needs. Forwarding
-    still works because the shim resolved the real executables by absolute
-    path before PATH was touched.
+    Compiled `git.exe` and `gh.exe` shims now sit in the shim directory and
+    `write_command_shims` refuses to run without them, so PATH order alone
+    decides and the removal is obsolete. Keeping it was actively harmful:
+    `git-upload-pack` and `git-receive-pack` live beside `git.exe`, so
+    dropping that directory left the real git unable to find its own transport
+    helpers. Every remote read failed, and case-03 recorded the Skill
+    correctly refusing to publish against a remote it could not verify — a
+    fixture failure wearing the shape of a Skill failure.
     """
 
-    if os.name != "nt":
-        return os.pathsep.join(
-            [str(shim_directory)]
-            + [entry for entry in original_path.split(os.pathsep) if entry]
-        )
-
-    kept: list[str] = []
-    for entry in original_path.split(os.pathsep):
-        if not entry:
-            continue
-        directory = Path(entry)
-        if any(
-            (directory / name).exists()
-            for name in ("git", "git.exe", "gh", "gh.exe")
-        ):
-            continue
-        kept.append(entry)
-    return os.pathsep.join([str(shim_directory), *kept])
+    return os.pathsep.join(
+        [str(shim_directory)]
+        + [entry for entry in original_path.split(os.pathsep) if entry]
+    )
 
 
 def build_candidate_environment(shim_directory: Path) -> dict[str, str]:

@@ -468,15 +468,23 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 self.assertNotIn(":\\", text)
                 self.assertNotRegex(text, r'"\s*/')
 
-    @unittest.skipUnless(os.name == "nt", "Windows-specific PATH hardening")
-    def test_shimmed_path_drops_real_git_directories_on_windows(self) -> None:
+    def test_shimmed_path_keeps_git_transport_helpers_reachable(self) -> None:
+        # git-upload-pack and git-receive-pack live beside git itself, and the
+        # real git resolves them from PATH. Dropping that directory to block a
+        # bypass also broke every remote read, so the skill correctly refused
+        # to publish against a remote it could not verify and the case failed
+        # for a fixture reason. PATH order plus the compiled .exe shims is what
+        # blocks the bypass now, so the directory must stay.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             real = root / "realbin"
             real.mkdir()
-            (real / ("git.exe" if os.name == "nt" else "git")).write_text(
-                "", encoding="utf-8"
-            )
+            suffix = ".exe" if os.name == "nt" else ""
+            for name in ("git", "git-upload-pack", "git-receive-pack"):
+                executable = real / f"{name}{suffix}"
+                executable.write_text("", encoding="utf-8")
+                # shutil.which honours the executable bit on POSIX.
+                executable.chmod(0o755)
             harmless = root / "otherbin"
             harmless.mkdir()
             shims = root / "shims"
@@ -488,8 +496,12 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             entries = result.split(os.pathsep)
 
             self.assertEqual(str(shims), entries[0])
-            self.assertNotIn(str(real), entries)
+            self.assertIn(str(real), entries)
             self.assertIn(str(harmless), entries)
+            self.assertIsNotNone(
+                shutil.which("git-upload-pack", path=result),
+                "git transport helpers must stay reachable",
+            )
 
     def test_candidate_environment_marks_sandbox_fixture_as_safe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -504,8 +516,7 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
             self.assertEqual("safe.directory", environment["GIT_CONFIG_KEY_0"])
             self.assertEqual("*", environment["GIT_CONFIG_VALUE_0"])
 
-    @unittest.skipIf(os.name == "nt", "POSIX-specific PATH behavior")
-    def test_shimmed_path_keeps_real_git_directories_on_posix(self) -> None:
+    def test_shimmed_path_preserves_order_on_every_platform(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             real = root / "system-bin"
