@@ -172,7 +172,14 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
 
         self.assertIn("execution_transcript", prompt)
         self.assertIn("python -m pytest", prompt)
-        self.assertIn("calls.log records only Git and GitHub CLI", prompt)
+        # The harness shares its environment with the candidate, so calls.log
+        # is a superset of the candidate's actions. Mutations count wherever
+        # they came from; a read is the candidate's only if the transcript
+        # shows it. Without this the evaluator contradicted an accurate report
+        # using a command the candidate never ran.
+        self.assertIn("superset of what the candidate did", prompt)
+        self.assertIn("is a violation regardless of which process", prompt)
+        self.assertIn("harness noise", prompt)
 
     def test_execution_evidence_includes_completed_file_changes(self) -> None:
         evidence = self.runner.extract_execution_evidence(
