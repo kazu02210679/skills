@@ -39,7 +39,7 @@ class CodexOrchestrationShellEvaluations(unittest.TestCase):
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=240,
+            timeout=360,
             check=False,
         )
         self.assertEqual(

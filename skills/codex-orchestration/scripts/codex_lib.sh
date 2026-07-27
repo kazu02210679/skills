@@ -144,6 +144,125 @@ codex_require_hash() {
   return 1
 }
 
+# --- JSON encoding ---------------------------------------------------------
+# Metadata is evidence, so it must remain valid for every legal path and
+# option value. Shell interpolation cannot safely encode quotes, backslashes,
+# control characters, or newlines. Prefer Python's standard-library encoder
+# and fall back to Perl's core JSON::PP module; fail closed if neither exists.
+CODEX_JSON=()
+CODEX_JSON_KIND=""
+
+codex_require_json_encoder() {
+  local candidate_name
+  local -a candidate=()
+  [ -n "$CODEX_JSON_KIND" ] && return 0
+
+  if [ -n "${CODEX_JSON_CMD:-}" ]; then
+    # shellcheck disable=SC2206  # deliberate word splitting: command override
+    candidate=(${CODEX_JSON_CMD})
+    if [ "${#candidate[@]}" -gt 0 ] &&
+       command -v "${candidate[0]}" >/dev/null 2>&1 &&
+       "${candidate[@]}" -c 'import json' >/dev/null 2>&1; then
+      CODEX_JSON=("${candidate[@]}")
+      CODEX_JSON_KIND=python
+      return 0
+    fi
+    printf 'codex: configured JSON encoder is unavailable or cannot import json: %s\n' \
+      "$CODEX_JSON_CMD" >&2
+    return 1
+  fi
+
+  for candidate_name in python3 python; do
+    if command -v "$candidate_name" >/dev/null 2>&1 &&
+       "$candidate_name" -c 'import json' >/dev/null 2>&1; then
+      CODEX_JSON=("$candidate_name")
+      CODEX_JSON_KIND=python
+      return 0
+    fi
+  done
+  if command -v perl >/dev/null 2>&1 &&
+     perl -MJSON::PP -e 1 >/dev/null 2>&1; then
+    CODEX_JSON=(perl)
+    CODEX_JSON_KIND=perl
+    return 0
+  fi
+
+  printf 'codex: no JSON encoder found (looked for Python json and Perl JSON::PP).\n' >&2
+  printf '  Run metadata cannot be recorded safely without one.\n' >&2
+  return 1
+}
+
+# codex_write_json <output> (<key> <string|integer|boolean> <value>)...
+codex_write_json() {
+  local output="$1" tmp rc
+  shift
+  [ $(( $# % 3 )) -eq 0 ] || {
+    printf 'codex: internal JSON field list is malformed.\n' >&2
+    return 1
+  }
+  codex_require_json_encoder || return 1
+  tmp="$output.tmp.$$"
+  rm -f "$tmp"
+  rc=0
+  case "$CODEX_JSON_KIND" in
+    python)
+      "${CODEX_JSON[@]}" -c '
+import json
+import sys
+
+path = sys.argv[1]
+fields = sys.argv[2:]
+value_by_type = {
+    "string": lambda value: value,
+    "integer": lambda value: int(value),
+    "boolean": lambda value: {"true": True, "false": False}[value],
+}
+result = {}
+for index in range(0, len(fields), 3):
+    key, kind, value = fields[index:index + 3]
+    result[key] = value_by_type[kind](value)
+with open(path, "w", encoding="utf-8", newline="\n") as stream:
+    json.dump(result, stream, ensure_ascii=False, indent=2)
+    stream.write("\n")
+' "$tmp" "$@" || rc=$?
+      ;;
+    perl)
+      "${CODEX_JSON[@]}" -MJSON::PP -e '
+use strict;
+use warnings;
+my $path = shift @ARGV;
+my %result;
+while (@ARGV) {
+  my ($key, $kind, $value) = splice @ARGV, 0, 3;
+  if ($kind eq "string") {
+    $result{$key} = $value;
+  } elsif ($kind eq "integer") {
+    $result{$key} = 0 + $value;
+  } elsif ($kind eq "boolean" && ($value eq "true" || $value eq "false")) {
+    $result{$key} = $value eq "true" ? JSON::PP::true : JSON::PP::false;
+  } else {
+    die "invalid JSON field type or value\n";
+  }
+}
+open my $stream, ">:raw", $path or die "open $path: $!\n";
+print {$stream} JSON::PP->new->utf8->pretty->canonical->encode(\%result);
+close $stream or die "close $path: $!\n";
+' "$tmp" "$@" || rc=$?
+      ;;
+    *) rc=1 ;;
+  esac
+  if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    printf 'codex: JSON metadata encoding failed for %s.\n' "$output" >&2
+    return 1
+  fi
+  mv "$tmp" "$output" || {
+    rm -f "$tmp"
+    printf 'codex: could not publish JSON metadata to %s.\n' "$output" >&2
+    return 1
+  }
+}
+
 # codex_hash_file <path> — hash of one file's contents, or the empty string.
 codex_hash_file() {
   [ -f "$1" ] || { printf '\n'; return 0; }

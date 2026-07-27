@@ -64,6 +64,17 @@ check "post-test out-of-scope file is refused" "$rc" "3"
 has "post-test diagnostic" "$out" "after tests"
 check "post-test scope makes no commit" "$(ncommits "$R")" "$before"
 
+echo "== post-test contract and plan mutations are untrusted =="
+R="$(new_repo commit-post-test-contract)"; P="$(new_plan "$R" auth)"
+cat >"$P/test" <<'EOF'
+run_dir="$(ls -dt .codex-runs/* | head -1)"; printf '*\n' >"$run_dir/allowlist"; printf '*\n' >.codex-instructions/auth/T1.allowlist; printf 'rewritten-plan\n' >.codex-instructions/auth/plan-id; printf 'escaped\n' >docs/escaped.txt
+EOF
+RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "a passing test cannot rewrite its verdict inputs" "$rc" "6"
+has "post-test contract drift is explained" "$out" "frozen contract"
+check "post-test verdict tampering makes no commit" "$(ncommits "$R")" "$before"
+
 echo "== commit gate records exactly one bounded commit =="
 R="$(new_repo commit-green)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
 out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
@@ -85,6 +96,19 @@ check "active task commits with unrelated metadata present" "$rc" "0"
 files="$(git -C "$R" show --name-only --format= HEAD)"
 hasnt "other plan is never staged" "$files" "other/scratch.md"
 has "other plan remains uncommitted" "$(git -C "$R" status --porcelain)" ".codex-instructions/other/"
+
+echo "== passing tests cannot inject the shared index =="
+R="$(new_repo commit-test-stages-meta)"; P="$(new_plan "$R" auth)"
+printf 'mkdir -p .codex-instructions/other; printf injected >.codex-instructions/other/injected.md; git add .codex-instructions/other/injected.md\n' >"$P/test"
+RD="$(run_task "$R" "$P" T1)"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "task commits despite test-staged unrelated metadata" "$rc" "0"
+files="$(git -C "$R" show --name-only --format= HEAD)"
+has "isolated candidate includes product path" "$files" "src/a.py"
+has "isolated candidate includes active plan" "$files" ".codex-instructions/auth/T1.md"
+hasnt "test-staged metadata is excluded from candidate" "$files" ".codex-instructions/other/injected.md"
+staged_after="$(git -C "$R" diff --cached --name-only)"
+has "unrelated staged metadata remains visible after publication" "$staged_after" ".codex-instructions/other/injected.md"
 
 echo "== pre-staged work is refused =="
 R="$(new_repo commit-staged-meta)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"; before="$(ncommits "$R")"
