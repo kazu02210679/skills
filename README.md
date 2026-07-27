@@ -17,12 +17,15 @@ Claude Code と Codex で共用するエージェントスキルの正本リポ�
 
 ## 収録スキル
 
-正本は `skills/` に置く。現在は次の72個を収録している。
+正本は `skills/` に置く。現在は次の75個を収録している。
 
+- `co-create-plan` — Claude CodeとCodexが制約付きラウンドで共同計画を作る
 - `complexity-aware-execution` — 調査と検証の深さをタスクの難易度・リスクに合わせる
+- `create-project-map` — リポジトリ構造を走査し、対話的なHTMLマップを生成する
 - `writing-style` — 正確さを保ちながら日本語の認知リズムを整える
 - `handoff` — 会話の目的・前提・未解決事項を保って新しいタスクへ移す
 - `open-pull-request` — 検証済みブランチをレビュー結果を根拠にPRとして公開する
+- `review-implementation-html` — 実装差分を調査し、根拠付きHTMLレビューを生成する
 - [phuryn/pm-skills](https://github.com/phuryn/pm-skills) 2.1.0の68 Skill
 
 PM SkillsはMITライセンスに基づいてSkill本体だけを収録した。Claude固有のコマンドと

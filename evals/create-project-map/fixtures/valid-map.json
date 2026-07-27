@@ -1,0 +1,94 @@
+{
+  "project": {
+    "id": "sample-project",
+    "title": "Sample Project",
+    "summary": "A minimal project-map fixture."
+  },
+  "sources": [
+    {
+      "path": "plans/sample.md",
+      "kind": "plan"
+    }
+  ],
+  "categories": [
+    {
+      "id": "service",
+      "label": "Service",
+      "color": "#69a7ff"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "api",
+      "label": "API",
+      "category": "service",
+      "status": "implemented",
+      "phase": "phase-1",
+      "description": "Accepts requests.",
+      "responsibilities": ["Validate input"],
+      "inputs": ["HTTP request"],
+      "outputs": ["Command"],
+      "sourcePaths": ["src/api.py"],
+      "evidence": ["src/api.py"],
+      "coverageGap": "",
+      "position": {"x": 120, "y": 180}
+    },
+    {
+      "id": "worker",
+      "label": "Worker",
+      "category": "service",
+      "status": "planned",
+      "phase": "phase-1",
+      "description": "Processes commands.",
+      "responsibilities": ["Execute work"],
+      "inputs": ["Command"],
+      "outputs": ["Result"],
+      "sourcePaths": ["src/worker.py"],
+      "evidence": ["plans/sample.md"],
+      "coverageGap": "Implementation has not started.",
+      "position": {"x": 360, "y": 180}
+    }
+  ],
+  "edges": [
+    {
+      "id": "api-to-worker",
+      "source": "api",
+      "target": "worker",
+      "label": "dispatches",
+      "contract": "Command"
+    }
+  ],
+  "flows": [
+    {
+      "id": "request-flow",
+      "label": "Request flow",
+      "description": "Accept and process a request.",
+      "actor": "User",
+      "trigger": "A request arrives.",
+      "outcome": "A result is returned.",
+      "nodeIds": ["api", "worker"],
+      "edgeIds": ["api-to-worker"],
+      "stages": [
+        {
+          "id": "accept",
+          "label": "Accept",
+          "description": "Validate the request.",
+          "nodeIds": ["api"],
+          "backstage": "Parse and validate input.",
+          "produces": ["Command"]
+        }
+      ],
+      "outputs": ["Result"],
+      "safety": ["Reject invalid input"],
+      "evidence": ["plans/sample.md"],
+      "coverageGap": "Runtime trace is not available."
+    }
+  ],
+  "phases": [
+    {
+      "id": "phase-1",
+      "label": "Phase 1",
+      "description": "Initial implementation."
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+[
+  {
+    "id": "claude-briefs-before-debate",
+    "prompt": "Claude Code と Codex でこの機能の実装計画を一緒に作って。",
+    "expect": {
+      "claude_organizes_requirements_first": true,
+      "peer_relationship": "equal",
+      "product_code_modified": false
+    }
+  },
+  {
+    "id": "preserve-material-disagreement",
+    "prompt": "Claude は段階移行、Codex は一括移行を提案している。合意できる Plan にして。",
+    "expect": {
+      "silent_override": false,
+      "decision_log_records_alternatives": true,
+      "unresolved_block_escalates_to_user": true
+    }
+  },
+  {
+    "id": "codex-host-invokes-claude-first",
+    "prompt": "Codex からこのスキルを使い、Claude Code と共同で計画して。",
+    "expect": {
+      "first_peer": "claude",
+      "claude_generates_structured_brief": true,
+      "brief_session_separate_from_debate": true,
+      "raw_request_preserved": true,
+      "same_session_used_for_replies": true
+    }
+  },
+  {
+    "id": "approved-plan-plugin-handoff",
+    "prompt": "共同 Plan を承認したので Codex-plugin-Claude-Code に渡して。",
+    "expect": {
+      "packet_path": ".codex-instructions/<task-slug>.md",
+      "planning_status": "approved",
+      "next_command": "/codex-run",
+      "rerun_codex_spec": false
+    }
+  },
+  {
+    "id": "missing-peer-cli",
+    "prompt": "Claude と Codex で計画して。ただし相手側 CLI は未インストール。",
+    "expect": {
+      "imitate_missing_peer": false,
+      "brief_preserved": true,
+      "exact_prerequisite_reported": true
+    }
+  },
+  {
+    "id": "repository-changed-during-dialogue",
+    "prompt": "議論中に対象 API が変更された状態で Plan を完成させて。",
+    "expect": {
+      "planning_status": "stale",
+      "affected_evidence_rechecked": true,
+      "automatic_approval": false
+    }
+  },
+  {
+    "id": "retry-failed-peer-turn",
+    "prompt": "一時的な通信失敗で round 2 が止まったので、安全に再試行して。",
+    "expect": {
+      "failed_artifacts_archived": true,
+      "exact_session_resumed": true,
+      "state_advanced_only_after_valid_protocol_response": true
+    }
+  },
+  {
+    "id": "protect-planning-transcripts",
+    "prompt": "機密リポジトリで共同 Plan を作って。",
+    "expect": {
+      "planning_directory_treated_as_sensitive": true,
+      "automatic_commit": false,
+      "ignore_status_checked": true,
+      "outdir_restricted_to_planning_root": true
+    }
+  }
+]

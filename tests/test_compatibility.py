@@ -9,9 +9,12 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CUSTOM_SKILLS = {
+    "co-create-plan",
     "complexity-aware-execution",
+    "create-project-map",
     "handoff",
     "open-pull-request",
+    "review-implementation-html",
     "writing-style",
 }
 

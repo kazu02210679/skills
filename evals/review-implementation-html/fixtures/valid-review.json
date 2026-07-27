@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "repository": "sample/repository",
+    "base": "main",
+    "head": "WORKTREE",
+    "plan": "docs/plans/sample.md",
+    "planSlug": "sample-change",
+    "generatedAt": "2026-07-26T00:00:00Z"
+  },
+  "summary": {
+    "headline": "One high-risk issue needs correction",
+    "overview": "The implementation is close, but request validation can be bypassed."
+  },
+  "verification": [
+    {
+      "name": "Unit tests",
+      "status": "passed",
+      "details": "12 tests passed."
+    }
+  ],
+  "intentGroups": [
+    {
+      "id": "request-validation",
+      "title": "Request validation",
+      "summary": "Validate input before dispatch.",
+      "risk": "high",
+      "hunkIds": ["hunk-api"],
+      "findingIds": ["finding-bypass", "finding-plan"]
+    }
+  ],
+  "files": [
+    {
+      "path": "src/api.py",
+      "status": "M"
+    }
+  ],
+  "hunks": [
+    {
+      "id": "hunk-api",
+      "file": "src/api.py",
+      "oldStart": 10,
+      "newStart": 10,
+      "diff": "@@ -10,1 +10,2 @@\n- dispatch(data)\n+ validate(data)\n+ dispatch(data)",
+      "explanation": "Adds validation before dispatch."
+    }
+  ],
+  "findings": [
+    {
+      "id": "finding-bypass",
+      "severity": "high",
+      "pass": "plan-blind",
+      "intentGroupId": "request-validation",
+      "file": "src/api.py",
+      "line": 11,
+      "title": "Validation can be bypassed",
+      "evidence": "Direct callers can still invoke dispatch.",
+      "impact": "Malformed requests can reach the worker.",
+      "recommendedAction": "Move the validation into the shared dispatch boundary.",
+      "status": "open"
+    },
+    {
+      "id": "finding-plan",
+      "severity": "low",
+      "pass": "plan-aware",
+      "intentGroupId": "request-validation",
+      "file": "src/api.py",
+      "line": 10,
+      "title": "Plan trace is implicit",
+      "evidence": "The plan names a validation policy but the test does not.",
+      "impact": "Future regressions are harder to diagnose.",
+      "recommendedAction": "Name the policy in the regression test.",
+      "status": "open"
+    }
+  ],
+  "coverage": {
+    "changedFilesReviewed": ["src/api.py"],
+    "intentGroupsReviewed": ["request-validation"],
+    "gaps": []
+  },
+  "result": "changes-requested"
+}

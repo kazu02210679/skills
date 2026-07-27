@@ -192,7 +192,7 @@ class CatalogInvariantTests(unittest.TestCase):
             self.copy_catalog(repository)
             shutil.rmtree(repository / "skills" / "ab-test-analysis")
             errors = VALIDATOR.validate_repository(repository)
-            self.assertTrue(any("expected 72 skills" in error for error in errors))
+            self.assertTrue(any("expected 75 skills" in error for error in errors))
             self.assertTrue(any("expected 68 PM Skills" in error for error in errors))
 
     def test_rejects_readme_count_drift(self) -> None:
@@ -202,8 +202,8 @@ class CatalogInvariantTests(unittest.TestCase):
             readme = repository / "README.md"
             readme.write_text(
                 readme.read_text(encoding="utf-8").replace(
-                    "次の72個",
-                    "次の71個",
+                    "次の75個",
+                    "次の74個",
                 ),
                 encoding="utf-8",
             )

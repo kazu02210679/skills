@@ -1,0 +1,51 @@
+[
+  {
+    "id": "cross-file-rename-one-intent",
+    "prompt": "Review a rename that updates implementation, imports, and tests.",
+    "expect": {
+      "group_by_behavior_not_file_order": true,
+      "single_intent_group_for_rename": true,
+      "each_hunk_owned_once": true
+    }
+  },
+  {
+    "id": "security-change-ranked-first",
+    "prompt": "Review a security-sensitive authentication change plus a documentation edit.",
+    "expect": {
+      "highest_risk_group_first": true,
+      "security_evidence_required": true
+    }
+  },
+  {
+    "id": "retain-plan-blind-defect",
+    "prompt": "The implementation follows the plan but the plan-blind pass finds a bypass.",
+    "expect": {
+      "retain_unresolved_plan_blind_finding": true,
+      "finding_pass": "plan-blind"
+    }
+  },
+  {
+    "id": "missing-plan-requirement",
+    "prompt": "The plan requires rollback behavior that is absent from the implementation.",
+    "expect": {
+      "plan_aware_finding": true,
+      "result": "changes-requested"
+    }
+  },
+  {
+    "id": "unexecuted-tests",
+    "prompt": "Review the change when the integration test environment is unavailable.",
+    "expect": {
+      "verification_status": "not-run",
+      "coverage_gap_recorded": true
+    }
+  },
+  {
+    "id": "empty-diff",
+    "prompt": "Create a review report when base and head contain no differences.",
+    "expect": {
+      "report_created": false,
+      "stop_reason": "empty diff"
+    }
+  }
+]
