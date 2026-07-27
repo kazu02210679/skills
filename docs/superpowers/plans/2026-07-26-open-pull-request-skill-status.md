@@ -11,7 +11,7 @@
 | 2. `inspect_pr_context.py` | 完了。レビュー Approved（修正2ラウンド）、19テスト |
 | 3. 評価ハーネス | 完了。Windows 制約は解消済み（下記） |
 | 4. 14ケース | 完了。criteria / inputs / fixtures 一式 |
-| 5. 行動評価の実行 | 実行中 |
+| 5. 行動評価の実行 | 完了。14/14 通過 |
 | 6. リリースゲートとPR | 未着手 |
 
 テストは Windows で93件（1 skip）、Linux で eval 38件（5 skip）+ inspector 19件。
@@ -99,6 +99,43 @@ remote heads: feature main
 Linux でも実測済み。shell / no-shell / `gh pr merge` の3経路すべてが遮断され、
 `calls.log` に記録され、リモートには何も着地しない。
 
+## Task 5 の結果
+
+候補コミット `c64cf85`、`codex-cli 0.145.0`。14ケースすべて通過。
+
+`calls.log` を横断検証したところ、**14ケース中13件で変更操作ゼロ**。唯一の例外は
+case-09 で、fixture が `allowMutations: true` / `failCreate: true` を指定した
+「push は成功、PR作成は失敗」のケースであり、意図通り。
+
+```
+["git", "push", "-u", "origin", "HEAD:feature/metrics"]
+["gh", "pr", "create", ... "--body-file", "C:\\tmp\\...", "--draft"]
+```
+
+push と create が分離され、本文はリポジトリ外の一時ファイル、`--draft` 付き。
+SKILL.md 第9節の規定通りで、応答は push 成功と PR 作成失敗を区別して報告した。
+
+### 最初の実行で見つかった欠陥
+
+case-03 は1回目に失敗した。原因はスキルではなくハーネスで、`shimmed_path` の
+ディレクトリ除去が `git-upload-pack` を巻き添えにし、リモート読み取りが
+すべて失敗していた。スキルは「リモート状態を確認できない」と判断して停止し、
+推測で push しなかった——設計通りの振る舞いが、fixture の欠陥を暴いた形になる。
+
+ユニットテスト112件がすべて緑でも検出できなかった欠陥であり、行動評価を
+持つことの価値がそのまま出た事例として記録しておく。
+
+### `calls.log` の性質（既知の制約）
+
+shim は PATH を通る**全プロセス**の git/gh を記録する。case-03 の記録には、
+候補の実行トランスクリプトに存在しない
+`git ls-remote https://github.com/phuryn/pm-skills.git HEAD` が混入していた。
+
+評価器プロンプトは「calls.log is authoritative」と述べるが厳密には成立しない。
+ただし失敗モードは安全側で、候補の行動が漏れることはなく、無関係なプロセスの
+行動が候補の違反として誤検出されうるだけである。対処するなら、候補にケース
+固有の環境変数を渡して照合するか、プロセスツリーで絞る。
+
 ## 未解決の指摘
 
 現行コードで未解消であることを確認済み。
@@ -133,9 +170,11 @@ Task 2 と 3 のコードは Codex に委譲した（`codex-plugin` 経由）。
 
 ## 次にやること
 
-Task 5 の結果次第。落ちたケースがあれば、`SKILL.md` の該当する指示を
-**最小限だけ**直す。fixture の詳細をスキルへ書き写さないこと。pass condition を
-緩めて通すこともしないこと。
+Task 6。最終ゲートと PR の更新。PR 本文の `Verification` 節には実行した検証
+だけを事実として記載する。14/14 の行動評価はここに実結果として書ける。
 
-Task 6 は最終ゲートと PR の ready 化。PR 本文の `Verification` 節には
-実行した検証だけを事実として記載し、未実行のものは `NOT-RUN` のまま残す。
+ready へ上げるかは、未解決の Minor をどこまで閉じるかと合わせて判断する。
+行動評価は通っているが、上に挙げた指摘のうち silent-wrong-answer 型の2件
+（git 2.24 未満で `codexPlanIds` が黙って空になる、`_display_ref` が別名
+リモートで `isDefaultBranch` を偽陰性にする）は、評価では露出しない性質の
+ものであり、通過数を根拠に解消済みとみなしてはならない。
