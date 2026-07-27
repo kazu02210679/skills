@@ -1,6 +1,6 @@
 ---
 name: co-create-plan
-description: Have Claude Code and OpenAI Codex jointly create an evidence-backed implementation plan as equal planning peers. Use when the user asks Claude and Codex to discuss, debate, challenge assumptions, reach consensus, or make a plan together; when a second-model planning review is wanted before implementation; or when a plan must be handed directly to the Codex-plugin-Claude-Code workflow without rerunning specification phases.
+description: Have Claude Code and OpenAI Codex jointly create an evidence-backed implementation plan as equal planning peers. Use when the user asks Claude and Codex to discuss, debate, challenge assumptions, reach consensus, or make a plan together; when a second-model planning review is wanted before implementation; or when a plan must be handed directly to the codex-orchestration workflow without rerunning specification phases.
 ---
 
 # Co-create Plan
@@ -181,17 +181,18 @@ Before presenting it, check:
 
 ## 6. Hand off without replanning
 
-For `kazu02210679/Codex-plugin-Claude-Code`, an approved packet is already the
-input expected by `/codex-run`. Hand it off directly:
+For `codex-orchestration`, an approved packet is already the input expected by
+the delegation phase. Hand it off directly:
 
-```text
-/codex-run .codex-instructions/<task-slug>.md <repo>
+```bash
+"<codex-orchestration-skill-dir>/scripts/codex_run.sh" \
+  .codex-instructions/<task-slug>.md \
+  <repo>
 ```
 
-Start that plugin at its implementation/delegation phase. Do not run
-`/codex-spec` and do not repeat its requirements, design-direction, or task
-packet phases unless the approved plan is stale or the user explicitly asks to
-replan.
+Start that Skill at its implementation/delegation phase. Do not repeat its
+requirements, design-direction, or task-packet phases unless the approved plan
+is stale or the user explicitly asks to replan.
 
 ## Failure handling
 

@@ -94,7 +94,7 @@ if [[ "${#skill_names[@]}" -eq 0 ]]; then
   exit 1
 fi
 
-for source_name in pm-skills handoff-gist; do
+for source_name in handoff-gist; do
   for filename in LICENSE source.json SHA256SUMS; do
     if [[ ! -f "$notices_root/$source_name/$filename" ]]; then
       echo "Required notice file is missing: $source_name/$filename" >&2
@@ -180,8 +180,8 @@ for destination_root in "${destinations[@]}"; do
   done
 
   notice_stage="$stage/.third-party-notices"
-  mkdir -p "$notice_stage/pm-skills" "$notice_stage/handoff-gist"
-  for source_name in pm-skills handoff-gist; do
+  mkdir -p "$notice_stage/handoff-gist"
+  for source_name in handoff-gist; do
     for filename in LICENSE source.json SHA256SUMS; do
       cp -a -- \
         "$notices_root/$source_name/$filename" \
@@ -267,5 +267,5 @@ done
 
 trap - ERR INT TERM
 for destination_root in "${destinations[@]}"; do
-  echo "Installed ${#skill_names[@]} skills and third-party notices to $destination_root"
+  echo "Installed ${#skill_names[@]} skills and retained provenance notices to $destination_root"
 done

@@ -19,16 +19,9 @@ NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MANIFEST_PATTERN = re.compile(
     r"^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._/-]*)$"
 )
-CUSTOM_SKILLS = {
-    "co-create-plan",
-    "complexity-aware-execution",
-    "create-project-map",
-    "handoff",
-    "open-pull-request",
-    "review-implementation-html",
-    "writing-style",
-}
 FRONTMATTER_KEYS = {"name", "description"}
+BEGIN_CATALOG = "<!-- BEGIN SKILL CATALOG -->"
+END_CATALOG = "<!-- END SKILL CATALOG -->"
 OPENAI_TOP_LEVEL_KEYS = {"interface", "dependencies", "policy"}
 OPENAI_INTERFACE_KEYS = {
     "display_name",
@@ -347,15 +340,12 @@ def _read_source_json(path: Path, errors: list[str]) -> dict[str, Any]:
     return document
 
 
-def _validate_manifest(
+def _validate_handoff_provenance(
     repository_root: Path,
-    source_name: str,
-    expected_paths: set[str],
     errors: list[str],
 ) -> None:
-    manifest_path = (
-        repository_root / "third_party" / source_name / "SHA256SUMS"
-    )
+    source_root = repository_root / "third_party" / "handoff-gist"
+    manifest_path = source_root / "SHA256SUMS"
     try:
         lines = manifest_path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError) as exc:
@@ -386,11 +376,12 @@ def _validate_manifest(
             continue
         entries[relative_path] = digest
 
+    expected_paths = {"handoff/SKILL.md"}
     if set(entries) != expected_paths:
         missing = sorted(expected_paths - set(entries))
         extra = sorted(set(entries) - expected_paths)
         errors.append(
-            f"{source_name} SHA256SUMS paths do not match the vendored set "
+            "handoff-gist SHA256SUMS paths do not match the attributed set "
             f"(missing={missing}, extra={extra})"
         )
 
@@ -405,9 +396,67 @@ def _validate_manifest(
                 f"(expected {expected_digest}, got {actual_digest})"
             )
 
+    source = _read_source_json(source_root / "source.json", errors)
+    if source.get("license") != "MIT":
+        errors.append("handoff-gist source record license must be MIT")
+    if source.get("sha256_manifest") != "SHA256SUMS":
+        errors.append("handoff-gist source record must name SHA256SUMS")
+    if not (source_root / "LICENSE").is_file():
+        errors.append("handoff-gist: missing LICENSE")
+
+
+def _render_catalog(
+    skill_directories: list[Path],
+    records: dict[str, dict[str, Any]],
+) -> str:
+    rows = [
+        "| Skill | 説明 |",
+        "|---|---|",
+    ]
+    for skill_directory in skill_directories:
+        fields = records.get(skill_directory.name)
+        if fields is None:
+            continue
+        name = fields.get("name")
+        description = fields.get("description")
+        if not isinstance(name, str) or not isinstance(description, str):
+            continue
+        normalized = " ".join(description.split()).replace("|", "\\|")
+        rows.append(
+            f"| [`{name}`](skills/{name}/README.md) | {normalized} |"
+        )
+    return "\n".join(rows)
+
+
+def _validate_readme_catalog(
+    repository_root: Path,
+    catalog: str,
+    errors: list[str],
+) -> None:
+    readme_path = repository_root / "README.md"
+    try:
+        readme = readme_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        errors.append(f"README catalog cannot be verified: {exc}")
+        return
+    if readme.count(BEGIN_CATALOG) != 1 or readme.count(END_CATALOG) != 1:
+        errors.append("README must contain exactly one Skill catalog marker pair")
+        return
+    begin = readme.index(BEGIN_CATALOG) + len(BEGIN_CATALOG)
+    end = readme.index(END_CATALOG)
+    if begin > end:
+        errors.append("README Skill catalog markers are reversed")
+        return
+    actual = readme[begin:end].strip()
+    if actual != catalog:
+        errors.append(
+            "README Skill catalog is stale; run "
+            "python scripts/generate-skill-catalog.py"
+        )
+
 
 def validate_repository(repository_root: Path) -> list[str]:
-    """Validate all Skill files, catalog counts, and provenance snapshots."""
+    """Validate all Skill files, generated catalog, and retained provenance."""
 
     errors: list[str] = []
     skills_root = repository_root / "skills"
@@ -418,13 +467,30 @@ def validate_repository(repository_root: Path) -> list[str]:
         path for path in skills_root.iterdir() if path.is_dir()
     )
     seen_names: dict[str, Path] = {}
+    records: dict[str, dict[str, Any]] = {}
     for skill_directory in skill_directories:
         for error in validate_skill_directory(skill_directory):
             errors.append(f"{skill_directory.name}: {error}")
+        human_readme = skill_directory / "README.md"
+        if not human_readme.is_file():
+            errors.append(f"{skill_directory.name}: missing human-facing README.md")
+        else:
+            try:
+                human_text = human_readme.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                errors.append(
+                    f"{skill_directory.name}: README.md is not UTF-8: {exc}"
+                )
+            else:
+                if not human_text.lstrip().startswith("# "):
+                    errors.append(
+                        f"{skill_directory.name}: README.md must start with an H1"
+                    )
         try:
             fields, _ = parse_frontmatter(skill_directory / "SKILL.md")
         except (OSError, UnicodeDecodeError, ValueError):
             continue
+        records[skill_directory.name] = fields
         name = fields.get("name")
         if isinstance(name, str) and name:
             if name in seen_names:
@@ -435,62 +501,21 @@ def validate_repository(repository_root: Path) -> list[str]:
             else:
                 seen_names[name] = skill_directory / "SKILL.md"
 
-    skill_names = {path.name for path in skill_directories}
-    pm_skill_names = skill_names - CUSTOM_SKILLS
-    if len(skill_names) != 75:
-        errors.append(f"expected 75 skills, found {len(skill_names)}")
-    if not CUSTOM_SKILLS <= skill_names:
+    if not skill_directories:
+        errors.append("no Skill directories found")
+
+    _validate_readme_catalog(
+        repository_root,
+        _render_catalog(skill_directories, records),
+        errors,
+    )
+
+    if (repository_root / "third_party" / "pm-skills").exists():
         errors.append(
-            f"missing custom Skills: {sorted(CUSTOM_SKILLS - skill_names)}"
+            "vendored pm-skills must not be stored in the canonical catalog"
         )
-    if len(pm_skill_names) != 68:
-        errors.append(f"expected 68 PM Skills, found {len(pm_skill_names)}")
 
-    readme_path = repository_root / "README.md"
-    try:
-        readme = readme_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        errors.append(f"README catalog count cannot be verified: {exc}")
-    else:
-        if "次の75個" not in readme or "68 Skill" not in readme:
-            errors.append(
-                "README catalog count must state 75 total and 68 PM Skills"
-            )
-
-    for source_name in ("pm-skills", "handoff-gist"):
-        source_path = (
-            repository_root / "third_party" / source_name / "source.json"
-        )
-        source = _read_source_json(source_path, errors)
-        if source.get("license") != "MIT":
-            errors.append(f"{source_name} source record license must be MIT")
-        if source.get("sha256_manifest") != "SHA256SUMS":
-            errors.append(
-                f"{source_name} source record must name SHA256SUMS"
-            )
-        license_path = repository_root / "third_party" / source_name / "LICENSE"
-        if not license_path.is_file():
-            errors.append(f"{source_name}: missing LICENSE")
-
-    pm_source = _read_source_json(
-        repository_root / "third_party" / "pm-skills" / "source.json",
-        [],
-    )
-    if pm_source.get("imported_skill_count") != 68:
-        errors.append("pm-skills imported_skill_count must be 68")
-
-    _validate_manifest(
-        repository_root,
-        "pm-skills",
-        {f"{name}/SKILL.md" for name in pm_skill_names},
-        errors,
-    )
-    _validate_manifest(
-        repository_root,
-        "handoff-gist",
-        {"handoff/SKILL.md"},
-        errors,
-    )
+    _validate_handoff_provenance(repository_root, errors)
     return errors
 
 

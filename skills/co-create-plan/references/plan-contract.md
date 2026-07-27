@@ -130,13 +130,15 @@ Record:
 - user approval state and date;
 - any user tie-break decision.
 
-## Compatibility with Codex-plugin-Claude-Code
+## Compatibility with codex-orchestration
 
 The approved file is a complete task packet. Pass it directly to:
 
-```text
-/codex-run .codex-instructions/<task-slug>.md <repo>
+```bash
+"<codex-orchestration-skill-dir>/scripts/codex_run.sh" \
+  .codex-instructions/<task-slug>.md \
+  <repo>
 ```
 
-The plugin should begin at delegation/implementation. Do not regenerate the
-packet with `/codex-spec`.
+The Skill should begin at delegation/implementation. Do not regenerate the
+packet.
