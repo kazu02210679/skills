@@ -1,7 +1,11 @@
 # Task-plan contract
 
-Use this contract for a guarded multi-task implementation plan. Keep plan files
-under version control. Keep run evidence local and ignored.
+Use this contract for a guarded multi-task implementation plan. Plan and task
+files are intended to become auditable in Git, but may be untracked during an
+active run. `codex_run.sh` freezes them into run evidence before delegation.
+Keep run evidence local and ignored. When the plan directory is inside the
+worktree, `codex_commit.sh` stages the active plan directory with its task
+commit.
 
 ## Plan layout
 

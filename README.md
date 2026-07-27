@@ -24,8 +24,10 @@ human-facing README. Install only the Skills needed for the host and project.
 The portable `codex-orchestration` Skill contains the guarded runtime formerly
 provided by a Claude Code plugin; no live legacy repository dependency remains.
 
-PM Skills are not vendored here. Install an individual PM Skill on demand from
-its source plugin, then keep it separate from this canonical catalog.
+PM Skills are external and are neither vendored nor cataloged here. Install an
+individual PM Skill on demand from
+[`phuryn/pm-skills`](https://github.com/phuryn/pm-skills), then keep it
+separate from this canonical catalog.
 
 ## Install
 

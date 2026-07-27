@@ -76,8 +76,26 @@ class HostCompatibilityTests(unittest.TestCase):
             skill_names,
         )
         root_readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("PM Skills are not vendored here.", root_readme)
-        self.assertIn("its source plugin", root_readme)
+        self.assertIn("neither vendored nor cataloged here", root_readme)
+        self.assertIn(
+            "[`phuryn/pm-skills`](https://github.com/phuryn/pm-skills)",
+            root_readme,
+        )
+
+    def test_task_plan_contract_permits_untracked_active_plan(self) -> None:
+        contract = (
+            REPOSITORY_ROOT
+            / "skills"
+            / "codex-orchestration"
+            / "references"
+            / "task-plan-contract.md"
+        ).read_text(encoding="utf-8")
+        normalized_contract = " ".join(contract.split())
+        self.assertIn("may be untracked during an active run", normalized_contract)
+        self.assertIn(
+            "codex_commit.sh` stages the active plan directory",
+            normalized_contract,
+        )
 
     def test_codex_orchestration_documents_retired_plugin_interfaces(self) -> None:
         readme = (
