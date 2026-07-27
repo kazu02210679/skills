@@ -49,15 +49,36 @@ codex_is_meta_path() {
 # expanded rather than detected: `--name-only` reports only a rename's
 # destination, so staging from it would leave the source's deletion behind.
 codex_dirty_product() {
-  local wd="$1" base="${2:-HEAD}" f
-  {
-    git -C "$wd" diff --no-renames --name-only "$base" -- 2>/dev/null || true
-    git -C "$wd" ls-files --others --exclude-standard 2>/dev/null || true
-  } | LC_ALL=C sort -u | while IFS= read -r f; do
+  local wd="$1" base="${2:-HEAD}" f tmp sort_status
+  tmp="$(mktemp)" || {
+    printf 'codex: could not create a temporary file for the dirty-product check.\n' >&2
+    return 2
+  }
+  [ -n "$tmp" ] || {
+    printf 'codex: could not create a temporary file for the dirty-product check.\n' >&2
+    return 2
+  }
+  if ! git -C "$wd" diff --no-renames --name-only "$base" -- >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    printf 'codex: could not determine changed product files from %s.\n' "$wd" >&2
+    return 2
+  fi
+  if ! git -C "$wd" ls-files --others --exclude-standard >>"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    printf 'codex: could not determine untracked product files from %s.\n' "$wd" >&2
+    return 2
+  fi
+  LC_ALL=C sort -u "$tmp" | while IFS= read -r f; do
     [ -n "$f" ] || continue
     codex_is_meta_path "$f" && continue
     printf '%s\n' "$f"
   done
+  sort_status=${PIPESTATUS[0]}
+  rm -f "$tmp"
+  [ "$sort_status" -eq 0 ] || {
+    printf 'codex: could not sort changed product files.\n' >&2
+    return 2
+  }
 }
 
 # codex_plan_id <plandir>

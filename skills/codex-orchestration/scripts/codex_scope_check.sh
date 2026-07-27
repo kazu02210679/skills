@@ -102,7 +102,8 @@ if [ -n "$BASE" ]; then
   # command substitution would silently strip every separator and collapse the
   # whole listing into one meaningless path. A pipeline would hide git's exit
   # status instead, which is the thing this gate must not do.
-  TMPF="$(mktemp)"
+  TMPF="$(mktemp)" || die "could not create temporary file for git diff"
+  [ -n "$TMPF" ] || die "could not create temporary file for git diff"
   if ! git -C "$WORKDIR" diff -M --name-status -z "$BASE" -- >"$TMPF"; then
     die "git diff against '$BASE' failed in $WORKDIR"
   fi
@@ -126,7 +127,8 @@ fi
 
 # New files Codex created. Gitignored paths (including the run directory) are
 # excluded by --exclude-standard.
-OTHERS="$(mktemp)"
+OTHERS="$(mktemp)" || die "could not create temporary file for untracked files"
+[ -n "$OTHERS" ] || die "could not create temporary file for untracked files"
 if ! git -C "$WORKDIR" ls-files --others --exclude-standard -z >"$OTHERS"; then
   die "git ls-files failed in $WORKDIR"
 fi
@@ -134,18 +136,18 @@ while IFS= read -r -d '' f; do
   [ -n "$f" ] && raw+=("$f")
 done <"$OTHERS"
 
-# Drop orchestration metadata and de-duplicate.
+# Drop orchestration metadata and de-duplicate. Do not round-trip paths through
+# newline-delimited text: Git permits newlines in path names, and splitting one
+# path into several lines can make an out-of-scope path look allowed.
 changed=()
-if [ "${#raw[@]}" -gt 0 ]; then
-  while IFS= read -r f; do
-    [ -n "$f" ] && changed+=("$f")
-  done < <(
-    for f in "${raw[@]}"; do
-      codex_is_meta_path "$f" && continue
-      printf '%s\n' "$f"
-    done | LC_ALL=C sort -u
-  )
-fi
+declare -A seen=()
+for f in "${raw[@]}"; do
+  codex_is_meta_path "$f" && continue
+  if [ -z "${seen[$f]+_}" ]; then
+    seen[$f]=1
+    changed+=("$f")
+  fi
+done
 
 if [ "${#changed[@]}" -eq 0 ]; then
   printf 'scope: OK — no product files changed\n'

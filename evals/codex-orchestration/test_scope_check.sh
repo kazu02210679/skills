@@ -31,6 +31,21 @@ out=$("$S/codex_scope_check.sh" "$AL" "$R" HEAD 2>&1); rc=$?
 check "out-of-scope untracked fails" "$rc" "1"
 rm "$R/oops.txt"
 
+echo "== unusual file names remain indivisible =="
+NLAL="$TMPROOT/newline.allowlist"; printf 'src/?.py\n' >"$NLAL"
+out=$(bash -c '
+  git() {
+    case "${3:-}" in
+      rev-parse) return 0 ;;
+      diff) printf "M\0src/a.py\nsrc/b.py\0" ;;
+      ls-files) return 0 ;;
+      *) return 98 ;;
+    esac
+  }
+  . "$1" "$2" "$3" "$4"
+' _ "$S/codex_scope_check.sh" "$NLAL" "$R" HEAD 2>&1); rc=$?
+check "newline path outside its allowlist pattern fails" "$rc" "1"
+
 echo "== renames must be checked on both sides =="
 # git diff --name-only reports only a rename's destination, so moving a file
 # out of the allowlist into it would otherwise delete the original invisibly.
@@ -85,6 +100,31 @@ has "explains the refusal" "$out" "does not resolve"
 out=$("$S/codex_scope_check.sh" "$AL" "$R" "not-a-ref" 2>&1); rc=$?
 check "garbage base refused" "$rc" "2"
 git -C "$R" checkout -- .
+
+echo "== temporary-file failures are indeterminate =="
+FAILBIN="$TMPROOT/failbin"; mkdir -p "$FAILBIN"
+printf '#!/usr/bin/env bash\nexit 99\n' >"$FAILBIN/mktemp"
+chmod +x "$FAILBIN/mktemp"
+out=$(PATH="$FAILBIN:$PATH" "$S/codex_scope_check.sh" "$AL" "$R" HEAD 2>&1); rc=$?
+check "mktemp failure returns indeterminate" "$rc" "2"
+has "mktemp failure explains the refusal" "$out" "temporary file"
+
+echo "== dirty-product helper fails closed =="
+FAILGIT="$TMPROOT/failing-git"; mkdir -p "$FAILGIT"
+printf '%s\n' '#!/usr/bin/env bash' 'case "${3:-}" in' \
+  '  diff) exit 77 ;;' \
+  '  ls-files) exit 0 ;;' \
+  '  *) exit 0 ;;' \
+  'esac' >"$FAILGIT/git"
+chmod +x "$FAILGIT/git"
+cp "$FAILGIT/git" "$FAILGIT/git.exe"
+chmod +x "$FAILGIT/git.exe"
+. "$S/codex_lib.sh"
+OLD_PATH="$PATH"; PATH="$FAILGIT:$PATH"
+out=$(codex_dirty_product "$R" HEAD 2>&1); rc=$?
+PATH="$OLD_PATH"
+check "dirty-product helper propagates git failure" "$rc" "2"
+has "dirty-product helper explains the refusal" "$out" "could not determine changed product files"
 
 echo "== usage errors =="
 : >"$TMPROOT/empty.allowlist"
