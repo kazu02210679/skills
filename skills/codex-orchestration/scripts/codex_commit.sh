@@ -17,13 +17,14 @@ TASKDIR="$1"; TASK_ID="$2"; WORKDIR="$3"; RUNDIR="$4"
 # only after this process creates it; LOCK_HELD prevents removing another
 # process's pre-existing lock after a failed reservation.
 LOCK_DIR=""; LOCK_HELD=0
-PRODUCT_LIST_BEFORE=""; PRODUCT_LIST_AFTER=""
+PRODUCT_CAPTURE=""
 TEST_OUT=""; MESSAGE_FILE=""; INDEX_DIR=""; INDEX_FILE=""
 cleanup() {
   local path
-  for path in "$PRODUCT_LIST_BEFORE" "$PRODUCT_LIST_AFTER" "$TEST_OUT" \
-              "$MESSAGE_FILE" "$INDEX_FILE"; do
-    [ -z "$path" ] || rm -f -- "$path"
+  for path in "$PRODUCT_CAPTURE" "$TEST_OUT" "$MESSAGE_FILE" "$INDEX_FILE"; do
+    if [ -n "$path" ]; then
+      rm -f -- "$path" 2>/dev/null || true
+    fi
   done
   [ -z "$INDEX_DIR" ] || rmdir "$INDEX_DIR" 2>/dev/null || true
   if [ "$LOCK_HELD" = "1" ] && [ -n "$LOCK_DIR" ]; then
@@ -97,12 +98,37 @@ LOCK_HELD=1
 head_gate
 
 # Retain every verdict input in parent-shell memory before executing arbitrary
-# test commands. Child test shells can rewrite pathnames, but cannot mutate
-# these arrays, digests, or strings.
+# test commands. The allowlist is read exactly once: a sentinel preserves all
+# trailing newlines in Bash's command substitution, its captured bytes are
+# authenticated against the anchored manifest, and those same bytes are parsed.
+# Child test shells can rewrite pathnames, but cannot mutate these arrays,
+# digests, or strings.
+CONTRACT_ANCHOR="$(codex_contract_anchor "$WORKDIR_ABS" "$RUNDIR")" || \
+  contract_failure "the trusted frozen contract anchor cannot be resolved"
+ALLOWLIST_EXPECTED_DIGEST=""
+while IFS=' ' read -r kind hash rel extra || [ -n "${kind:-}" ]; do
+  if [ "$kind" = "F" ] && [ "$rel" = "allowlist" ] && [ -z "${extra:-}" ]; then
+    ALLOWLIST_EXPECTED_DIGEST="$hash"
+    break
+  fi
+done <"$CONTRACT_ANCHOR"
+[ -n "$ALLOWLIST_EXPECTED_DIGEST" ] || \
+  contract_failure "the trusted frozen contract has no allowlist digest"
+ALLOWLIST_SENTINEL=$'\034'
+ALLOWLIST_BYTES="$(cat -- "$RUNDIR/allowlist"; printf '%s' "$ALLOWLIST_SENTINEL")" || \
+  contract_failure "could not capture the frozen allowlist"
+case "$ALLOWLIST_BYTES" in
+  *"$ALLOWLIST_SENTINEL") ALLOWLIST_BYTES="${ALLOWLIST_BYTES%?}" ;;
+  *) contract_failure "could not preserve the frozen allowlist bytes" ;;
+esac
+ALLOWLIST_CAPTURE_DIGEST="$(printf '%s' "$ALLOWLIST_BYTES" | "${CODEX_HASH[@]}" | cut -d' ' -f1)" || \
+  contract_failure "could not authenticate the captured allowlist"
+[ "$ALLOWLIST_CAPTURE_DIGEST" = "$ALLOWLIST_EXPECTED_DIGEST" ] || \
+  contract_failure "the captured allowlist does not match the trusted frozen contract"
+
 CONTRACT_DIGEST="$(codex_hash_file "$RUNDIR/contract.sha256")" || \
   contract_failure "could not retain the frozen contract digest"
-ALLOWLIST_DIGEST="$(codex_hash_file "$RUNDIR/allowlist")" || \
-  contract_failure "could not retain the frozen allowlist digest"
+ALLOWLIST_DIGEST="$ALLOWLIST_EXPECTED_DIGEST"
 TASK_DIGEST="$(codex_hash_file "$RUNDIR/task.md")" || \
   contract_failure "could not retain the frozen task digest"
 PLAN_ID_DIGEST="$(codex_hash_file "$RUNDIR/plan-id")" || \
@@ -113,7 +139,7 @@ RECORDED_TEST_SOURCE="$( [ -f "$RUNDIR/test_source" ] && cat "$RUNDIR/test_sourc
 PLAN_FINGERPRINT="$(codex_meta_fingerprint "$TASKDIR_ABS")" || \
   contract_failure "could not retain the live plan fingerprint"
 ALLOWLIST_PATTERNS=()
-codex_load_allowlist "$RUNDIR/allowlist" ALLOWLIST_PATTERNS
+codex_load_allowlist_text "$ALLOWLIST_BYTES" ALLOWLIST_PATTERNS
 [ "${#ALLOWLIST_PATTERNS[@]}" -gt 0 ] || contract_failure "the frozen allowlist has no patterns"
 
 PLAN_ID="$(tr -d '[:space:]' <"$RUNDIR/plan-id")"
@@ -152,21 +178,25 @@ contract_gate() {
   fi
 }
 
-collect_product() {
-  local output="$1"
-  if ! codex_dirty_product0 "$WORKDIR_ABS" HEAD >"$output"; then
+collect_product_paths() {
+  local output_name="$1"
+  local -n output="$output_name"
+  output=()
+  PRODUCT_CAPTURE="$(mktemp)" || die "could not create a product-path capture"
+  if ! codex_dirty_product0 "$WORKDIR_ABS" HEAD >"$PRODUCT_CAPTURE"; then
     die "could not reliably determine changed product files"
   fi
+  mapfile -d '' -t output <"$PRODUCT_CAPTURE"
+  rm -f -- "$PRODUCT_CAPTURE" || die "could not remove the product-path capture before tests"
+  PRODUCT_CAPTURE=""
 }
 
-PRODUCT_LIST_BEFORE="$(mktemp)" || die "could not create a pre-test product-list file"
-collect_product "$PRODUCT_LIST_BEFORE"
-if [ ! -s "$PRODUCT_LIST_BEFORE" ]; then
+PRODUCT_PATHS=()
+collect_product_paths PRODUCT_PATHS
+if [ "${#PRODUCT_PATHS[@]}" -eq 0 ]; then
   say "$TASK_ID changed no product files — refusing to record it as done"
   exit 1
 fi
-PRODUCT_PATHS=()
-mapfile -d '' -t PRODUCT_PATHS <"$PRODUCT_LIST_BEFORE"
 
 scope_paths_gate() {
   local when="$1" path
@@ -192,15 +222,26 @@ case "$TASKDIR_ABS" in
   "$WORKDIR_ABS"/*) STAGE_PATHS+=("${TASKDIR_ABS#"$WORKDIR_ABS"/}") ;;
   *) say "note: $TASKDIR_ABS is outside the repository; the plan will not be committed with the task" ;;
 esac
-INDEX_DIR="$(mktemp -d)" || die "could not create an isolated Git-index directory"
-INDEX_FILE="$INDEX_DIR/index"
-GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" read-tree "$BASE_COMMIT" || \
-  die "could not initialize the isolated Git index from the frozen baseline"
-GIT_LITERAL_PATHSPECS=1 GIT_INDEX_FILE="$INDEX_FILE" \
-  git -C "$WORKDIR_ABS" add -A -- "${STAGE_PATHS[@]}" || \
-  die "could not add the literal task paths to the isolated Git index"
-TREE="$(GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" write-tree)" || \
-  die "could not freeze the pre-test task tree"
+build_candidate_tree() {
+  local output_name="$1" phase="$2"
+  local -n output="$output_name"
+  INDEX_DIR="$(mktemp -d)" || die "could not create the $phase isolated Git-index directory"
+  INDEX_FILE="$INDEX_DIR/index"
+  GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" read-tree "$BASE_COMMIT" || \
+    die "could not initialize the $phase isolated Git index from the frozen baseline"
+  GIT_LITERAL_PATHSPECS=1 GIT_INDEX_FILE="$INDEX_FILE" \
+    git -C "$WORKDIR_ABS" add -A -- "${STAGE_PATHS[@]}" || \
+    die "could not add the literal task paths to the $phase isolated Git index"
+  output="$(GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" write-tree)" || \
+    die "could not write the $phase candidate tree"
+  rm -f -- "$INDEX_FILE" || die "could not remove the $phase isolated Git index"
+  INDEX_FILE=""
+  rmdir "$INDEX_DIR" || die "could not remove the $phase isolated Git-index directory"
+  INDEX_DIR=""
+}
+
+TREE=""
+build_candidate_tree TREE "pre-test"
 
 commands=()
 if [ -f "$RUNDIR/test" ]; then
@@ -245,28 +286,27 @@ done
 contract_gate
 plan_drift_gate
 head_gate
-PRODUCT_LIST_AFTER="$(mktemp)" || die "could not create a post-test product-list file"
-collect_product "$PRODUCT_LIST_AFTER"
-if ! cmp -s "$PRODUCT_LIST_BEFORE" "$PRODUCT_LIST_AFTER"; then
-  PRODUCT_PATHS_AFTER=()
-  mapfile -d '' -t PRODUCT_PATHS_AFTER <"$PRODUCT_LIST_AFTER"
+PRODUCT_PATHS_AFTER=()
+collect_product_paths PRODUCT_PATHS_AFTER
+PATH_SET_CHANGED=0
+if [ "${#PRODUCT_PATHS[@]}" -ne "${#PRODUCT_PATHS_AFTER[@]}" ]; then
+  PATH_SET_CHANGED=1
+else
+  for ((i = 0; i < ${#PRODUCT_PATHS[@]}; i++)); do
+    if [ "${PRODUCT_PATHS[$i]}" != "${PRODUCT_PATHS_AFTER[$i]}" ]; then
+      PATH_SET_CHANGED=1
+      break
+    fi
+  done
+fi
+if [ "$PATH_SET_CHANGED" -eq 1 ]; then
   scope_paths_gate "after tests" "${PRODUCT_PATHS_AFTER[@]}"
   die "product path set changed after candidate freeze; refusing to publish"
 fi
-CURRENT_PRIVATE_TREE="$(GIT_INDEX_FILE="$INDEX_FILE" git -C "$WORKDIR_ABS" write-tree)" || \
-  die "could not verify the frozen private index"
-[ "$CURRENT_PRIVATE_TREE" = "$TREE" ] || \
-  die "the frozen private index changed while tests were running"
-set +e
-GIT_LITERAL_PATHSPECS=1 GIT_INDEX_FILE="$INDEX_FILE" \
-  git -C "$WORKDIR_ABS" diff --quiet -- "${STAGE_PATHS[@]}"
-CONTENT_RC=$?
-set -e
-case "$CONTENT_RC" in
-  0) ;;
-  1) die "selected worktree content changed after candidate freeze; refusing to publish" ;;
-  *) die "could not verify worktree content against the frozen candidate tree" ;;
-esac
+TREE_AFTER=""
+build_candidate_tree TREE_AFTER "post-test"
+[ "$TREE_AFTER" = "$TREE" ] || \
+  die "candidate tree changed after tests; refusing to publish"
 
 SUBJECT="${CODEX_COMMIT_MESSAGE:-}"
 if [ -z "$SUBJECT" ]; then
@@ -304,11 +344,20 @@ if [ -n "${CODEX_COMMIT_TEST_BEFORE_PUBLISH:-}" ]; then
   "$CODEX_COMMIT_TEST_BEFORE_PUBLISH" || die "pre-publication test hook failed"
 fi
 
+# A branch ref becoming a symref is itself a publication conflict. --no-deref
+# below prevents redirection even if a non-cooperating writer races this check;
+# this check ensures a symref already installed before the CAS is never replaced
+# while being reported as a successful task publication.
+if git -C "$WORKDIR_ABS" symbolic-ref -q "$HEAD_REF" >/dev/null 2>&1; then
+  say "publication conflict: $HEAD_REF became a symbolic ref; task commit was not published"
+  exit 5
+fi
+
 # HEAD_REF was pinned while HEAD still resolved to BASE_COMMIT. Publishing by
 # this named ref (rather than by HEAD) prevents a later symbolic-HEAD repoint
 # from redirecting this task's commit to another branch.
 set +e
-git -C "$WORKDIR_ABS" update-ref "$HEAD_REF" "$CANDIDATE" "$BASE_COMMIT"
+git -C "$WORKDIR_ABS" update-ref --no-deref "$HEAD_REF" "$CANDIDATE" "$BASE_COMMIT"
 PUBLISH_RC=$?
 set -e
 if [ "$PUBLISH_RC" -ne 0 ]; then

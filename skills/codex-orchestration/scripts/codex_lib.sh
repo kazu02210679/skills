@@ -40,12 +40,10 @@ codex_is_meta_path() {
   esac
 }
 
-# codex_load_allowlist <file> <array_name>
-# Parse one allowlist into caller-owned memory. A commit gate keeps this array
-# in its parent shell while tests run in children, so tests have no pathname
-# they can rewrite to change the verdict.
-codex_load_allowlist() {
-  local file="$1" output_name="$2" line
+# codex_load_allowlist_text <captured_bytes> <array_name>
+# Parse a caller-owned byte capture without reopening its source pathname.
+codex_load_allowlist_text() {
+  local captured="$1" output_name="$2" line
   local -n output="$output_name"
   output=()
   while IFS= read -r line || [ -n "$line" ]; do
@@ -53,8 +51,19 @@ codex_load_allowlist() {
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [ -n "$line" ] && output+=("$line")
-  done <"$file"
+  done < <(printf '%s' "$captured")
   return 0
+}
+
+# codex_load_allowlist <file> <array_name>
+# Convenience wrapper for non-adversarial callers. The commit gate captures
+# and authenticates bytes itself, then calls codex_load_allowlist_text so its
+# digest and parsed patterns are bound to the same single read.
+codex_load_allowlist() {
+  local file="$1" output_name="$2" captured sentinel=$'\034'
+  captured="$(cat -- "$file"; printf '%s' "$sentinel")" || return 1
+  captured="${captured%?}"
+  codex_load_allowlist_text "$captured" "$output_name"
 }
 
 # codex_path_allowed <literal_path> <pattern>...
@@ -411,16 +420,17 @@ codex_contract_check() {
 # this check, and reporting "Codex tampered with the plan" for someone else's
 # hint file is a false alarm that trains you to ignore a real one.
 codex_meta_fingerprint() {
-  local d="$1" f key i j
+  local d="$1" f key i j kind mode payload target
   local LC_ALL=C
   local files=()
   if [ ! -d "$d" ]; then printf 'absent\n'; return 0; fi
-  # Bind normalized relative paths independently of the hash backend's output
-  # format. NUL delimiters keep file names containing whitespace or newlines
-  # unambiguous. An in-shell insertion sort avoids GNU-only `sort -z`.
+  # Bind normalized relative paths, entry types, modes, file contents and
+  # symlink targets independently of the hash backend's output format. NUL
+  # delimiters keep names containing whitespace or newlines unambiguous. An
+  # in-shell insertion sort avoids GNU-only `sort -z`.
   (
     cd "$d" || exit 1
-    while IFS= read -r -d '' f; do files+=("$f"); done < <(find . -type f -print0)
+    while IFS= read -r -d '' f; do files+=("$f"); done < <(find . -mindepth 1 -print0)
     for ((i = 1; i < ${#files[@]}; i++)); do
       key="${files[$i]}"
       j=$((i - 1))
@@ -431,7 +441,35 @@ codex_meta_fingerprint() {
       files[$((j + 1))]="$key"
     done
     for f in "${files[@]}"; do
-      printf '%s\0%s\0' "$f" "$(codex_hash_file "$f")"
+      if mode="$(stat -c '%a' -- "$f" 2>/dev/null)"; then
+        :
+      elif mode="$(stat -f '%Lp' "$f" 2>/dev/null)"; then
+        :
+      else
+        exit 1
+      fi
+      payload=""
+      if [ -L "$f" ]; then
+        kind=L
+        target="$(readlink "$f")" || exit 1
+        payload="$target"
+      elif [ -f "$f" ]; then
+        kind=F
+        payload="$(codex_hash_file "$f")" || exit 1
+      elif [ -d "$f" ]; then
+        kind=D
+      elif [ -p "$f" ]; then
+        kind=P
+      elif [ -S "$f" ]; then
+        kind=S
+      elif [ -b "$f" ]; then
+        kind=B
+      elif [ -c "$f" ]; then
+        kind=C
+      else
+        kind=O
+      fi
+      printf '%s\0%s\0%s\0%s\0' "$f" "$kind" "$mode" "$payload"
     done
   ) | "${CODEX_HASH[@]}" | cut -d' ' -f1
 }
