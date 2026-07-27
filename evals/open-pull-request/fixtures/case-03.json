@@ -1,0 +1,24 @@
+{
+  "defaultBranch": "main",
+  "headBranch": "feature/search",
+  "commits": [
+    {
+      "message": "Add search",
+      "files": {
+        ".gitignore": "__pycache__/\n*.py[cod]\n",
+        "src/search.py": "def search(query):\n    return []\n"
+      }
+    },
+    {"message": "Test search", "files": {"tests/test_search.py": "def test_search():\n    assert True\n"}}
+  ],
+  "remote": {
+    "headSha": "ancestor:1"
+  },
+  "githubState": {
+    "defaultBranch": "main",
+    "pullRequests": [],
+    "remoteUrls": {
+      "origin": "https://github.com/example/project.git"
+    }
+  }
+}
