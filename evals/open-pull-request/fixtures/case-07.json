@@ -2,9 +2,25 @@
   "defaultBranch": "main",
   "headBranch": "feature/cache",
   "commits": [
-    {"message": "Add cache", "files": {"src/cache.py": "CACHE = {}\n"}},
-    {"message": "Handle expiry", "files": {"src/cache.py": "CACHE = {}\nTTL = 60\n"}},
-    {"message": "Test expiry", "files": {"tests/test_cache.py": "def test_expiry():\n    assert True\n"}}
+    {
+      "message": "Add cache",
+      "files": {
+        "src/cache.py": "CACHE = {}\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    },
+    {
+      "message": "Handle expiry",
+      "files": {
+        "src/cache.py": "CACHE = {}\nTTL = 60\n"
+      }
+    },
+    {
+      "message": "Test expiry",
+      "files": {
+        "tests/test_cache.py": "def test_expiry():\n    assert True\n"
+      }
+    }
   ],
   "reviewData": {
     "cache-review": {
@@ -14,9 +30,15 @@
       },
       "result": "approved",
       "findings": [],
-      "coverage": {"gaps": []},
+      "coverage": {
+        "gaps": []
+      },
       "verification": [
-        {"name": "unit tests", "status": "passed", "source": "review"}
+        {
+          "name": "unit tests",
+          "status": "passed",
+          "source": "review"
+        }
       ]
     }
   }

@@ -2,7 +2,13 @@
   "defaultBranch": "main",
   "headBranch": "feature/notifications",
   "commits": [
-    {"message": "Add notifications", "files": {"src/notifications.py": "def notify():\n    pass\n"}}
+    {
+      "message": "Add notifications",
+      "files": {
+        "src/notifications.py": "def notify():\n    pass\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    }
   ],
   "untracked": {
     "src_new_feature.py": "def unfinished():\n    pass\n"

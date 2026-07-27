@@ -307,6 +307,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -357,6 +358,22 @@ if (
         print(modelled_url)
         raise SystemExit(0)
 
+# The fixture pushes to a local bare path, so `git config --get
+# remote.<name>.url` reports that path. Left unmodelled it disagreed with
+# `git remote get-url`, which the shim already answers with the forge URL —
+# and the inspector reads the config form, so the repository came back as a
+# filesystem path and the fork case had no owner to qualify its head with.
+_config_remote = re.fullmatch(r"remote\.(.+)\.url", arguments[-1] or "")
+if (
+    tool == "git"
+    and arguments[:2] == ["config", "--get"]
+    and _config_remote is not None
+):
+    modelled_url = state.get("remoteUrls", {}).get(_config_remote.group(1))
+    if modelled_url:
+        print(modelled_url)
+        raise SystemExit(0)
+
 if tool == "gh" and arguments[:2] == ["pr", "list"]:
     print(json.dumps(state.get("pullRequests", []), ensure_ascii=False))
     raise SystemExit(0)
@@ -387,6 +404,14 @@ if tool == "gh" and arguments[:2] == ["pr", "view"]:
 if tool == "gh" and arguments[:2] == ["auth", "status"]:
     print("github.com: authenticated as open-pull-request-eval")
     raise SystemExit(0)
+def _name_with_owner(state):
+    url = state.get("remoteUrls", {}).get("origin", "")
+    slug = url.rsplit("/", 2)[-2:] if "/" in url else []
+    if len(slug) == 2:
+        return f"{slug[0]}/{slug[1][:-4] if slug[1].endswith('.git') else slug[1]}"
+    return state.get("nameWithOwner", "")
+
+
 if tool == "gh" and arguments[:2] == ["repo", "view"]:
     print(
         json.dumps(
@@ -395,6 +420,7 @@ if tool == "gh" and arguments[:2] == ["repo", "view"]:
                     "name": state.get("defaultBranch", "main")
                 },
                 "viewerPermission": state.get("viewerPermission", "WRITE"),
+                "nameWithOwner": _name_with_owner(state),
             },
             ensure_ascii=False,
         )

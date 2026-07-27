@@ -2,7 +2,13 @@
   "defaultBranch": "main",
   "headBranch": "feature/reports",
   "commits": [
-    {"message": "Add reports", "files": {"src/reports.py": "def render():\n    return ''\n"}}
+    {
+      "message": "Add reports",
+      "files": {
+        "src/reports.py": "def render():\n    return ''\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    }
   ],
   "reviewData": {
     "reports": "{ this is not valid JSON"

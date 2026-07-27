@@ -125,33 +125,21 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
 
         self.assertEqual("ancestor:1", specification["remote"]["headSha"])
 
-    def test_case_03_ignores_test_generated_python_cache(self) -> None:
-        specification = json.loads(
-            (EVAL_ROOT / "fixtures" / "case-03.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        committed_files = {
-            path: content
-            for commit in specification["commits"]
-            for path, content in commit["files"].items()
-        }
-
-        self.assertIn("__pycache__/", committed_files[".gitignore"])
-
-    def test_case_09_ignores_test_generated_python_cache(self) -> None:
-        specification = json.loads(
-            (EVAL_ROOT / "fixtures" / "case-09.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        committed_files = {
-            path: content
-            for commit in specification["commits"]
-            for path, content in commit["files"].items()
-        }
-
-        self.assertIn("__pycache__/", committed_files[".gitignore"])
+    def test_every_fixture_with_commits_ignores_python_bytecode(self) -> None:
+        # Running the repository's tests generates __pycache__. Without an
+        # ignore it shows up as an untracked file, and every "proceed" case
+        # stops over a byproduct of its own verification step.
+        for path in sorted((EVAL_ROOT / "fixtures").glob("case-*.json")):
+            specification = json.loads(path.read_text(encoding="utf-8"))
+            if not specification.get("commits"):
+                continue
+            committed = {
+                name: content
+                for commit in specification["commits"]
+                for name, content in commit.get("files", {}).items()
+            }
+            self.assertIn(".gitignore", committed, path.name)
+            self.assertIn("__pycache__/", committed[".gitignore"], path.name)
 
     def test_evaluator_prompt_includes_execution_evidence_and_log_scope(
         self,
@@ -651,6 +639,48 @@ class OpenPullRequestEvaluationTests(unittest.TestCase):
                 self.runner.build_candidate_environment(bare)
 
             self.assertIn("shim configuration", str(raised.exception))
+
+    def test_both_remote_url_routes_report_the_modelled_forge_url(self) -> None:
+        # The fixture pushes to a local bare path, so the config form reported
+        # that path while `git remote get-url` reported the forge URL. The
+        # inspector reads the config form, so the repository came back as a
+        # filesystem path and the fork case had no owner to qualify its head.
+        with tempfile.TemporaryDirectory() as directory:
+            state = {
+                "remoteUrls": {
+                    "origin": "https://github.com/contributor/project.git"
+                }
+            }
+            shim_directory = self.runner.write_command_shims(
+                Path(directory) / "shims", state
+            )
+            environment = self.runner.build_candidate_environment(shim_directory)
+
+            for command in (
+                "git config --get remote.origin.url",
+                "git remote get-url origin",
+            ):
+                result = subprocess.run(
+                    command, env=environment, shell=True, text=True,
+                    encoding="utf-8", errors="replace",
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                )
+                self.assertEqual(
+                    "https://github.com/contributor/project.git",
+                    result.stdout.strip(),
+                    command,
+                )
+
+            viewed = subprocess.run(
+                "gh repo view contributor/project --json nameWithOwner",
+                env=environment, shell=True, text=True,
+                encoding="utf-8", errors="replace",
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            self.assertEqual(
+                "contributor/project",
+                json.loads(viewed.stdout)["nameWithOwner"],
+            )
 
     def test_gh_pr_view_returns_an_object_like_the_real_cli(self) -> None:
         # The real `gh pr view --json` returns one object. Echoing the list

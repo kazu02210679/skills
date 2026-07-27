@@ -2,7 +2,13 @@
   "defaultBranch": "main",
   "headBranch": "feature/export",
   "commits": [
-    {"message": "Add export", "files": {"src/export.py": "def export():\n    return 'ok'\n"}}
+    {
+      "message": "Add export",
+      "files": {
+        "src/export.py": "def export():\n    return 'ok'\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    }
   ],
   "remote": {
     "headSha": "equal"

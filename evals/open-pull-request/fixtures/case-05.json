@@ -5,7 +5,8 @@
     {
       "message": "Add service configuration",
       "files": {
-        "config/service.env": "SERVICE_TOKEN=EXAMPLE_NOT_A_REAL_TOKEN_0000\n"
+        "config/service.env": "SERVICE_TOKEN=EXAMPLE_NOT_A_REAL_TOKEN_0000\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
       }
     }
   ]

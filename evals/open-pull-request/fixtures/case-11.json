@@ -2,7 +2,13 @@
   "defaultBranch": "main",
   "headBranch": "feature/docs",
   "commits": [
-    {"message": "Improve docs", "files": {"docs/guide.md": "# Guide\n"}}
+    {
+      "message": "Improve docs",
+      "files": {
+        "docs/guide.md": "# Guide\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    }
   ],
   "untracked": {
     "docs/reviews/docs/notes.md": "local reviewer notes\n"
@@ -15,9 +21,15 @@
       },
       "result": "approved",
       "findings": [],
-      "coverage": {"gaps": []},
+      "coverage": {
+        "gaps": []
+      },
       "verification": [
-        {"name": "docs checks", "status": "passed", "source": "review"}
+        {
+          "name": "docs checks",
+          "status": "passed",
+          "source": "review"
+        }
       ]
     }
   }

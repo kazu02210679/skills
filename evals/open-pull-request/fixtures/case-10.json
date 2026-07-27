@@ -2,7 +2,13 @@
   "defaultBranch": "main",
   "headBranch": "feature/parser",
   "commits": [
-    {"message": "Add parser", "files": {"src/parser.py": "def parse(text):\n    return text\n"}}
+    {
+      "message": "Add parser",
+      "files": {
+        "src/parser.py": "def parse(text):\n    return text\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    }
   ],
   "reviewData": {
     "parser-review": {
@@ -12,9 +18,15 @@
       },
       "result": "approved",
       "findings": [],
-      "coverage": {"gaps": []},
+      "coverage": {
+        "gaps": []
+      },
       "verification": [
-        {"name": "unit tests", "status": "failed", "source": "review"}
+        {
+          "name": "unit tests",
+          "status": "failed",
+          "source": "review"
+        }
       ]
     }
   }

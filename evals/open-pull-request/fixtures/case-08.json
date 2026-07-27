@@ -2,7 +2,13 @@
   "defaultBranch": "main",
   "headBranch": "feature/audit",
   "commits": [
-    {"message": "Add audit log", "files": {"src/audit.py": "def record(event):\n    pass\n"}}
+    {
+      "message": "Add audit log",
+      "files": {
+        "src/audit.py": "def record(event):\n    pass\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    }
   ],
   "remote": {
     "headSha": "equal",

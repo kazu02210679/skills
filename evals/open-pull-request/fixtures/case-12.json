@@ -2,7 +2,13 @@
   "defaultBranch": "main",
   "headBranch": "feature/fork-work",
   "commits": [
-    {"message": "Add fork contribution", "files": {"src/contribution.py": "READY = True\n"}}
+    {
+      "message": "Add fork contribution",
+      "files": {
+        "src/contribution.py": "READY = True\n",
+        ".gitignore": "__pycache__/\n*.py[cod]\n"
+      }
+    }
   ],
   "remote": {
     "headSha": "equal",
