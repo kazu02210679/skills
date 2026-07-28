@@ -197,6 +197,96 @@ wait "$pid"; rc=$?
 check "swapping plan file contents is detected" "$rc" "4"
 has "plan swap reports contract tampering" "$(cat "$TMPROOT/plan-swap.out")" "modified the plan directory"
 
+echo "== plan fingerprints preserve symlink target newlines =="
+R="$(new_repo run4symlink)"; P="$(new_plan "$R" auth)"
+SYMLINK_PATH="$P/target-link"
+SYMLINK_TARGET_PLAIN='T1.md'
+SYMLINK_TARGET_NEWLINE=$'T1.md\n'
+SYMLINK_ACTUAL="$TMPROOT/symlink-actual"
+SYMLINK_EXPECTED="$TMPROOT/symlink-expected"
+rm -f "$SYMLINK_PATH"
+if ln -s "$SYMLINK_TARGET_PLAIN" "$SYMLINK_PATH" 2>/dev/null &&
+   [ -L "$SYMLINK_PATH" ]; then
+  rm -f "$SYMLINK_PATH"
+  if ln -s "$SYMLINK_TARGET_NEWLINE" "$SYMLINK_PATH" 2>/dev/null &&
+     [ -L "$SYMLINK_PATH" ]; then
+    readlink "$SYMLINK_PATH" >"$SYMLINK_ACTUAL"
+    printf '%s\n' "$SYMLINK_TARGET_NEWLINE" >"$SYMLINK_EXPECTED"
+  fi
+fi
+if [ -L "$SYMLINK_PATH" ] && cmp -s "$SYMLINK_ACTUAL" "$SYMLINK_EXPECTED"; then
+  rm -f "$SYMLINK_PATH"
+  ln -s "$SYMLINK_TARGET_PLAIN" "$SYMLINK_PATH"
+  BARRIER="$TMPROOT/plan-symlink-target"; mkdir -p "$BARRIER"
+  FAKE_CODEX_BARRIER="$BARRIER" FAKE_CODEX_TOUCH="src/a.py" \
+    "$S/codex_run.sh" "$P/T1.md" "$R" >"$TMPROOT/plan-symlink-target.out" 2>&1 & pid=$!
+  for i in $(seq 1 200); do
+    ls "$BARRIER"/ready-* >/dev/null 2>&1 && break
+    sleep 0.05
+  done
+  rm -f "$SYMLINK_PATH"
+  ln -s "$SYMLINK_TARGET_NEWLINE" "$SYMLINK_PATH"
+  : >"$BARRIER/release"
+  wait "$pid"; rc=$?
+  check "adding one trailing newline to a symlink target is detected" "$rc" "4"
+  has "symlink target drift reports plan tampering" "$(cat "$TMPROOT/plan-symlink-target.out")" "modified the plan directory"
+else
+  ok "symlink target newline regression skipped: exact native symlink/readlink probe unsupported"
+fi
+
+echo "== plan fingerprint traversal failures are fatal =="
+REAL_FIND="$(command -v find)"
+FIND_FAIL_BIN="$TMPROOT/find-fail-bin"; mkdir -p "$FIND_FAIL_BIN"
+cat >"$FIND_FAIL_BIN/find" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" -mindepth 1 -print0 "*)
+    printf './T1.md\\0'
+    exit 77
+    ;;
+esac
+exec "$REAL_FIND" "\$@"
+EOF
+chmod +x "$FIND_FAIL_BIN/find"
+
+R="$(new_repo fingerprint-find-failure)"; P="$(new_plan "$R" auth)"
+direct_out="$(PATH="$FIND_FAIL_BIN:$PATH" bash -c \
+  '. "$1"; codex_require_hash; codex_meta_fingerprint "$2"' \
+  _ "$S/codex_lib.sh" "$P" 2>"$TMPROOT/fingerprint-find.err")"; rc=$?
+[ "$rc" -ne 0 ] && ok "partial find output makes the fingerprint fail" \
+                   || bad "partial find output returned a trusted fingerprint"
+check "partial traversal never emits a fingerprint hash" "$direct_out" ""
+
+LOG="$TMPROOT/find-failure-run.log"; : >"$LOG"
+out="$(PATH="$FIND_FAIL_BIN:$PATH" FAKE_CODEX_LOG="$LOG" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && ok "run fails closed when plan traversal fails" \
+                   || bad "run trusted a partial plan traversal"
+check "failed traversal launches no Codex process" "$(grep -c '^ARGV:' "$LOG")" "0"
+
+R="$(new_repo commit-find-failure)"; P="$(new_plan "$R" auth)"; RD="$(do_run "$R" "$P/T1.md")"; before="$(ncommits "$R")"
+out="$(PATH="$FIND_FAIL_BIN:$PATH" "$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "commit fails closed when plan traversal fails" "$rc" "6"
+check "failed commit traversal publishes no history" "$(ncommits "$R")" "$before"
+
+UNREADABLE_PLAN="$TMPROOT/unreadable-plan"
+mkdir -p "$UNREADABLE_PLAN/blocked"
+printf 'secret\n' >"$UNREADABLE_PLAN/blocked/secret"
+chmod 000 "$UNREADABLE_PLAN/blocked" 2>/dev/null || true
+"$REAL_FIND" "$UNREADABLE_PLAN" -mindepth 1 -print0 >/dev/null 2>"$TMPROOT/unreadable-find.err"
+unreadable_find_rc=$?
+if [ "$unreadable_find_rc" -ne 0 ]; then
+  unreadable_out="$(bash -c \
+    '. "$1"; codex_require_hash; codex_meta_fingerprint "$2"' \
+    _ "$S/codex_lib.sh" "$UNREADABLE_PLAN" 2>"$TMPROOT/unreadable-fingerprint.err")"; rc=$?
+  [ "$rc" -ne 0 ] && ok "unreadable subtree makes the fingerprint fail" \
+                     || bad "unreadable subtree returned a trusted fingerprint"
+  check "unreadable traversal emits no partial fingerprint" "$unreadable_out" ""
+else
+  ok "unreadable subtree regression skipped: platform permissions did not make find fail"
+fi
+chmod 700 "$UNREADABLE_PLAN/blocked" 2>/dev/null || true
+
 echo "== frozen contract tampering is fatal =="
 R="$(new_repo run4contract)"; P="$(new_plan "$R" auth)"
 RD="$R/.codex-runs/frozen-run"; BARRIER="$TMPROOT/frozen-run"; mkdir -p "$BARRIER"

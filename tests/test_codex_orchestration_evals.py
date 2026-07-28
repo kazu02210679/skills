@@ -39,7 +39,10 @@ class CodexOrchestrationShellEvaluations(unittest.TestCase):
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=540,
+            # Git for Windows runs the adversarial commit suite substantially
+            # slower than direct Bash; keep this above the observed worst case
+            # so the bridge reports assertion failures instead of truncating it.
+            timeout=900,
             check=False,
         )
         self.assertEqual(

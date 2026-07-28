@@ -420,17 +420,29 @@ codex_contract_check() {
 # this check, and reporting "Codex tampered with the plan" for someone else's
 # hint file is a false alarm that trains you to ignore a real one.
 codex_meta_fingerprint() {
-  local d="$1" f key i j kind mode payload target
+  local d="$1"
   local LC_ALL=C
-  local files=()
   if [ ! -d "$d" ]; then printf 'absent\n'; return 0; fi
   # Bind normalized relative paths, entry types, modes, file contents and
   # symlink targets independently of the hash backend's output format. NUL
   # delimiters keep names containing whitespace or newlines unambiguous. An
-  # in-shell insertion sort avoids GNU-only `sort -z`.
+  # in-shell insertion sort avoids GNU-only `sort -z`. Traversal and entry
+  # validation finish before any record reaches the final hash, so a failed
+  # find, stat, readlink or file hash can never produce a trusted partial digest.
   (
+    local f key i j kind mode payload target target_capture
+    local traversal_fd traversal_pid sentinel=$'\034'
+    local -a files=() kinds=() modes=() payloads=()
     cd "$d" || exit 1
-    while IFS= read -r -d '' f; do files+=("$f"); done < <(find . -mindepth 1 -print0)
+
+    exec {traversal_fd}< <(find . -mindepth 1 -print0)
+    traversal_pid=$!
+    while IFS= read -r -d '' f <&"$traversal_fd"; do
+      files+=("$f")
+    done
+    exec {traversal_fd}<&-
+    wait "$traversal_pid" || exit 1
+
     for ((i = 1; i < ${#files[@]}; i++)); do
       key="${files[$i]}"
       j=$((i - 1))
@@ -440,6 +452,7 @@ codex_meta_fingerprint() {
       done
       files[$((j + 1))]="$key"
     done
+    i=0
     for f in "${files[@]}"; do
       if mode="$(stat -c '%a' -- "$f" 2>/dev/null)"; then
         :
@@ -451,7 +464,20 @@ codex_meta_fingerprint() {
       payload=""
       if [ -L "$f" ]; then
         kind=L
-        target="$(readlink "$f")" || exit 1
+        target_capture="$(
+          readlink "$f"
+          readlink_rc=$?
+          [ "$readlink_rc" -eq 0 ] || exit "$readlink_rc"
+          printf '%s' "$sentinel"
+        )" || exit 1
+        case "$target_capture" in
+          *"$sentinel") target_capture="${target_capture%?}" ;;
+          *) exit 1 ;;
+        esac
+        case "$target_capture" in
+          *$'\n') target="${target_capture%$'\n'}" ;;
+          *) exit 1 ;;
+        esac
         payload="$target"
       elif [ -f "$f" ]; then
         kind=F
@@ -469,9 +495,20 @@ codex_meta_fingerprint() {
       else
         kind=O
       fi
-      printf '%s\0%s\0%s\0%s\0' "$f" "$kind" "$mode" "$payload"
+      kinds[$i]="$kind"
+      modes[$i]="$mode"
+      payloads[$i]="$payload"
+      i=$((i + 1))
     done
-  ) | "${CODEX_HASH[@]}" | cut -d' ' -f1
+
+    set -o pipefail
+    (
+      for ((i = 0; i < ${#files[@]}; i++)); do
+        printf '%s\0%s\0%s\0%s\0' \
+          "${files[$i]}" "${kinds[$i]}" "${modes[$i]}" "${payloads[$i]}"
+      done
+    ) | "${CODEX_HASH[@]}" | cut -d' ' -f1
+  )
 }
 
 # codex_thread_id <events.jsonl>
