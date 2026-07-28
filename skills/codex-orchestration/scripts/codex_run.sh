@@ -79,6 +79,7 @@ RUNDIR="${3:-}"
 
 command -v codex >/dev/null 2>&1 || die "the 'codex' CLI is not installed or not on PATH. Install it and authenticate (OPENAI_API_KEY or 'codex login') first."
 codex_require_hash || exit 2
+codex_require_json_encoder || exit 2
 [ -f "$INSTRUCTION" ] || die "instruction file not found: $INSTRUCTION"
 [ -d "$WORKDIR" ]     || die "workdir not found: $WORKDIR"
 
@@ -136,10 +137,18 @@ if git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 
   if [ "${CODEX_ALLOW_DIRTY:-0}" != "1" ]; then
+    DIRTY_LIST="$(mktemp)" || die "could not create a temporary file for the dirty-worktree preflight"
+    set +e
+    codex_dirty_product0 "$WORKDIR" HEAD >"$DIRTY_LIST"
+    DIRTY_RC=$?
+    set -e
+    if [ "$DIRTY_RC" -ne 0 ]; then
+      rm -f "$DIRTY_LIST"
+      die "could not reliably determine whether the workdir has uncommitted product changes"
+    fi
     dirty=()
-    while IFS= read -r f; do
-      [ -n "$f" ] && dirty+=("$f")
-    done < <(codex_dirty_product "$WORKDIR" HEAD)
+    mapfile -d '' -t dirty <"$DIRTY_LIST"
+    rm -f "$DIRTY_LIST"
     if [ "${#dirty[@]}" -gt 0 ]; then
       printf 'codex_run: uncommitted product changes:\n' >&2
       printf '  %s\n' "${dirty[@]}" >&2
@@ -162,14 +171,24 @@ fi
 # attempt-1 while both were still using them. `mktemp -d` keeps the sortable
 # timestamp and makes the name collision-proof.
 if [ -z "$RUNDIR" ]; then
-  mkdir -p "$WORKDIR/.codex-runs"
-  RUNDIR="$(mktemp -d "$WORKDIR/.codex-runs/$(date +%Y%m%d-%H%M%S)-XXXXXX")"
-elif [ -e "$RUNDIR" ] && [ -n "$(ls -A "$RUNDIR" 2>/dev/null)" ]; then
-  die "run directory already exists and is not empty: $RUNDIR. Starting here would overwrite that run's frozen contract and its attempts. Pass a new path, or omit the argument to get a fresh one."
+  mkdir -p "$WORKDIR/.codex-runs" || die "could not create the run-directory parent"
+  RUNDIR="$(mktemp -d "$WORKDIR/.codex-runs/$(date +%Y%m%d-%H%M%S)-XXXXXX")" \
+    || die "could not reserve a fresh run directory"
+else
+  mkdir -p "$(dirname -- "$RUNDIR")" || die "could not create the run-directory parent: $(dirname -- "$RUNDIR")"
+  if ! mkdir "$RUNDIR" 2>/dev/null; then
+    if [ -d "$RUNDIR" ] && [ -n "$(ls -A "$RUNDIR" 2>/dev/null)" ]; then
+      die "run directory already exists and is not empty: $RUNDIR. Starting here would overwrite that run's frozen contract and its attempts. Pass a new path, or omit the argument to get a fresh one."
+    fi
+    if [ -e "$RUNDIR" ]; then
+      die "run directory already exists and cannot be reserved exclusively: $RUNDIR. Pass a new path, or omit the argument to get a fresh one."
+    fi
+    die "could not reserve the explicit run directory: $RUNDIR"
+  fi
 fi
 
 ATTEMPT="$RUNDIR/attempt-1"
-mkdir -p "$ATTEMPT"
+mkdir "$ATTEMPT" || die "could not reserve first attempt directory: $ATTEMPT"
 
 # Make the run directory self-ignoring. Run artifacts are local evidence, not
 # repository content — and an untracked .codex-runs/ would bury the very diff
@@ -283,25 +302,27 @@ if [ "$CONTRACT_OK" = "true" ] && [ -n "$ALLOWLIST" ] && [ "$IS_GIT" = "1" ]; th
   cat "$ATTEMPT/scope.txt" >&2
 fi
 
-cat >"$ATTEMPT/meta.json" <<JSON
-{
-  "instruction": "$INSTRUCTION",
-  "workdir": "$WORKDIR",
-  "rundir": "$RUNDIR",
-  "attempt": 1,
-  "branch": "$BRANCH",
-  "base_commit": "$BASE_COMMIT",
-  "allowlist": "${ALLOWLIST:-}",
-  "interfaces_injected": $([ -n "$INTERFACES" ] && [ -s "$INTERFACES" ] && echo true || echo false),
-  "meta_intact": $META_OK,
-  "contract_intact": $CONTRACT_OK,
-  "scope_ok": $([ "$SCOPE_RC" -eq 0 ] && echo true || echo false),
-  "sandbox": "$CODEX_SANDBOX",
-  "model": "${CODEX_MODEL:-default}",
-  "exit_code": $RC,
-  "finished_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-JSON
+INTERFACES_INJECTED=false
+[ -n "$INTERFACES" ] && [ -s "$INTERFACES" ] && INTERFACES_INJECTED=true
+SCOPE_OK=false
+[ "$SCOPE_RC" -eq 0 ] && SCOPE_OK=true
+codex_write_json "$ATTEMPT/meta.json" \
+  instruction string "$INSTRUCTION" \
+  workdir string "$WORKDIR" \
+  rundir string "$RUNDIR" \
+  attempt integer 1 \
+  branch string "$BRANCH" \
+  base_commit string "$BASE_COMMIT" \
+  allowlist string "${ALLOWLIST:-}" \
+  interfaces_injected boolean "$INTERFACES_INJECTED" \
+  meta_intact boolean "$META_OK" \
+  contract_intact boolean "$CONTRACT_OK" \
+  scope_ok boolean "$SCOPE_OK" \
+  sandbox string "$CODEX_SANDBOX" \
+  model string "${CODEX_MODEL:-default}" \
+  exit_code integer "$RC" \
+  finished_at string "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  || die "could not write JSON run metadata"
 
 printf 'codex_run: done (exit=%s)\n  RUNDIR: %s\n  REPORT: %s\n  EVENTS: %s\n  META  : %s\n' \
   "$RC" "$RUNDIR" "$ATTEMPT/report.md" "$ATTEMPT/events.jsonl" "$ATTEMPT/meta.json" >&2

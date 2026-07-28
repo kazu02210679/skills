@@ -4,6 +4,27 @@
 set -uo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
+# run_with_deadline <output-file> <command...>
+# Avoid relying on Git for Windows `timeout` process-group behavior while
+# pressure-testing the old unbounded reservation loop.
+run_with_deadline() {
+  local output_file="$1" pid i rc
+  shift
+  "$@" >"$output_file" 2>&1 & pid=$!
+  for i in $(seq 1 300); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      return $?
+    fi
+    sleep 0.01
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null
+  rc=$?
+  [ "$rc" -eq 0 ] && rc=124
+  return "$rc"
+}
+
 echo "== git preflight =="
 R="$(new_repo run1)"; P="$(new_plan "$R" auth)"
 git -C "$R" checkout -q main
@@ -44,6 +65,26 @@ check "refuses a dirty product tree" "$rc" "2"
 has "lists the offending file" "$out" "src/a.py"
 git -C "$R" checkout -- .
 
+echo "== dirty preflight failures stop before launch =="
+REAL_GIT="$(command -v git)"
+FAIL_GIT_BIN="$TMPROOT/run-failing-git"; mkdir -p "$FAIL_GIT_BIN"
+cat >"$FAIL_GIT_BIN/git" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-C" ] && [ "\${3:-}" = "diff" ] && [ "\${4:-}" = "--no-renames" ]; then
+  exit 77
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$FAIL_GIT_BIN/git"
+cp "$FAIL_GIT_BIN/git" "$FAIL_GIT_BIN/git.exe"
+chmod +x "$FAIL_GIT_BIN/git.exe"
+LOG="$TMPROOT/dirty-indeterminate-argv"; : >"$LOG"
+out=$(PATH="$FAIL_GIT_BIN:$PATH" FAKE_CODEX_LOG="$LOG" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
+check "indeterminate dirty state is refused" "$rc" "2"
+has "dirty-state refusal is explained" "$out" "could not reliably determine"
+check "indeterminate dirty state launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
+
 # The plan itself is untracked when /codex-spec has just written it. Holding it
 # to the dirty check would mean the first task could never start.
 out=$(FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
@@ -59,6 +100,26 @@ for f in attempt-1/report.md attempt-1/events.jsonl attempt-1/stderr.log \
 done
 check "thread id captured" "$(cat "$RD/thread_id")" "thr-abc123"
 hasnt "run dir hidden from git" "$(git -C "$R" status --porcelain)" "codex-runs"
+
+echo "== metadata is encoded as JSON =="
+R="$(new_repo run-json)"; P="$(new_plan "$R" auth)"
+SPECIAL_MODEL=$'model"quote\\slash\nnext'
+out=$(CODEX_MODEL="$SPECIAL_MODEL" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
+check "run with JSON-special metadata succeeds" "$rc" "0"
+RD="$(rundir_of "$R")"
+json_model="$(python -c 'import json,sys; sys.stdout.buffer.write(json.load(open(sys.argv[1], encoding="utf-8"))["model"].encode("utf-8"))' \
+  "$RD/attempt-1/meta.json" 2>/dev/null)"; json_rc=$?
+check "run metadata is valid JSON" "$json_rc" "0"
+check "run metadata preserves quotes, slashes, and newlines" "$json_model" "$SPECIAL_MODEL"
+
+R="$(new_repo run-json-missing)"; P="$(new_plan "$R" auth)"
+LOG="$TMPROOT/json-missing-argv"; : >"$LOG"
+out=$(CODEX_JSON_CMD=definitely-missing-json-encoder FAKE_CODEX_LOG="$LOG" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
+check "missing JSON encoder fails closed" "$rc" "2"
+has "missing JSON encoder is explained" "$out" "JSON encoder"
+check "missing JSON encoder launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
 
 echo "== interfaces are injected into the prompt =="
 R="$(new_repo run2)"; P="$(new_plan "$R" auth)"
@@ -103,6 +164,31 @@ for backend in "sha256sum" "shasum -a 256" "openssl dgst -sha256 -r"; do
                    || bad "$tool returns the same value for different files"
 done
 
+echo "== plan fingerprints fail when a per-file hash fails =="
+# The final plan-record stream contains NUL delimiters; regular file contents
+# in this fixture do not. This backend therefore fails only while hashing an
+# individual file, then succeeds for the final aggregate hash. A direct caller
+# that did not already enable pipefail must still receive a failure.
+FILE_HASH_FAIL_BACKEND="$TMPROOT/fail-regular-file-hash"
+cat >"$FILE_HASH_FAIL_BACKEND" <<'EOF'
+#!/usr/bin/env python
+import hashlib
+import sys
+
+data = sys.stdin.buffer.read()
+if b"\0" not in data:
+    raise SystemExit(77)
+print(hashlib.sha256(data).hexdigest() + "  -")
+EOF
+chmod +x "$FILE_HASH_FAIL_BACKEND"
+R="$(new_repo fingerprint-file-hash-failure)"; P="$(new_plan "$R" auth)"
+direct_out="$(CODEX_HASH_CMD="$FILE_HASH_FAIL_BACKEND" bash -c \
+  '. "$1"; codex_require_hash; codex_meta_fingerprint "$2"' \
+  _ "$S/codex_lib.sh" "$P" 2>"$TMPROOT/fingerprint-file-hash.err")"; rc=$?
+[ "$rc" -ne 0 ] && ok "a failed per-file hash makes the fingerprint fail" \
+                   || bad "a failed per-file hash returned a trusted fingerprint"
+check "a failed per-file hash emits no fingerprint" "$direct_out" ""
+
 echo "== metadata tampering is fatal =="
 R="$(new_repo run4)"; P="$(new_plan "$R" auth)"
 out=$(FAKE_CODEX_TOUCH=".codex-instructions/auth/T1.allowlist" \
@@ -135,6 +221,96 @@ mv "$P/task.swap" "$P/T2.md"
 wait "$pid"; rc=$?
 check "swapping plan file contents is detected" "$rc" "4"
 has "plan swap reports contract tampering" "$(cat "$TMPROOT/plan-swap.out")" "modified the plan directory"
+
+echo "== plan fingerprints preserve symlink target newlines =="
+R="$(new_repo run4symlink)"; P="$(new_plan "$R" auth)"
+SYMLINK_PATH="$P/target-link"
+SYMLINK_TARGET_PLAIN='T1.md'
+SYMLINK_TARGET_NEWLINE=$'T1.md\n'
+SYMLINK_ACTUAL="$TMPROOT/symlink-actual"
+SYMLINK_EXPECTED="$TMPROOT/symlink-expected"
+rm -f "$SYMLINK_PATH"
+if ln -s "$SYMLINK_TARGET_PLAIN" "$SYMLINK_PATH" 2>/dev/null &&
+   [ -L "$SYMLINK_PATH" ]; then
+  rm -f "$SYMLINK_PATH"
+  if ln -s "$SYMLINK_TARGET_NEWLINE" "$SYMLINK_PATH" 2>/dev/null &&
+     [ -L "$SYMLINK_PATH" ]; then
+    readlink "$SYMLINK_PATH" >"$SYMLINK_ACTUAL"
+    printf '%s\n' "$SYMLINK_TARGET_NEWLINE" >"$SYMLINK_EXPECTED"
+  fi
+fi
+if [ -L "$SYMLINK_PATH" ] && cmp -s "$SYMLINK_ACTUAL" "$SYMLINK_EXPECTED"; then
+  rm -f "$SYMLINK_PATH"
+  ln -s "$SYMLINK_TARGET_PLAIN" "$SYMLINK_PATH"
+  BARRIER="$TMPROOT/plan-symlink-target"; mkdir -p "$BARRIER"
+  FAKE_CODEX_BARRIER="$BARRIER" FAKE_CODEX_TOUCH="src/a.py" \
+    "$S/codex_run.sh" "$P/T1.md" "$R" >"$TMPROOT/plan-symlink-target.out" 2>&1 & pid=$!
+  for i in $(seq 1 200); do
+    ls "$BARRIER"/ready-* >/dev/null 2>&1 && break
+    sleep 0.05
+  done
+  rm -f "$SYMLINK_PATH"
+  ln -s "$SYMLINK_TARGET_NEWLINE" "$SYMLINK_PATH"
+  : >"$BARRIER/release"
+  wait "$pid"; rc=$?
+  check "adding one trailing newline to a symlink target is detected" "$rc" "4"
+  has "symlink target drift reports plan tampering" "$(cat "$TMPROOT/plan-symlink-target.out")" "modified the plan directory"
+else
+  ok "symlink target newline regression skipped: exact native symlink/readlink probe unsupported"
+fi
+
+echo "== plan fingerprint traversal failures are fatal =="
+REAL_FIND="$(command -v find)"
+FIND_FAIL_BIN="$TMPROOT/find-fail-bin"; mkdir -p "$FIND_FAIL_BIN"
+cat >"$FIND_FAIL_BIN/find" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *" -mindepth 1 -print0 "*)
+    printf './T1.md\\0'
+    exit 77
+    ;;
+esac
+exec "$REAL_FIND" "\$@"
+EOF
+chmod +x "$FIND_FAIL_BIN/find"
+
+R="$(new_repo fingerprint-find-failure)"; P="$(new_plan "$R" auth)"
+direct_out="$(PATH="$FIND_FAIL_BIN:$PATH" bash -c \
+  '. "$1"; codex_require_hash; codex_meta_fingerprint "$2"' \
+  _ "$S/codex_lib.sh" "$P" 2>"$TMPROOT/fingerprint-find.err")"; rc=$?
+[ "$rc" -ne 0 ] && ok "partial find output makes the fingerprint fail" \
+                   || bad "partial find output returned a trusted fingerprint"
+check "partial traversal never emits a fingerprint hash" "$direct_out" ""
+
+LOG="$TMPROOT/find-failure-run.log"; : >"$LOG"
+out="$(PATH="$FIND_FAIL_BIN:$PATH" FAKE_CODEX_LOG="$LOG" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && ok "run fails closed when plan traversal fails" \
+                   || bad "run trusted a partial plan traversal"
+check "failed traversal launches no Codex process" "$(grep -c '^ARGV:' "$LOG")" "0"
+
+R="$(new_repo commit-find-failure)"; P="$(new_plan "$R" auth)"; RD="$(do_run "$R" "$P/T1.md")"; before="$(ncommits "$R")"
+out="$(PATH="$FIND_FAIL_BIN:$PATH" "$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "commit fails closed when plan traversal fails" "$rc" "6"
+check "failed commit traversal publishes no history" "$(ncommits "$R")" "$before"
+
+UNREADABLE_PLAN="$TMPROOT/unreadable-plan"
+mkdir -p "$UNREADABLE_PLAN/blocked"
+printf 'secret\n' >"$UNREADABLE_PLAN/blocked/secret"
+chmod 000 "$UNREADABLE_PLAN/blocked" 2>/dev/null || true
+"$REAL_FIND" "$UNREADABLE_PLAN" -mindepth 1 -print0 >/dev/null 2>"$TMPROOT/unreadable-find.err"
+unreadable_find_rc=$?
+if [ "$unreadable_find_rc" -ne 0 ]; then
+  unreadable_out="$(bash -c \
+    '. "$1"; codex_require_hash; codex_meta_fingerprint "$2"' \
+    _ "$S/codex_lib.sh" "$UNREADABLE_PLAN" 2>"$TMPROOT/unreadable-fingerprint.err")"; rc=$?
+  [ "$rc" -ne 0 ] && ok "unreadable subtree makes the fingerprint fail" \
+                     || bad "unreadable subtree returned a trusted fingerprint"
+  check "unreadable traversal emits no partial fingerprint" "$unreadable_out" ""
+else
+  ok "unreadable subtree regression skipped: platform permissions did not make find fail"
+fi
+chmod 700 "$UNREADABLE_PLAN/blocked" 2>/dev/null || true
 
 echo "== frozen contract tampering is fatal =="
 R="$(new_repo run4contract)"; P="$(new_plan "$R" auth)"
@@ -172,6 +348,45 @@ has "explains why" "$out" "already exists and is not empty"
 out=$(FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" "$R/.codex-runs/fresh" 2>&1); rc=$?
 check "an unused explicit path is accepted" "$rc" "0"
 
+echo "== explicit run directories are reserved atomically =="
+R="$(new_repo run4explicit)"; P="$(new_plan "$R" auth)"
+RD="$R/.codex-runs/shared-explicit"
+REAL_MKDIR="$(command -v mkdir)"
+MKDIR_BIN="$TMPROOT/atomic-mkdir-bin"; mkdir -p "$MKDIR_BIN"
+MKDIR_BARRIER="$TMPROOT/atomic-mkdir-barrier"; mkdir -p "$MKDIR_BARRIER"
+cat >"$MKDIR_BIN/mkdir" <<EOF
+#!/usr/bin/env bash
+target="\${!#}"
+case "\$target" in
+  "$RD"|"$RD/attempt-1")
+    : >"$MKDIR_BARRIER/ready-\$\$"
+    while [ ! -e "$MKDIR_BARRIER/release" ]; do sleep 0.01; done
+    ;;
+esac
+exec "$REAL_MKDIR" "\$@"
+EOF
+chmod +x "$MKDIR_BIN/mkdir"
+LOG="$TMPROOT/explicit-concurrent-argv"; : >"$LOG"
+PATH="$MKDIR_BIN:$PATH" FAKE_CODEX_LOG="$LOG" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" "$RD" >"$TMPROOT/explicit-1.out" 2>&1 & p1=$!
+PATH="$MKDIR_BIN:$PATH" FAKE_CODEX_LOG="$LOG" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" "$RD" >"$TMPROOT/explicit-2.out" 2>&1 & p2=$!
+for i in $(seq 1 200); do
+  ready=$(ls "$MKDIR_BARRIER"/ready-* 2>/dev/null | wc -l | tr -d '[:space:]')
+  [ "$ready" -ge 2 ] && break
+  sleep 0.01
+done
+: >"$MKDIR_BARRIER/release"
+wait "$p1"; rc1=$?
+wait "$p2"; rc2=$?
+if { [ "$rc1" -eq 0 ] && [ "$rc2" -eq 2 ]; } ||
+   { [ "$rc1" -eq 2 ] && [ "$rc2" -eq 0 ]; }; then
+  ok "exactly one explicit-directory contender succeeds"
+else
+  bad "explicit-directory contenders returned $rc1 and $rc2"
+fi
+check "only one Codex process uses attempt-1" "$(grep -c '^ARGV:' "$LOG")" "1"
+
 echo "== scope gate uses the frozen allowlist =="
 R="$(new_repo run5)"; P="$(new_plan "$R" auth)"
 FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
@@ -201,6 +416,19 @@ check "resume succeeds" "$rc" "0"
 [ -d "$RD/attempt-2" ] && ok "attempt-2 created" || bad "no attempt-2"
 check "attempt-1 report intact" "$(cat "$RD/attempt-1/report.md")" "$r1"
 check "attempt-1 events intact" "$(cat "$RD/attempt-1/events.jsonl")" "$e1"
+
+echo "== resume metadata is encoded as JSON =="
+R="$(new_repo resume-json)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"
+SPECIAL_MODEL=$'resume"quote\\slash\nnext'
+out=$(CODEX_MODEL="$SPECIAL_MODEL" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
+check "resume with JSON-special metadata succeeds" "$rc" "0"
+json_model="$(python -c 'import json,sys; sys.stdout.buffer.write(json.load(open(sys.argv[1], encoding="utf-8"))["model"].encode("utf-8"))' \
+  "$RD/attempt-2/meta.json" 2>/dev/null)"; json_rc=$?
+check "resume metadata is valid JSON" "$json_rc" "0"
+check "resume metadata preserves quotes, slashes, and newlines" "$json_model" "$SPECIAL_MODEL"
 
 echo "== resume: targeted session, correct flag order =="
 LOG="$TMPROOT/argv3"; : >"$LOG"
@@ -302,6 +530,53 @@ CODEX_RESUME_MODE=bogus "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" >/dev/
 [ -d "$RD/attempt-2" ] && bad "empty attempt-2 left behind" || ok "bad mode leaves nothing"
 FAKE_CODEX_TOUCH="src/a.py" "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" >/dev/null 2>&1
 [ -d "$RD/attempt-2" ] && ok "a real resume still opens attempt-2" || bad "attempt-2 missing"
+
+echo "== resume: reservation failures are finite and classified =="
+R="$(new_repo res6file)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"
+: >"$RD/attempt-2"
+LOG="$TMPROOT/file-collision-argv"; : >"$LOG"
+CAPTURE="$TMPROOT/file-collision.out"
+run_with_deadline "$CAPTURE" env FAKE_CODEX_LOG="$LOG" \
+  "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD"; rc=$?
+out="$(cat "$CAPTURE")"
+check "an attempt path occupied by a file fails closed" "$rc" "2"
+has "file collision is explained" "$out" "could not reserve"
+check "file collision launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
+
+R="$(new_repo res6bounded)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"
+REAL_MKDIR="$(command -v mkdir)"
+COLLISION_BIN="$TMPROOT/collision-mkdir-bin"; mkdir -p "$COLLISION_BIN"
+COLLISION_LOG="$TMPROOT/collision-mkdir-log"; : >"$COLLISION_LOG"
+cat >"$COLLISION_BIN/mkdir" <<EOF
+#!/usr/bin/env bash
+target="\${!#}"
+case "\$target" in
+  "$RD"/attempt-*)
+    "$REAL_MKDIR" "\$target" 2>/dev/null || true
+    printf '%s\n' "\$target" >>"$COLLISION_LOG"
+    sleep 0.02
+    exit 1
+    ;;
+esac
+exec "$REAL_MKDIR" "\$@"
+EOF
+chmod +x "$COLLISION_BIN/mkdir"
+LOG="$TMPROOT/bounded-collision-argv"; : >"$LOG"
+CAPTURE="$TMPROOT/bounded-collision.out"
+run_with_deadline "$CAPTURE" env PATH="$COLLISION_BIN:$PATH" CODEX_MAX_ATTEMPTS=0 FAKE_CODEX_LOG="$LOG" \
+  "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD"; rc=$?
+out="$(cat "$CAPTURE")"
+check "verified directory collisions stop at an internal bound" "$rc" "2"
+has "collision bound is explained" "$out" "could not reserve"
+collision_count="$(wc -l <"$COLLISION_LOG" | tr -d '[:space:]')"
+[ "$collision_count" -le 32 ] \
+  && ok "reservation retry bound is small ($collision_count)" \
+  || bad "reservation retried $collision_count times"
+check "bounded collisions launch nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
 
 echo "== resume: concurrent attempts reserve unique evidence =="
 R="$(new_repo res6concurrent)"; P="$(new_plan "$R" auth)"

@@ -47,6 +47,7 @@ RUNDIR="$3"
 
 command -v codex >/dev/null 2>&1 || die "the 'codex' CLI is not installed or not on PATH."
 codex_require_hash || exit 2
+codex_require_json_encoder || exit 2
 [ -f "$HINT" ]    || die "hint file not found: $HINT"
 [ -d "$WORKDIR" ] || die "workdir not found: $WORKDIR"
 [ -d "$RUNDIR" ]  || die "run directory not found: $RUNDIR (pass the RUNDIR printed by codex_run.sh)"
@@ -189,6 +190,8 @@ esac
 
 # Every check that can reject this call has now run. Reserve the attempt with
 # atomic mkdir; a concurrent resume that won the same number makes us rescan.
+RESERVATION_COLLISIONS=0
+MAX_RESERVATION_COLLISIONS=16
 while :; do
   LAST_N="$(last_attempt_number)"
   [ "$LAST_N" -gt 0 ] || die "no prior attempt remains under $RUNDIR"
@@ -198,6 +201,12 @@ while :; do
   fi
   ATTEMPT="$RUNDIR/attempt-$N"
   if mkdir "$ATTEMPT" 2>/dev/null; then break; fi
+  [ -d "$ATTEMPT" ] || \
+    die "could not reserve $ATTEMPT; the failure was not a directory collision"
+  RESERVATION_COLLISIONS=$((RESERVATION_COLLISIONS + 1))
+  if [ "$RESERVATION_COLLISIONS" -ge "$MAX_RESERVATION_COLLISIONS" ]; then
+    die "could not reserve an attempt after $MAX_RESERVATION_COLLISIONS verified directory collisions"
+  fi
 done
 PREV="$RUNDIR/attempt-$LAST_N"
 PREV_REPORT="${4:-$PREV/report.md}"
@@ -254,26 +263,26 @@ if [ "$CONTRACT_OK" = "true" ] && [ -n "$ALLOWLIST" ]; then
   cat "$ATTEMPT/scope.txt" >&2
 fi
 
-cat >"$ATTEMPT/meta.json" <<JSON
-{
-  "hint": "$HINT",
-  "workdir": "$WORKDIR",
-  "rundir": "$RUNDIR",
-  "attempt": $N,
-  "resumed_from": $LAST_N,
-  "mode": "$MODE",
-  "thread_id": "$THREAD_ID",
-  "base_commit": "$BASE_COMMIT",
-  "allowlist": "${ALLOWLIST:-}",
-  "meta_intact": $META_OK,
-  "contract_intact": $CONTRACT_OK,
-  "scope_ok": $([ "$SCOPE_RC" -eq 0 ] && echo true || echo false),
-  "sandbox": "$CODEX_SANDBOX",
-  "model": "${CODEX_MODEL:-default}",
-  "exit_code": $RC,
-  "finished_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-JSON
+SCOPE_OK=false
+[ "$SCOPE_RC" -eq 0 ] && SCOPE_OK=true
+codex_write_json "$ATTEMPT/meta.json" \
+  hint string "$HINT" \
+  workdir string "$WORKDIR" \
+  rundir string "$RUNDIR" \
+  attempt integer "$N" \
+  resumed_from integer "$LAST_N" \
+  mode string "$MODE" \
+  thread_id string "$THREAD_ID" \
+  base_commit string "$BASE_COMMIT" \
+  allowlist string "${ALLOWLIST:-}" \
+  meta_intact boolean "$META_OK" \
+  contract_intact boolean "$CONTRACT_OK" \
+  scope_ok boolean "$SCOPE_OK" \
+  sandbox string "$CODEX_SANDBOX" \
+  model string "${CODEX_MODEL:-default}" \
+  exit_code integer "$RC" \
+  finished_at string "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  || die "could not write JSON resume metadata"
 
 printf 'codex_resume: done (exit=%s)\n  REPORT: %s\n  EVENTS: %s\n  META  : %s\n' \
   "$RC" "$ATTEMPT/report.md" "$ATTEMPT/events.jsonl" "$ATTEMPT/meta.json" >&2

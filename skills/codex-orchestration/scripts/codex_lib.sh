@@ -40,6 +40,44 @@ codex_is_meta_path() {
   esac
 }
 
+# codex_load_allowlist_text <captured_bytes> <array_name>
+# Parse a caller-owned byte capture without reopening its source pathname.
+codex_load_allowlist_text() {
+  local captured="$1" output_name="$2" line
+  local -n output="$output_name"
+  output=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] && output+=("$line")
+  done < <(printf '%s' "$captured")
+  return 0
+}
+
+# codex_load_allowlist <file> <array_name>
+# Convenience wrapper for non-adversarial callers. The commit gate captures
+# and authenticates bytes itself, then calls codex_load_allowlist_text so its
+# digest and parsed patterns are bound to the same single read.
+codex_load_allowlist() {
+  local file="$1" output_name="$2" captured sentinel=$'\034'
+  captured="$(cat -- "$file"; printf '%s' "$sentinel")" || return 1
+  captured="${captured%?}"
+  codex_load_allowlist_text "$captured" "$output_name"
+}
+
+# codex_path_allowed <literal_path> <pattern>...
+# The path is always data. Only allowlist entries are intentional Bash globs.
+codex_path_allowed() {
+  local path="$1" pattern
+  shift
+  for pattern in "$@"; do
+    # shellcheck disable=SC2053  # allowlist entries intentionally are globs
+    [[ "$path" == $pattern ]] && return 0
+  done
+  return 1
+}
+
 # codex_dirty_product <workdir> [base_ref]
 # Changed PRODUCT paths, one per line — metadata excluded. Used both by the
 # dirty preflight and by the "did this task actually do anything?" check, which
@@ -142,6 +180,125 @@ codex_require_hash() {
   printf 'codex: no SHA-256 tool found (looked for sha256sum, shasum, openssl).\n' >&2
   printf '  The plan-integrity check cannot run without one.\n' >&2
   return 1
+}
+
+# --- JSON encoding ---------------------------------------------------------
+# Metadata is evidence, so it must remain valid for every legal path and
+# option value. Shell interpolation cannot safely encode quotes, backslashes,
+# control characters, or newlines. Prefer Python's standard-library encoder
+# and fall back to Perl's core JSON::PP module; fail closed if neither exists.
+CODEX_JSON=()
+CODEX_JSON_KIND=""
+
+codex_require_json_encoder() {
+  local candidate_name
+  local -a candidate=()
+  [ -n "$CODEX_JSON_KIND" ] && return 0
+
+  if [ -n "${CODEX_JSON_CMD:-}" ]; then
+    # shellcheck disable=SC2206  # deliberate word splitting: command override
+    candidate=(${CODEX_JSON_CMD})
+    if [ "${#candidate[@]}" -gt 0 ] &&
+       command -v "${candidate[0]}" >/dev/null 2>&1 &&
+       "${candidate[@]}" -c 'import json' >/dev/null 2>&1; then
+      CODEX_JSON=("${candidate[@]}")
+      CODEX_JSON_KIND=python
+      return 0
+    fi
+    printf 'codex: configured JSON encoder is unavailable or cannot import json: %s\n' \
+      "$CODEX_JSON_CMD" >&2
+    return 1
+  fi
+
+  for candidate_name in python3 python; do
+    if command -v "$candidate_name" >/dev/null 2>&1 &&
+       "$candidate_name" -c 'import json' >/dev/null 2>&1; then
+      CODEX_JSON=("$candidate_name")
+      CODEX_JSON_KIND=python
+      return 0
+    fi
+  done
+  if command -v perl >/dev/null 2>&1 &&
+     perl -MJSON::PP -e 1 >/dev/null 2>&1; then
+    CODEX_JSON=(perl)
+    CODEX_JSON_KIND=perl
+    return 0
+  fi
+
+  printf 'codex: no JSON encoder found (looked for Python json and Perl JSON::PP).\n' >&2
+  printf '  Run metadata cannot be recorded safely without one.\n' >&2
+  return 1
+}
+
+# codex_write_json <output> (<key> <string|integer|boolean> <value>)...
+codex_write_json() {
+  local output="$1" tmp rc
+  shift
+  [ $(( $# % 3 )) -eq 0 ] || {
+    printf 'codex: internal JSON field list is malformed.\n' >&2
+    return 1
+  }
+  codex_require_json_encoder || return 1
+  tmp="$output.tmp.$$"
+  rm -f "$tmp"
+  rc=0
+  case "$CODEX_JSON_KIND" in
+    python)
+      "${CODEX_JSON[@]}" -c '
+import json
+import sys
+
+path = sys.argv[1]
+fields = sys.argv[2:]
+value_by_type = {
+    "string": lambda value: value,
+    "integer": lambda value: int(value),
+    "boolean": lambda value: {"true": True, "false": False}[value],
+}
+result = {}
+for index in range(0, len(fields), 3):
+    key, kind, value = fields[index:index + 3]
+    result[key] = value_by_type[kind](value)
+with open(path, "w", encoding="utf-8", newline="\n") as stream:
+    json.dump(result, stream, ensure_ascii=False, indent=2)
+    stream.write("\n")
+' "$tmp" "$@" || rc=$?
+      ;;
+    perl)
+      "${CODEX_JSON[@]}" -MJSON::PP -e '
+use strict;
+use warnings;
+my $path = shift @ARGV;
+my %result;
+while (@ARGV) {
+  my ($key, $kind, $value) = splice @ARGV, 0, 3;
+  if ($kind eq "string") {
+    $result{$key} = $value;
+  } elsif ($kind eq "integer") {
+    $result{$key} = 0 + $value;
+  } elsif ($kind eq "boolean" && ($value eq "true" || $value eq "false")) {
+    $result{$key} = $value eq "true" ? JSON::PP::true : JSON::PP::false;
+  } else {
+    die "invalid JSON field type or value\n";
+  }
+}
+open my $stream, ">:raw", $path or die "open $path: $!\n";
+print {$stream} JSON::PP->new->utf8->pretty->canonical->encode(\%result);
+close $stream or die "close $path: $!\n";
+' "$tmp" "$@" || rc=$?
+      ;;
+    *) rc=1 ;;
+  esac
+  if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    printf 'codex: JSON metadata encoding failed for %s.\n' "$output" >&2
+    return 1
+  fi
+  mv "$tmp" "$output" || {
+    rm -f "$tmp"
+    printf 'codex: could not publish JSON metadata to %s.\n' "$output" >&2
+    return 1
+  }
 }
 
 # codex_hash_file <path> — hash of one file's contents, or the empty string.
@@ -263,16 +420,30 @@ codex_contract_check() {
 # this check, and reporting "Codex tampered with the plan" for someone else's
 # hint file is a false alarm that trains you to ignore a real one.
 codex_meta_fingerprint() {
-  local d="$1" f key i j
+  local d="$1"
   local LC_ALL=C
-  local files=()
   if [ ! -d "$d" ]; then printf 'absent\n'; return 0; fi
-  # Bind normalized relative paths independently of the hash backend's output
-  # format. NUL delimiters keep file names containing whitespace or newlines
-  # unambiguous. An in-shell insertion sort avoids GNU-only `sort -z`.
+  # Bind normalized relative paths, entry types, modes, file contents and
+  # symlink targets independently of the hash backend's output format. NUL
+  # delimiters keep names containing whitespace or newlines unambiguous. An
+  # in-shell insertion sort avoids GNU-only `sort -z`. Traversal and entry
+  # validation finish before any record reaches the final hash, so a failed
+  # find, stat, readlink or file hash can never produce a trusted partial digest.
   (
+    set -o pipefail
+    local f key i j kind mode payload target target_capture
+    local traversal_fd traversal_pid sentinel=$'\034'
+    local -a files=() kinds=() modes=() payloads=()
     cd "$d" || exit 1
-    while IFS= read -r -d '' f; do files+=("$f"); done < <(find . -type f -print0)
+
+    exec {traversal_fd}< <(find . -mindepth 1 -print0)
+    traversal_pid=$!
+    while IFS= read -r -d '' f <&"$traversal_fd"; do
+      files+=("$f")
+    done
+    exec {traversal_fd}<&-
+    wait "$traversal_pid" || exit 1
+
     for ((i = 1; i < ${#files[@]}; i++)); do
       key="${files[$i]}"
       j=$((i - 1))
@@ -282,10 +453,62 @@ codex_meta_fingerprint() {
       done
       files[$((j + 1))]="$key"
     done
+    i=0
     for f in "${files[@]}"; do
-      printf '%s\0%s\0' "$f" "$(codex_hash_file "$f")"
+      if mode="$(stat -c '%a' -- "$f" 2>/dev/null)"; then
+        :
+      elif mode="$(stat -f '%Lp' "$f" 2>/dev/null)"; then
+        :
+      else
+        exit 1
+      fi
+      payload=""
+      if [ -L "$f" ]; then
+        kind=L
+        target_capture="$(
+          readlink "$f"
+          readlink_rc=$?
+          [ "$readlink_rc" -eq 0 ] || exit "$readlink_rc"
+          printf '%s' "$sentinel"
+        )" || exit 1
+        case "$target_capture" in
+          *"$sentinel") target_capture="${target_capture%?}" ;;
+          *) exit 1 ;;
+        esac
+        case "$target_capture" in
+          *$'\n') target="${target_capture%$'\n'}" ;;
+          *) exit 1 ;;
+        esac
+        payload="$target"
+      elif [ -f "$f" ]; then
+        kind=F
+        payload="$(codex_hash_file "$f")" || exit 1
+      elif [ -d "$f" ]; then
+        kind=D
+      elif [ -p "$f" ]; then
+        kind=P
+      elif [ -S "$f" ]; then
+        kind=S
+      elif [ -b "$f" ]; then
+        kind=B
+      elif [ -c "$f" ]; then
+        kind=C
+      else
+        kind=O
+      fi
+      kinds[$i]="$kind"
+      modes[$i]="$mode"
+      payloads[$i]="$payload"
+      i=$((i + 1))
     done
-  ) | "${CODEX_HASH[@]}" | cut -d' ' -f1
+
+    (
+      for ((i = 0; i < ${#files[@]}; i++)); do
+        printf '%s\0%s\0%s\0%s\0' \
+          "${files[$i]}" "${kinds[$i]}" "${modes[$i]}" "${payloads[$i]}"
+      done
+    ) | "${CODEX_HASH[@]}" | cut -d' ' -f1
+  )
 }
 
 # codex_thread_id <events.jsonl>

@@ -60,13 +60,7 @@ git -C "$WORKDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
 
 # --- read the allowlist -----------------------------------------------------
 patterns=()
-while IFS= read -r line || [ -n "$line" ]; do
-  line="${line%%#*}"
-  line="${line#"${line%%[![:space:]]*}"}"
-  line="${line%"${line##*[![:space:]]}"}"
-  [ -n "$line" ] || continue
-  patterns+=("$line")
-done <"$ALLOWLIST"
+codex_load_allowlist "$ALLOWLIST" patterns
 
 [ "${#patterns[@]}" -gt 0 ] || die "allowlist has no patterns: $ALLOWLIST"
 
@@ -157,12 +151,7 @@ fi
 # --- match ------------------------------------------------------------------
 violations=()
 for f in "${changed[@]}"; do
-  ok=0
-  for p in "${patterns[@]}"; do
-    # shellcheck disable=SC2053  # $p is an intentional glob
-    if [[ "$f" == $p ]]; then ok=1; break; fi
-  done
-  [ "$ok" -eq 1 ] || violations+=("$f")
+  codex_path_allowed "$f" "${patterns[@]}" || violations+=("$f")
 done
 
 if [ "${#violations[@]}" -eq 0 ]; then
