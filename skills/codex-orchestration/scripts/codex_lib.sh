@@ -66,6 +66,53 @@ codex_load_allowlist() {
   codex_load_allowlist_text "$captured" "$output_name"
 }
 
+# --- sorting -----------------------------------------------------------------
+# Both path listings below need a deterministic order, and both used to get it
+# from an in-shell insertion sort to avoid depending on GNU-only `sort -z`.
+# That is O(n^2) in Bash: a task touching 3000 files spent ~22s per listing,
+# and the commit gate builds three of them. Probe once for a `sort` that really
+# handles NUL records, and keep the insertion sort for platforms without one.
+# Both paths must produce identical C-order output, so set CODEX_SORT0 (1 or 0)
+# only to force one deliberately; the tests use it to exercise each. Forcing a
+# path the platform cannot honour fails the listing closed rather than
+# returning an unordered one.
+CODEX_SORT0=""
+codex_sort0_available() {
+  if [ -z "$CODEX_SORT0" ]; then
+    CODEX_SORT0=0
+    if command -v sort >/dev/null 2>&1 &&
+       [ "$(printf 'b\0a\0' | LC_ALL=C sort -z 2>/dev/null | tr '\0' ',')" = "a,b," ]; then
+      CODEX_SORT0=1
+    fi
+  fi
+  [ "$CODEX_SORT0" = "1" ]
+}
+
+# codex_sort_paths <array_name>
+# Sort an array of path-like strings in C byte order, in place. Callers must
+# already have set LC_ALL=C for the fallback to agree with the fast path.
+codex_sort_paths() {
+  local -n sortable="$1"
+  local tmp key i j
+  [ "${#sortable[@]}" -gt 1 ] || return 0
+  if codex_sort0_available; then
+    tmp="$(mktemp)" || return 1
+    [ -n "$tmp" ] || return 1
+    printf '%s\0' "${sortable[@]}" | LC_ALL=C sort -z >"$tmp" || { rm -f "$tmp"; return 1; }
+    sortable=()
+    while IFS= read -r -d '' key; do sortable+=("$key"); done <"$tmp"
+    rm -f "$tmp" || return 1
+    return 0
+  fi
+  for ((i = 1; i < ${#sortable[@]}; i++)); do
+    key="${sortable[$i]}"; j=$((i - 1))
+    while [ "$j" -ge 0 ] && [[ "${sortable[$j]}" > "$key" ]]; do
+      sortable[$((j + 1))]="${sortable[$j]}"; j=$((j - 1))
+    done
+    sortable[$((j + 1))]="$key"
+  done
+}
+
 # codex_path_allowed <literal_path> <pattern>...
 # The path is always data. Only allowlist entries are intentional Bash globs.
 codex_path_allowed() {
@@ -87,7 +134,8 @@ codex_path_allowed() {
 # expanded rather than detected: `--name-only` reports only a rename's
 # destination, so staging from it would leave the source's deletion behind.
 codex_dirty_product0() {
-  local wd="$1" base="${2:-HEAD}" f tmp key i j
+  local wd="$1" base="${2:-HEAD}" f tmp
+  local LC_ALL=C
   local -a files=()
   local -A seen=()
   tmp="$(mktemp)" || { printf 'codex: could not create a temporary file for the dirty-product check.\n' >&2; return 2; }
@@ -104,13 +152,10 @@ codex_dirty_product0() {
   done <"$tmp"
   rm -f "$tmp"
   files=("${!seen[@]}")
-  for ((i = 1; i < ${#files[@]}; i++)); do
-    key="${files[$i]}"; j=$((i - 1))
-    while [ "$j" -ge 0 ] && [[ "${files[$j]}" > "$key" ]]; do
-      files[$((j + 1))]="${files[$j]}"; j=$((j - 1))
-    done
-    files[$((j + 1))]="$key"
-  done
+  codex_sort_paths files || {
+    printf 'codex: could not order the changed-product listing from %s.\n' "$wd" >&2
+    return 2
+  }
   for f in "${files[@]}"; do printf '%s\0' "$f"; done
 }
 
@@ -137,8 +182,12 @@ codex_dirty_product() {
 # The plan's stable identity. A directory name is a display label, not an id:
 # deleting `.codex-instructions/auth/` and writing a new plan under the same
 # name would otherwise inherit the old plan's task commits and report its
-# first task as already finished. /codex-spec writes plan-id; the basename is
-# only a fallback for plans made before that existed.
+# first task as already finished.
+#
+# The basename branch is a read-only courtesy for inspecting a malformed plan,
+# NOT a supported plan identity: codex_run.sh refuses to start a plan-directory
+# task without a `plan-id` file, and codex_commit.sh refuses to publish one.
+# Treat a status report that falls back to the basename as a plan to repair.
 codex_plan_id() {
   local d="$1"
   if [ -s "$d/plan-id" ]; then
@@ -310,6 +359,20 @@ codex_hash_file() {
 # codex_contract_anchor <workdir> <rundir>
 # Trusted copy of a run contract, kept under Git metadata rather than the
 # workspace-writable .codex-runs directory.
+#
+# TRUST ASSUMPTION — this anchor is the root of the whole integrity chain, so
+# state it plainly: it holds only while the Git common directory stays outside
+# what the delegated run may write. `codex exec --sandbox workspace-write`
+# makes the workspace writable; verify that your Codex CLI keeps the Git
+# metadata directory out of its writable roots (and never point
+# `writable_roots` at it) before relying on any verdict from these gates.
+# Under `--sandbox danger-full-access` the assumption does not hold at all,
+# which is why the Skill requires an isolated environment for that level.
+#
+# Anchors accumulate: one small file per run directory, never pruned, because
+# a deleted anchor would make a later audit of an old run unverifiable. Prune
+# `<git-common-dir>/codex-orchestration-contracts/` alongside the run
+# directories it describes.
 codex_contract_anchor() {
   local wd="$1" rundir="$2" gitdir key rundir_abs
   gitdir="$(git -C "$wd" rev-parse --git-common-dir 2>/dev/null)" || return 1
@@ -324,7 +387,7 @@ codex_contract_anchor() {
 
 # Fixed frozen-contract members. Missing optional members are recorded too, so
 # deleting an allowlist or adding a test file is itself a contract mutation.
-CODEX_CONTRACT_FILES=(base_commit task.md allowlist test plan_dir plan-id test_source workdir)
+CODEX_CONTRACT_FILES=(base_commit task.md allowlist allowlist_source test plan_dir plan-id test_source workdir)
 
 # codex_contract_write <rundir> <workdir> <is_git>
 codex_contract_write() {
@@ -382,7 +445,7 @@ codex_contract_check() {
   while IFS=' ' read -r kind hash rel extra || [ -n "${kind:-}" ]; do
     [ -z "${extra:-}" ] || { printf 'codex: malformed frozen contract entry.\n' >&2; return 1; }
     case "$rel" in
-      base_commit|task.md|allowlist|test|plan_dir|plan-id|test_source|workdir) ;;
+      base_commit|task.md|allowlist|allowlist_source|test|plan_dir|plan-id|test_source|workdir) ;;
       *) printf 'codex: unexpected frozen contract member: %s\n' "$rel" >&2; return 1 ;;
     esac
     [ -z "${seen[$rel]+_}" ] || { printf 'codex: duplicate frozen contract member: %s\n' "$rel" >&2; return 1; }
@@ -425,34 +488,32 @@ codex_meta_fingerprint() {
   if [ ! -d "$d" ]; then printf 'absent\n'; return 0; fi
   # Bind normalized relative paths, entry types, modes, file contents and
   # symlink targets independently of the hash backend's output format. NUL
-  # delimiters keep names containing whitespace or newlines unambiguous. An
-  # in-shell insertion sort avoids GNU-only `sort -z`. Traversal and entry
-  # validation finish before any record reaches the final hash, so a failed
-  # find, stat, readlink or file hash can never produce a trusted partial digest.
+  # delimiters keep names containing whitespace or newlines unambiguous.
+  # Traversal and entry validation finish before any record reaches the final
+  # hash, so a failed find, stat, readlink or file hash can never produce a
+  # trusted partial digest.
   (
     set -o pipefail
-    local f key i j kind mode payload target target_capture
-    local traversal_fd traversal_pid sentinel=$'\034'
+    local f i kind mode payload target target_capture
+    local traversal_tmp sentinel=$'\034'
     local -a files=() kinds=() modes=() payloads=()
     cd "$d" || exit 1
 
-    exec {traversal_fd}< <(find . -mindepth 1 -print0)
-    traversal_pid=$!
-    while IFS= read -r -d '' f <&"$traversal_fd"; do
+    # Via a temporary file, not a process substitution: bash only sets `$!` for
+    # `<(...)` from 5.1 onwards, so `wait` on it cannot report find's exit
+    # status on the 4.4+ range this library claims to support — under `set -u`
+    # it aborts the fingerprint outright. A file keeps the status check honest
+    # on every supported bash, matching how the git helpers already capture
+    # NUL-delimited output.
+    traversal_tmp="$(mktemp)" || exit 1
+    [ -n "$traversal_tmp" ] || exit 1
+    find . -mindepth 1 -print0 >"$traversal_tmp" || { rm -f "$traversal_tmp"; exit 1; }
+    while IFS= read -r -d '' f; do
       files+=("$f")
-    done
-    exec {traversal_fd}<&-
-    wait "$traversal_pid" || exit 1
+    done <"$traversal_tmp"
+    rm -f "$traversal_tmp" || exit 1
 
-    for ((i = 1; i < ${#files[@]}; i++)); do
-      key="${files[$i]}"
-      j=$((i - 1))
-      while [ "$j" -ge 0 ] && [[ "${files[$j]}" > "$key" ]]; do
-        files[$((j + 1))]="${files[$j]}"
-        j=$((j - 1))
-      done
-      files[$((j + 1))]="$key"
-    done
+    codex_sort_paths files || exit 1
     i=0
     for f in "${files[@]}"; do
       if mode="$(stat -c '%a' -- "$f" 2>/dev/null)"; then

@@ -19,7 +19,9 @@ Use a task plan for sizeable work. Follow this order:
 
 1. Define plan-level requirements, constraints, and observable acceptance criteria.
 2. Split the work into independently reviewable `T<N>` tasks.
-3. Give every task an explicit product-file allowlist and test command.
+3. Write a stable `plan-id`, and give every task an explicit product-file
+   allowlist and test command. The run preflight refuses a plan task missing
+   any of them rather than spending a Codex run first.
 4. Run `codex_status.sh` to identify the next uncommitted task.
 5. Run `codex_run.sh`, then independently inspect its evidence and the diff.
 6. Use `codex_resume.sh` only for a targeted, bounded retry.
@@ -91,9 +93,10 @@ authorization and an appropriate workflow.
 
 - Keep the sandbox at the smallest level that works; `workspace-write` is the
   default and `danger-full-access` requires an isolated environment and user authorization.
-- Treat exit `2` as an unsafe preflight or usage failure, `3` as a scope or
-  pending-task failure, `4` as plan or contract tampering, `5` as a moved HEAD
-  or publication conflict, and `6` as contract drift before commit.
+- Treat exit `1` as a failed test gate or a task that changed no product files,
+  `2` as an unsafe preflight or usage failure, `3` as a scope or pending-task
+  failure, `4` as plan or contract tampering, `5` as a moved HEAD or
+  publication conflict, and `6` as contract drift before commit.
 - Do not use this workflow for a trivial change unless the user explicitly
   wants delegation.
 - Do not let a generated report replace independent verification.

@@ -50,5 +50,5 @@ does not publish to a remote.
 
 The plugin-only manifest, slash-command files, and dedicated reviewer agent are
 intentionally retired. The six portable scripts and this Skill's references
-retain the supported workflow, so no live plugin dependency remains before the
-legacy plugin repository is retired or deleted.
+carry the whole supported workflow; nothing here depends on the legacy plugin
+repository, whatever becomes of it.

@@ -113,6 +113,49 @@ check "live allowlist-only drift is refused" "$rc" "6"
 has "live allowlist drift is named" "$out" "T1.allowlist"
 check "live plan drift makes no commit" "$(ncommits "$R")" "$before"
 
+echo "== a CODEX_ALLOWLIST run is committable =="
+# The drift gate used to look only at T<N>.allowlist, so a run whose allowlist
+# came from CODEX_ALLOWLIST — a documented control — reported phantom drift and
+# could never be committed.
+R="$(new_repo commit-env-allowlist)"; P="$(new_plan "$R" auth)"
+mv "$P/T1.allowlist" "$P/shared.allowlist"
+RD="$(FAKE_CODEX_TOUCH=src/a.py CODEX_ALLOWLIST="$P/shared.allowlist" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1 | sed -n 's/^  RUNDIR: //p' | tail -1)"
+check "the run records where its allowlist came from" \
+  "$(cat "$RD/allowlist_source")" "$P/shared.allowlist"
+before="$(ncommits "$R")"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "an out-of-tree allowlist still commits" "$rc" "0"
+hasnt "no phantom plan-drift diagnostic" "$out" "the plan changed"
+check "the task commit is published" "$(ncommits "$R")" "$((before + 1))"
+
+# ...and editing that allowlist after the run is still drift.
+R="$(new_repo commit-env-allowlist-drift)"; P="$(new_plan "$R" auth)"
+mv "$P/T1.allowlist" "$P/shared.allowlist"
+RD="$(FAKE_CODEX_TOUCH=src/a.py CODEX_ALLOWLIST="$P/shared.allowlist" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1 | sed -n 's/^  RUNDIR: //p' | tail -1)"
+printf 'src/*\ndocs/*\n' >"$P/shared.allowlist"
+before="$(ncommits "$R")"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "widening the recorded allowlist after the run is drift" "$rc" "6"
+has "drift names the real allowlist" "$out" "shared.allowlist"
+check "allowlist drift makes no commit" "$(ncommits "$R")" "$before"
+
+# Deleting the recorded source is drift too, whatever else appears in its place.
+R="$(new_repo commit-env-allowlist-swap)"; P="$(new_plan "$R" auth)"
+mv "$P/T1.allowlist" "$P/shared.allowlist"
+RD="$(FAKE_CODEX_TOUCH=src/a.py CODEX_ALLOWLIST="$P/shared.allowlist" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1 | sed -n 's/^  RUNDIR: //p' | tail -1)"
+rm -f "$P/shared.allowlist"; printf 'src/*\n' >"$P/T1.allowlist"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "a substituted allowlist file is refused" "$rc" "6"
+
+# A rundir frozen without the origin cannot be trusted to have one inferred.
+R="$(new_repo commit-allowlist-origin-missing)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"
+rm -f "$RD/allowlist_source"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "a missing allowlist origin is refused" "$rc" "6"
+
 echo "== Git-metadata overwrite cannot widen live scope =="
 R="$(new_repo commit-snapshot-bypass)"; P="$(new_plan "$R" auth)"
 cat >"$P/test" <<'EOF'
@@ -403,6 +446,31 @@ out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
 check "unresolvable symbolic HEAD is refused" "$rc" "2"
 has "unresolvable HEAD diagnostic" "$out" "does not resolve"
 
+echo "== a refused publication is retryable =="
+# Status evidence used to be staged before the compare-and-swap, so every
+# publication conflict left the index dirty and the retry refused itself with
+# "the Git index already contains staged changes" — this gate's own residue,
+# reported as the operator mixing in unrelated work.
+R="$(new_repo commit-conflict-retry)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"
+base="$(git -C "$R" rev-parse HEAD)"; git -C "$R" branch redirect "$base"
+symref_hook="$TMPROOT/retry-symref"
+cat >"$symref_hook" <<EOF
+#!/usr/bin/env bash
+git -C "$R" symbolic-ref refs/heads/work refs/heads/redirect
+EOF
+chmod +x "$symref_hook"
+out="$(CODEX_COMMIT_TEST_BEFORE_PUBLISH="$symref_hook" "$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "the publication conflict is still refused" "$rc" "5"
+check "a refused publication stages nothing" "$(git -C "$R" diff --cached --name-only | wc -l | tr -d '[:space:]')" "0"
+git -C "$R" symbolic-ref -d refs/heads/work
+git -C "$R" update-ref refs/heads/work "$base"
+before="$(ncommits "$R")"
+out="$("$S/codex_commit.sh" "$P" T1 "$R" "$RD" 2>&1)"; rc=$?
+check "the same command succeeds once the conflict is resolved" "$rc" "0"
+hasnt "the retry does not blame pre-staged work" "$out" "already contains staged changes"
+check "the retry publishes exactly one commit" "$(ncommits "$R")" "$((before + 1))"
+check "a published task leaves a clean index" "$(git -C "$R" diff --cached --name-only | wc -l | tr -d '[:space:]')" "0"
+
 echo "== newline paths stay one staged path =="
 R="$(new_repo commit-newline-path)"; P="$(new_plan "$R" auth)"; RD="$(run_task "$R" "$P" T1)"
 newline_path=$'src/newline\nname.py'; printf 'newline\n' >"$R/$newline_path"
@@ -506,7 +574,21 @@ check "complete plan returns 0" "$rc" "0"
 has "complete count" "$out" "2/2 committed"
 
 printf 'mid-flight\n' >>"$R/src/a.py"; out="$("$S/codex_status.sh" "$P" "$R" 2>&1)"
-has "dirty worktree is evidence" "$out" "worktree dirty"
+has "uncommitted product change is evidence" "$out" "uncommitted product changes"
+
+# The plan directory is untracked until the first task commit stages it. Raw
+# `git status` counts that, so a plan that has only just been written reported
+# a task in flight before anything had run.
+R="$(new_repo status-fresh-plan)"; P="$(new_plan "$R" auth)"
+out="$("$S/codex_status.sh" "$P" "$R" 2>&1)"
+hasnt "a freshly written plan is not mid-flight" "$out" "mid-flight"
+has "a freshly written plan still reports progress" "$out" "0/2 committed"
+printf 'note\n' >"$P/interfaces.md"
+out="$("$S/codex_status.sh" "$P" "$R" 2>&1)"
+hasnt "orchestrator metadata edits are not mid-flight" "$out" "mid-flight"
+mkdir -p "$R/.codex-runs/leftover"; printf 'x\n' >"$R/.codex-runs/leftover/report.md"
+out="$("$S/codex_status.sh" "$P" "$R" 2>&1)"
+hasnt "run artifacts are not mid-flight" "$out" "mid-flight"
 
 P2="$(new_plan "$R" billing)"; out="$("$S/codex_status.sh" "$P2" "$R" 2>&1)"; rc=$?
 check "different plan identity starts at zero" "$rc" "3"

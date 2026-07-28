@@ -53,6 +53,7 @@ fi
 RECORDED_PLAN="$(cat "$RUNDIR/plan_dir")"
 [ "$RECORDED_PLAN" = "$TASKDIR_ABS" ] || contract_failure "the supplied plan is not this run's frozen plan identity"
 [ -f "$RUNDIR/allowlist" ] || contract_failure "the frozen contract has no allowlist"
+[ -s "$RUNDIR/allowlist_source" ] || contract_failure "the frozen contract does not record where its allowlist came from"
 [ -f "$RUNDIR/task.md" ] || contract_failure "the frozen contract has no task packet"
 [ -f "$RUNDIR/plan-id" ] || contract_failure "the frozen contract has no plan identity"
 [ -f "$RUNDIR/base_commit" ] || contract_failure "the frozen contract has no baseline"
@@ -136,6 +137,9 @@ PLAN_ID_DIGEST="$(codex_hash_file "$RUNDIR/plan-id")" || \
 TEST_DIGEST="$(codex_hash_file "$RUNDIR/test")" || \
   contract_failure "could not retain the frozen test digest"
 RECORDED_TEST_SOURCE="$( [ -f "$RUNDIR/test_source" ] && cat "$RUNDIR/test_source" || true)"
+RECORDED_ALLOWLIST_SOURCE="$(cat "$RUNDIR/allowlist_source")" || \
+  contract_failure "could not retain the frozen allowlist origin"
+[ -n "$RECORDED_ALLOWLIST_SOURCE" ] || contract_failure "the frozen allowlist origin is empty"
 PLAN_FINGERPRINT="$(codex_meta_fingerprint "$TASKDIR_ABS")" || \
   contract_failure "could not retain the live plan fingerprint"
 ALLOWLIST_PATTERNS=()
@@ -151,9 +155,12 @@ plan_drift_gate() {
   local live_test
   local -a drift=()
   [ "$(codex_hash_file "$TASK_MD")" = "$TASK_DIGEST" ] || drift+=("$TASK_ID.md")
-  [ -f "$TASKDIR_ABS/$TASK_ID.allowlist" ] &&
-    [ "$(codex_hash_file "$TASKDIR_ABS/$TASK_ID.allowlist")" = "$ALLOWLIST_DIGEST" ] ||
-    drift+=("$TASK_ID.allowlist")
+  # Compare the allowlist where the run actually read it. Assuming
+  # `T<N>.allowlist` reported drift on every CODEX_ALLOWLIST run — a supported
+  # control — and left that task permanently uncommittable, with a diagnostic
+  # that blamed a plan edit nobody had made.
+  [ "$(codex_hash_file "$RECORDED_ALLOWLIST_SOURCE")" = "$ALLOWLIST_DIGEST" ] ||
+    drift+=("$RECORDED_ALLOWLIST_SOURCE")
   [ "$(codex_hash_file "$TASKDIR_ABS/plan-id")" = "$PLAN_ID_DIGEST" ] || drift+=("plan-id")
   live_test="$(codex_test_file "$TASKDIR_ABS" "$TASK_ID")"
   if [ -n "$live_test" ]; then
@@ -330,13 +337,6 @@ EOF
 CANDIDATE="$(git -C "$WORKDIR_ABS" commit-tree "$TREE" -p "$BASE_COMMIT" <"$MESSAGE_FILE")" || \
   die "could not create the candidate task commit"
 
-# Keep normal status evidence clean without affecting the already-fixed
-# candidate. Only selected task paths are added; unrelated entries staged by a
-# test or concurrent writer remain visible in the real index.
-GIT_LITERAL_PATHSPECS=1 git -C "$WORKDIR_ABS" add -A -- "${STAGE_PATHS[@]}" || \
-  die "could not update status evidence for the cleared task paths"
-head_gate
-
 # Test-only seam: a real competing writer can change refs after the candidate
 # exists but before the CAS. Normal runs leave this unset.
 if [ -n "${CODEX_COMMIT_TEST_BEFORE_PUBLISH:-}" ]; then
@@ -365,6 +365,18 @@ if [ "$PUBLISH_RC" -ne 0 ]; then
   # and may remain unreachable until Git's normal garbage collection reclaims it.
   say "publication conflict: $HEAD_REF changed after candidate creation; task commit was not published"
   exit 5
+fi
+
+# Only now, with the commit published, bring the real index up to the tree that
+# was published. Staging before the CAS left the index dirty on every
+# publication conflict, and the next attempt then refused itself with "the Git
+# index already contains staged changes" — blaming the operator for this gate's
+# own residue. Only selected task paths are added; unrelated entries staged by
+# a test or a concurrent writer remain visible.
+if ! GIT_LITERAL_PATHSPECS=1 git -C "$WORKDIR_ABS" add -A -- "${STAGE_PATHS[@]}"; then
+  # The task IS committed; this is cosmetic bookkeeping, so do not report the
+  # publication as failed. Say exactly what is left to do.
+  say "warning: $TASK_ID was published, but the index could not be refreshed. Run 'git reset' in $WORKDIR_ABS before the next task."
 fi
 printf '%s\n' "$HEAD_REF" >"$RUNDIR/commit.ref" || contract_failure "could not write commit target evidence"
 SHA="$(git -C "$WORKDIR_ABS" rev-parse --short "$CANDIDATE")"

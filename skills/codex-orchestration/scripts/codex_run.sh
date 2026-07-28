@@ -28,6 +28,7 @@
 #   <rundir>/task.md                  ┐ the frozen contract — the gates read
 #   <rundir>/allowlist                ├ THESE, never the plan's live files
 #   <rundir>/test                     ┘
+#   <rundir>/allowlist_source         where the allowlist was read from
 #   <rundir>/plan_dir                 which plan this run belongs to
 #   <rundir>/thread_id                session id for a targeted resume
 #
@@ -54,7 +55,8 @@
 #   0   Codex succeeded and stayed inside the allowlist
 #   2   usage / preflight error (Codex was never started)
 #   3   Codex succeeded but changed files outside the allowlist
-#   4   Codex modified orchestration metadata (it must never do this)
+#   4   the plan directory or the frozen contract changed during the run
+#       (Codex must never touch either; a changed contract voids every verdict)
 #   *   otherwise, Codex's own exit code
 #
 # NOTE ON CODEX CLI FLAGS: `codex exec` is non-interactive, so there is no
@@ -105,6 +107,30 @@ if [ -z "$ALLOWLIST" ]; then
   [ -f "$CANDIDATE" ] && ALLOWLIST="$CANDIDATE"
 fi
 [ -z "$ALLOWLIST" ] || [ -f "$ALLOWLIST" ] || die "allowlist not found: $ALLOWLIST"
+ALLOWLIST_SOURCE=""
+if [ -n "$ALLOWLIST" ]; then
+  ALLOWLIST_SOURCE="$(cd -- "$(dirname -- "$ALLOWLIST")" && pwd)/$(basename -- "$ALLOWLIST")" \
+    || die "could not resolve the allowlist path: $ALLOWLIST"
+fi
+
+# --- plan-packet preflight --------------------------------------------------
+# A task packet that lives in a plan directory is destined for the commit gate,
+# and that gate refuses a run with no plan identity, no allowlist, or an
+# allowlist with no patterns. Checking here rather than there is the whole
+# point: otherwise a plan missing one small file spends a full Codex run before
+# anything says so, and the diagnostic arrives at the one moment it cannot be
+# acted on. A one-off packet outside $CODEX_META_DIR keeps the unguarded
+# experiment path and is deliberately left alone.
+if [ -n "$PLAN_WATCH" ]; then
+  [ -s "$PLAN_DIR/plan-id" ] || die "plan directory has no non-empty 'plan-id' file: $PLAN_DIR/plan-id. The commit gate identifies task commits by that value and refuses to publish without it; write a stable identity before running the task."
+  [ -n "$(tr -d '[:space:]' <"$PLAN_DIR/plan-id")" ] || die "'$PLAN_DIR/plan-id' contains only whitespace. Write a stable, non-empty plan identity before running the task."
+  [ -n "$ALLOWLIST" ] || die "task packet '$INSTRUCTION' is in a plan directory but has no allowlist. The scope gate and the commit gate both require one; create ${INSTRUCTION%.md}.allowlist, or set CODEX_ALLOWLIST."
+  PREFLIGHT_PATTERNS=()
+  codex_load_allowlist "$ALLOWLIST" PREFLIGHT_PATTERNS \
+    || die "could not read the allowlist: $ALLOWLIST"
+  [ "${#PREFLIGHT_PATTERNS[@]}" -gt 0 ] \
+    || die "allowlist has no patterns: $ALLOWLIST. An empty allowlist admits nothing and would fail the scope gate for every change."
+fi
 
 # --- git preflight ----------------------------------------------------------
 # Codex runs unattended with write access. Two states make that unsafe, and
@@ -205,7 +231,13 @@ printf '%s' "$WORKDIR_ABS" >"$RUNDIR/workdir"
 # also lets codex_commit.sh detect the plan being edited between the run and
 # the commit, which the run-scoped fingerprint below cannot see.
 cp "$INSTRUCTION" "$RUNDIR/task.md"
-[ -z "$ALLOWLIST" ] || cp "$ALLOWLIST" "$RUNDIR/allowlist"
+# Both the bytes and where they came from: the commit gate re-reads the live
+# allowlist to detect drift, and without the recorded origin it can only guess
+# `T<N>.allowlist`, which reports a phantom drift for every CODEX_ALLOWLIST run.
+if [ -n "$ALLOWLIST" ]; then
+  cp "$ALLOWLIST" "$RUNDIR/allowlist"
+  printf '%s' "$ALLOWLIST_SOURCE" >"$RUNDIR/allowlist_source"
+fi
 # Recorded so codex_resume.sh fingerprints the same plan rather than guessing.
 printf '%s' "$PLAN_DIR" >"$RUNDIR/plan_dir"
 [ ! -f "$PLAN_DIR/plan-id" ] || cp "$PLAN_DIR/plan-id" "$RUNDIR/plan-id"
@@ -215,6 +247,11 @@ FROZEN_TEST="$(codex_test_file "$PLAN_DIR" "$TASK_ID")"
 if [ -n "$FROZEN_TEST" ]; then
   cp "$FROZEN_TEST" "$RUNDIR/test"
   printf '%s' "$FROZEN_TEST" >"$RUNDIR/test_source"
+elif [ -n "$PLAN_WATCH" ]; then
+  # Not fatal — CODEX_ALLOW_NO_TESTS=1 is a deliberate, reviewable escape — but
+  # say it now rather than after the run has been spent.
+  printf 'codex_run: warning: no test commands for %s (looked for %s.test and %s). The commit gate will refuse this task unless CODEX_ALLOW_NO_TESTS=1.\n' \
+    "$TASK_ID" "$PLAN_DIR/$TASK_ID" "$PLAN_DIR/test" >&2
 fi
 
 codex_contract_write "$RUNDIR" "$WORKDIR" "$IS_GIT" \
@@ -287,7 +324,7 @@ fi
 CONTRACT_OK=true
 if ! codex_contract_check "$RUNDIR" "$WORKDIR" "$CONTRACT_MANIFEST_HASH"; then
   CONTRACT_OK=false
-  printf 'codex_run: FAIL 窶・the frozen contract changed during the run.\n' >&2
+  printf 'codex_run: FAIL — the frozen contract changed during the run.\n' >&2
   printf '  Task, allowlist, test, workdir and base evidence must remain immutable.\n' >&2
 fi
 

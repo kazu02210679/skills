@@ -69,8 +69,11 @@ for id in "${ids[@]}"; do
     printf '  %-4s pending  %-9s %s\n' "$id" '' "$title"
   fi
 done
-dirty="$(git -C "$WORKDIR" status --porcelain)" || die "could not read worktree status"
-[ -z "$dirty" ] || dirty=' (worktree dirty — a task is mid-flight)'
+# Product changes only, the same view every other gate takes. Raw `git status`
+# also counts the untracked plan directory, so a plan that had only just been
+# written — nothing run, nothing mid-flight — reported a task in flight.
+dirty="$(codex_dirty_product "$WORKDIR" HEAD)" || die "could not determine changed product files"
+[ -z "$dirty" ] || dirty=' (uncommitted product changes — a task is mid-flight)'
 printf '%d/%d committed%s\n' "$done_count" "${#ids[@]}" "$dirty"
 [ "$done_count" -eq "${#ids[@]}" ] && exit 0
 exit 3
