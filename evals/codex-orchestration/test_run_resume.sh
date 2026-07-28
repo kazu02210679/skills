@@ -164,6 +164,31 @@ for backend in "sha256sum" "shasum -a 256" "openssl dgst -sha256 -r"; do
                    || bad "$tool returns the same value for different files"
 done
 
+echo "== plan fingerprints fail when a per-file hash fails =="
+# The final plan-record stream contains NUL delimiters; regular file contents
+# in this fixture do not. This backend therefore fails only while hashing an
+# individual file, then succeeds for the final aggregate hash. A direct caller
+# that did not already enable pipefail must still receive a failure.
+FILE_HASH_FAIL_BACKEND="$TMPROOT/fail-regular-file-hash"
+cat >"$FILE_HASH_FAIL_BACKEND" <<'EOF'
+#!/usr/bin/env python
+import hashlib
+import sys
+
+data = sys.stdin.buffer.read()
+if b"\0" not in data:
+    raise SystemExit(77)
+print(hashlib.sha256(data).hexdigest() + "  -")
+EOF
+chmod +x "$FILE_HASH_FAIL_BACKEND"
+R="$(new_repo fingerprint-file-hash-failure)"; P="$(new_plan "$R" auth)"
+direct_out="$(CODEX_HASH_CMD="$FILE_HASH_FAIL_BACKEND" bash -c \
+  '. "$1"; codex_require_hash; codex_meta_fingerprint "$2"' \
+  _ "$S/codex_lib.sh" "$P" 2>"$TMPROOT/fingerprint-file-hash.err")"; rc=$?
+[ "$rc" -ne 0 ] && ok "a failed per-file hash makes the fingerprint fail" \
+                   || bad "a failed per-file hash returned a trusted fingerprint"
+check "a failed per-file hash emits no fingerprint" "$direct_out" ""
+
 echo "== metadata tampering is fatal =="
 R="$(new_repo run4)"; P="$(new_plan "$R" auth)"
 out=$(FAKE_CODEX_TOUCH=".codex-instructions/auth/T1.allowlist" \

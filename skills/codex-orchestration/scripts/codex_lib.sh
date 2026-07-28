@@ -430,6 +430,7 @@ codex_meta_fingerprint() {
   # validation finish before any record reaches the final hash, so a failed
   # find, stat, readlink or file hash can never produce a trusted partial digest.
   (
+    set -o pipefail
     local f key i j kind mode payload target target_capture
     local traversal_fd traversal_pid sentinel=$'\034'
     local -a files=() kinds=() modes=() payloads=()
@@ -501,7 +502,6 @@ codex_meta_fingerprint() {
       i=$((i + 1))
     done
 
-    set -o pipefail
     (
       for ((i = 0; i < ${#files[@]}; i++)); do
         printf '%s\0%s\0%s\0%s\0' \
