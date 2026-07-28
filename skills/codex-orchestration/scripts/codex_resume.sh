@@ -65,7 +65,7 @@ git -C "$WORKDIR" rev-parse --verify --quiet "$BASE_COMMIT^{commit}" >/dev/null 
   || die "frozen base commit does not resolve in the recorded workdir: '$BASE_COMMIT'"
 
 if ! codex_contract_check "$RUNDIR" "$WORKDIR"; then
-  printf 'codex_resume: FAIL 窶・the frozen contract is missing or changed.\n' >&2
+  printf 'codex_resume: FAIL — the frozen contract is missing or changed.\n' >&2
   exit 4
 fi
 
@@ -125,8 +125,22 @@ THREAD_ID=""
 
 ALLOWLIST=""
 if [ -f "$RUNDIR/allowlist" ]; then ALLOWLIST="$RUNDIR/allowlist"; fi
-if [ -n "${CODEX_ALLOWLIST:-}" ] && [ "$CODEX_ALLOWLIST" != "$ALLOWLIST" ]; then
-  die "CODEX_ALLOWLIST cannot replace this run's frozen allowlist; use $ALLOWLIST"
+# A resume always judges against the frozen copy. An exported CODEX_ALLOWLIST
+# left over from the run that created this rundir names the same contract and
+# must not be treated as an attempt to swap it — only a genuinely different
+# path is refused.
+RECORDED_ALLOWLIST_SOURCE=""
+[ -f "$RUNDIR/allowlist_source" ] && RECORDED_ALLOWLIST_SOURCE="$(cat "$RUNDIR/allowlist_source")"
+if [ -n "${CODEX_ALLOWLIST:-}" ]; then
+  SUPPLIED_ALLOWLIST="$CODEX_ALLOWLIST"
+  if [ -e "$SUPPLIED_ALLOWLIST" ]; then
+    SUPPLIED_ALLOWLIST="$(cd -- "$(dirname -- "$CODEX_ALLOWLIST")" && pwd)/$(basename -- "$CODEX_ALLOWLIST")" \
+      || die "could not resolve CODEX_ALLOWLIST: $CODEX_ALLOWLIST"
+  fi
+  if [ "$CODEX_ALLOWLIST" != "$ALLOWLIST" ] &&
+     { [ -z "$RECORDED_ALLOWLIST_SOURCE" ] || [ "$SUPPLIED_ALLOWLIST" != "$RECORDED_ALLOWLIST_SOURCE" ]; }; then
+    die "CODEX_ALLOWLIST cannot replace this run's frozen allowlist; use $ALLOWLIST (this run froze ${RECORDED_ALLOWLIST_SOURCE:-an unrecorded source})"
+  fi
 fi
 
 CODEX_SANDBOX="${CODEX_SANDBOX:-workspace-write}"
@@ -197,7 +211,7 @@ while :; do
   [ "$LAST_N" -gt 0 ] || die "no prior attempt remains under $RUNDIR"
   N=$((LAST_N + 1))
   if [ "$MAX" != "0" ] && [ "$N" -gt "$MAX" ]; then
-    die "attempt $N would exceed CODEX_MAX_ATTEMPTS=$MAX. Codex is not converging 窶・stop and escalate to the user with the reports in $RUNDIR, or raise the cap deliberately."
+    die "attempt $N would exceed CODEX_MAX_ATTEMPTS=$MAX. Codex is not converging — stop and escalate to the user with the reports in $RUNDIR, or raise the cap deliberately."
   fi
   ATTEMPT="$RUNDIR/attempt-$N"
   if mkdir "$ATTEMPT" 2>/dev/null; then break; fi
@@ -249,7 +263,7 @@ fi
 CONTRACT_OK=true
 if ! codex_contract_check "$RUNDIR" "$WORKDIR"; then
   CONTRACT_OK=false
-  printf 'codex_resume: FAIL 窶・the frozen contract changed during the resume.\n' >&2
+  printf 'codex_resume: FAIL — the frozen contract changed during the resume.\n' >&2
 fi
 
 # --- scope gate -------------------------------------------------------------

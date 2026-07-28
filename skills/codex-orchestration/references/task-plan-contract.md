@@ -35,6 +35,12 @@ Every task packet must state the task boundary, acceptance criteria, test
 policy, and stuck protocol. Every task needs a non-empty allowlist and at least
 one test command unless an explicit, reviewed exception is authorized.
 
+`codex_run.sh` enforces the first three for any packet inside `CODEX_META_DIR`:
+it refuses to start without a non-empty `plan-id` and an allowlist holding at
+least one pattern, and warns when no test command resolves. A packet kept
+outside that directory has no plan to protect and runs unguarded, but the
+commit gate will not publish it.
+
 ## Allowlists and product scope
 
 Write one Bash glob per line. Ignore blank lines and lines beginning with `#`.
@@ -60,6 +66,7 @@ it calls Codex:
 ├── workdir
 ├── task.md
 ├── allowlist
+├── allowlist_source
 ├── test
 ├── plan_dir
 ├── plan-id
@@ -93,7 +100,18 @@ Run the scripts from the installed Skill directory:
 
 Require Bash 4.4 or later, Git, the `codex` CLI for run and resume, and one
 SHA-256 backend: `sha256sum`, `shasum -a 256`, or `openssl dgst -sha256 -r`.
-Set `CODEX_HASH_CMD` only to select a compatible backend deliberately.
+Set `CODEX_HASH_CMD` only to select a compatible backend deliberately. A `sort`
+that accepts `-z` is used when present and is a performance path only; the
+scripts fall back to an in-shell sort without it.
+
+The frozen contract's trusted copy lives under the Git common directory, so
+every verdict these gates return depends on the delegated run being unable to
+write there. Confirm that the Codex CLI's `workspace-write` sandbox excludes
+Git metadata before relying on them, and treat `danger-full-access` as
+offering no integrity guarantee at all. The anchors are small and are never
+pruned automatically; delete
+`<git-common-dir>/codex-orchestration-contracts/` entries along with the run
+directories they describe.
 
 Common controls are `CODEX_MODEL`, `CODEX_SANDBOX`, `CODEX_EXTRA_ARGS`,
 `CODEX_TIMEOUT`, `CODEX_ALLOWLIST`, `CODEX_INTERFACES`, and `CODEX_META_DIR`.
@@ -119,7 +137,9 @@ state, `3` for scope violations, `5` when `HEAD` moved or publication conflicts,
 and `6` when the frozen contract or live plan drifted. It pins the current named
 branch ref, creates one candidate commit, and updates that same ref with a
 compare-and-swap against the recorded base commit. This prevents a symbolic
-`HEAD` change from publishing the task on another branch.
+`HEAD` change from publishing the task on another branch. A refused publication
+leaves the index as it found it, so the same command can be retried once the
+conflicting ref is resolved.
 
 Each successful task commit carries these trailers:
 

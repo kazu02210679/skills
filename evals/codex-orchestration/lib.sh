@@ -65,6 +65,13 @@ do_run() {
   printf '%s\n' "$out" | sed -n 's/^  RUNDIR: //p' | tail -1
 }
 
+# do_run_raw <repo> <packet> [touch] — delegate one task, printing the wrapper's
+# combined output and propagating its exit status. do_run discards both, which
+# is what the happy path wants and what a preflight assertion cannot use.
+do_run_raw() {
+  FAKE_CODEX_TOUCH="${3:-src/a.py}" "$S/codex_run.sh" "$2" "$1" 2>&1
+}
+
 # rundir_of <repo> — the most recently written run directory.
 rundir_of() {
   local r

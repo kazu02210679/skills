@@ -1,6 +1,6 @@
 interface:
   display_name: "Codex Orchestration"
-  short_description: "Claude CodeからCodex実装を委譲・検証する"
+  short_description: "Delegate implementation to Codex and verify it independently"
   default_prompt: "Use $codex-orchestration to maintain or explicitly run the Claude-to-Codex delegation workflow."
 policy:
   allow_implicit_invocation: false

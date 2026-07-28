@@ -91,10 +91,50 @@ out=$(FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
 check "untracked plan does not block the first run" "$rc" "0"
 has "scope reported" "$out" "scope: OK"
 
+echo "== plan packets are checked before a run is spent =="
+# Each of these used to run Codex to completion and only fail at the commit
+# gate, which is the one moment the diagnostic can no longer be acted on.
+R="$(new_repo preflight-plan-id)"; P="$(new_plan "$R" auth)"; rm -f "$P/plan-id"
+out="$(do_run_raw "$R" "$P/T1.md")"; rc=$?
+check "a plan with no plan-id never starts" "$rc" "2"
+has "plan-id diagnostic" "$out" "plan-id"
+check "no run directory is created" "$(ls -A "$R/.codex-runs" 2>/dev/null | wc -l | tr -d '[:space:]')" "0"
+
+R="$(new_repo preflight-plan-id-blank)"; P="$(new_plan "$R" auth)"; printf '   \n' >"$P/plan-id"
+out="$(do_run_raw "$R" "$P/T1.md")"; rc=$?
+check "a whitespace-only plan-id never starts" "$rc" "2"
+
+R="$(new_repo preflight-allowlist)"; P="$(new_plan "$R" auth)"; rm -f "$P/T1.allowlist"
+out="$(do_run_raw "$R" "$P/T1.md")"; rc=$?
+check "a plan task with no allowlist never starts" "$rc" "2"
+has "allowlist diagnostic" "$out" "no allowlist"
+
+R="$(new_repo preflight-allowlist-empty)"; P="$(new_plan "$R" auth)"
+printf '# only a comment\n\n' >"$P/T1.allowlist"
+out="$(do_run_raw "$R" "$P/T1.md")"; rc=$?
+check "a pattern-free allowlist never starts" "$rc" "2"
+has "empty-allowlist diagnostic" "$out" "no patterns"
+
+R="$(new_repo preflight-no-tests)"; P="$(new_plan "$R" auth)"; rm -f "$P/test"
+out="$(do_run_raw "$R" "$P/T1.md")"; rc=$?
+check "a missing test command is a warning, not a refusal" "$rc" "0"
+has "missing-test warning names the consequence" "$out" "CODEX_ALLOW_NO_TESTS"
+
+# A one-off packet outside the metadata directory keeps the unguarded path.
+R="$(new_repo preflight-one-off)"; ONEOFF="$TMPROOT/oneoff"; mkdir -p "$ONEOFF"
+printf '# One-off\n\nDo it.\n' >"$ONEOFF/T1.md"
+out="$(FAKE_CODEX_TOUCH=src/a.py "$S/codex_run.sh" "$ONEOFF/T1.md" "$R" 2>&1)"; rc=$?
+check "a packet outside the plan directory still runs unguarded" "$rc" "0"
+
 echo "== artifacts =="
+# Its own repo and plan: inheriting whichever $R the preceding block left
+# behind made this list assert against a packet that had no allowlist at all.
+R="$(new_repo run-artifacts)"; P="$(new_plan "$R" auth)"
+FAKE_CODEX_TOUCH="src/a.py" "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
 RD="$(rundir_of "$R")"
 for f in attempt-1/report.md attempt-1/events.jsonl attempt-1/stderr.log \
          attempt-1/meta.json attempt-1/scope.txt base_commit allowlist \
+         allowlist_source test test_source plan_dir plan-id \
          contract.sha256 workdir thread_id .gitignore; do
   [ -f "$RD/$f" ] && ok "artifact $f" || bad "missing $f"
 done
@@ -651,6 +691,49 @@ out=$(FAKE_CODEX_LOG="$LOG" "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>
 check "resume rejects a rewritten frozen task" "$rc" "4"
 has "rewritten frozen task is explained" "$out" "frozen contract"
 check "rewritten frozen task launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
+
+echo "== resume: an inherited CODEX_ALLOWLIST is not a swap attempt =="
+# CODEX_ALLOWLIST stays exported across the run and its resumes. Comparing it
+# only against the frozen copy refused every such resume, even though the two
+# name the same contract.
+R="$(new_repo res-env-allowlist)"; P="$(new_plan "$R" auth)"
+mv "$P/T1.allowlist" "$P/shared.allowlist"
+CODEX_ALLOWLIST="$P/shared.allowlist" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_run.sh" "$P/T1.md" "$R" >/dev/null 2>&1
+RD="$(rundir_of "$R")"; printf 'hint\n' >"$P/T1.hint-1.md"
+out=$(CODEX_ALLOWLIST="$P/shared.allowlist" FAKE_CODEX_TOUCH="src/a.py" \
+  "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
+check "the run's own allowlist may stay exported across a resume" "$rc" "0"
+
+# A genuinely different path is still refused.
+printf 'docs/*\n' >"$P/other.allowlist"
+LOG="$TMPROOT/swap-allowlist"; : >"$LOG"
+out=$(CODEX_ALLOWLIST="$P/other.allowlist" FAKE_CODEX_LOG="$LOG" \
+  "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
+check "a different allowlist is still refused" "$rc" "2"
+has "the refusal names the frozen copy" "$out" "frozen allowlist"
+check "an allowlist swap launches nothing" "$(grep -c '^ARGV:' "$LOG")" "0"
+
+echo "== path ordering is identical on both sort paths =="
+# The fast path exists only because the in-shell fallback is O(n^2). They must
+# agree exactly: the commit gate compares product-path listings element by
+# element across the test run.
+R="$(new_repo sort-agreement)"; P="$(new_plan "$R" auth)"
+mkdir -p "$R/src/deep"
+for name in b a 'z z' 'a-b' 'a_b' 'A' 'ä' '10' '2' 'x
+y'; do printf 'x\n' >"$R/src/deep/$name"; done
+sorted_with() {
+  ( export CODEX_SORT0="$1"
+    . "$S/codex_lib.sh"
+    codex_dirty_product "$R" HEAD ) | tr '\n' '|'
+}
+fast="$(sorted_with 1)"; slow="$(sorted_with 0)"
+check "the fast and fallback orders match" "$fast" "$slow"
+[ -n "$fast" ] && ok "the listing is non-empty" || bad "the listing is non-empty"
+
+fp_with() { ( export CODEX_SORT0="$1"; . "$S/codex_lib.sh"; codex_meta_fingerprint "$P" ); }
+mkdir -p "$P/sub"; for name in b a 'z z' 'A'; do printf 'x\n' >"$P/sub/$name"; done
+check "plan fingerprints match on both sort paths" "$(fp_with 1)" "$(fp_with 0)"
 
 echo "== resume: scope baseline stays the task's start =="
 R="$(new_repo res5)"; P="$(new_plan "$R" auth)"

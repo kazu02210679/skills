@@ -102,7 +102,11 @@ class HostCompatibilityTests(unittest.TestCase):
             REPOSITORY_ROOT / "skills" / "codex-orchestration" / "README.md"
         ).read_text(encoding="utf-8")
         self.assertIn("intentionally retired", readme)
-        self.assertIn("legacy plugin repository is retired or deleted", readme)
+        # The durable claim is independence from the legacy plugin repository.
+        # Asserting the older phrasing ("...is retired or deleted") pinned a
+        # sentence that was only true until that repository's fate was settled.
+        normalized_readme = " ".join(readme.split())
+        self.assertIn("nothing here depends on the legacy plugin", normalized_readme)
 
 
 if __name__ == "__main__":
