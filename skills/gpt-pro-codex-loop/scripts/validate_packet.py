@@ -82,9 +82,25 @@ REQUIRED_REVIEW_FIELDS = (
     "scope_violations",
     "next_instruction",
 )
+REQUIRED_STATE_FIELDS = (
+    "phase",
+    "review_round",
+    "latest_decision",
+    "latest_requirements_decision",
+    "required_actions",
+    "format_error_count",
+    "browser_reconnect_count",
+    "conversation_binding_state",
+    "bound_conversation_url",
+    "visible_model_label",
+    "review_round_reset",
+    "user_approval_received",
+)
 STATE_TRANSITIONS = {
     "PREFLIGHT": frozenset({"REQUIREMENTS_PENDING"}),
-    "REQUIREMENTS_PENDING": frozenset({"REQUIREMENTS_FROZEN"}),
+    "REQUIREMENTS_PENDING": frozenset(
+        {"REQUIREMENTS_FROZEN", "USER_DECISION_REQUIRED", "BLOCKED"}
+    ),
     "REQUIREMENTS_FROZEN": frozenset({"IMPLEMENTING"}),
     "IMPLEMENTING": frozenset({"LOCAL_VERIFICATION"}),
     "LOCAL_VERIFICATION": frozenset({"REVIEW_PENDING"}),
@@ -97,10 +113,10 @@ STATE_TRANSITIONS = {
             "FINAL_VERIFICATION",
         }
     ),
-    "USER_DECISION_REQUIRED": frozenset(),
+    "USER_DECISION_REQUIRED": frozenset({"REQUIREMENTS_PENDING"}),
     "FINAL_VERIFICATION": frozenset({"COMPLETE", "REVIEW_PENDING", "BLOCKED"}),
     "COMPLETE": frozenset(),
-    "BLOCKED": frozenset(),
+    "BLOCKED": frozenset({"REQUIREMENTS_PENDING"}),
 }
 MAX_REVIEW_ROUNDS = 3
 MAX_FORMAT_ERRORS = 1
@@ -444,13 +460,10 @@ def validate_review(packet, requirements, report):
 
 
 def _phase(value: object, name: str, errors: list[str]) -> str | None:
-    if isinstance(value, str):
-        phase = value
-    elif isinstance(value, dict):
-        phase = value.get("phase")
-    else:
-        errors.append(f"{name}: must be a phase string or state object")
+    if not isinstance(value, dict):
+        errors.append(f"{name}: must be a state object")
         return None
+    phase = value.get("phase")
     if phase not in STATE_TRANSITIONS:
         errors.append(f"{name}.phase: unknown workflow phase")
         return None
@@ -459,6 +472,73 @@ def _phase(value: object, name: str, errors: list[str]) -> str | None:
 
 def _state_mapping(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
+
+
+def _validate_conversation_binding(
+    state: dict[str, object], name: str, errors: list[str]
+) -> bool:
+    fields = (
+        "conversation_binding_state",
+        "bound_conversation_url",
+        "visible_model_label",
+    )
+    if any(field not in state for field in fields):
+        return False
+    complete = True
+    binding_state = state.get("conversation_binding_state")
+    if binding_state not in {"CONVERSATION_UNBOUND", "CONVERSATION_BOUND"}:
+        errors.append(
+            f"{name}.conversation_binding_state: must be CONVERSATION_UNBOUND or CONVERSATION_BOUND"
+        )
+        return False
+    if binding_state == "CONVERSATION_UNBOUND":
+        for field in ("bound_conversation_url", "visible_model_label"):
+            if state.get(field) is not None:
+                errors.append(f"{name}.{field}: must be null before conversation binding")
+                complete = False
+    else:
+        for field in ("bound_conversation_url", "visible_model_label"):
+            if not _is_nonempty_string(state.get(field)):
+                errors.append(f"{name}.{field}: must be a non-empty string after binding")
+                complete = False
+    return complete
+
+
+def _validate_state_fields(
+    state: dict[str, object], name: str, errors: list[str]
+) -> None:
+    for field in REQUIRED_STATE_FIELDS:
+        if field not in state:
+            errors.append(f"{name}.{field}: missing required field")
+    requirements_decision = state.get("latest_requirements_decision")
+    if (
+        "latest_requirements_decision" in state
+        and requirements_decision is not None
+        and requirements_decision not in REQUIREMENTS_DECISIONS
+    ):
+        errors.append(
+            f"{name}.latest_requirements_decision: must be PLAN_READY, NEED_USER_INPUT, BLOCK, or null"
+        )
+    actions = state.get("required_actions")
+    if "required_actions" in state and (
+        not isinstance(actions, list)
+        or any(not _is_nonempty_string(action) for action in actions)
+        or not set(actions) <= REQUIRED_ACTIONS
+    ):
+        errors.append(
+            f"{name}.required_actions: must be a list of valid required actions"
+        )
+    for field in ("format_error_count", "browser_reconnect_count"):
+        value = state.get(field)
+        if field in state and (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            errors.append(f"{name}.{field}: must be a non-negative integer")
+    for field in ("review_round_reset", "user_approval_received"):
+        if field in state and not isinstance(state.get(field), bool):
+            errors.append(f"{name}.{field}: must be a boolean")
 
 
 def _state_string_set(state: dict[str, object], field: str) -> set[str]:
@@ -561,6 +641,23 @@ def _expected_review_target(state: dict[str, object], errors: list[str]) -> str 
     return None
 
 
+def _expected_requirements_target(
+    state: dict[str, object], errors: list[str]
+) -> str | None:
+    decision = state.get("latest_requirements_decision")
+    targets = {
+        "PLAN_READY": "REQUIREMENTS_FROZEN",
+        "NEED_USER_INPUT": "USER_DECISION_REQUIRED",
+        "BLOCK": "BLOCKED",
+    }
+    target = targets.get(decision)
+    if target is None:
+        errors.append(
+            "latest_requirements_decision: a requirements transition requires PLAN_READY, NEED_USER_INPUT, or BLOCK"
+        )
+    return target
+
+
 def validate_transition(previous, current):
     """Return all deterministic workflow-state transition validation errors."""
     errors: list[str] = []
@@ -568,14 +665,20 @@ def validate_transition(previous, current):
     current_phase = _phase(current, "current", errors)
     previous_state = _state_mapping(previous)
     current_state = _state_mapping(current)
+    _validate_state_fields(previous_state, "previous", errors)
+    _validate_state_fields(current_state, "current", errors)
+    previous_binding_valid = _validate_conversation_binding(
+        previous_state, "previous", errors
+    )
+    current_binding_valid = _validate_conversation_binding(
+        current_state, "current", errors
+    )
     for name, value, state in (
         ("previous", previous, previous_state),
         ("current", current, current_state),
     ):
         if isinstance(value, dict):
-            if "latest_decision" not in state:
-                errors.append(f"{name}.latest_decision: missing required field")
-            elif state.get("latest_decision") is not None and (
+            if "latest_decision" in state and state.get("latest_decision") is not None and (
                 not isinstance(state.get("latest_decision"), str)
                 or state.get("latest_decision") not in REVIEW_DECISIONS
             ):
@@ -583,8 +686,8 @@ def validate_transition(previous, current):
                     f"{name}.latest_decision: must be PASS, CHANGES_REQUESTED, BLOCK, or null"
                 )
 
-    previous_round = previous_state.get("review_round", 0)
-    current_round = current_state.get("review_round", 0)
+    previous_round = previous_state.get("review_round")
+    current_round = current_state.get("review_round")
     previous_round_valid = (
         isinstance(previous_round, int)
         and not isinstance(previous_round, bool)
@@ -602,18 +705,49 @@ def validate_transition(previous, current):
 
     valid_review_consumption = False
     if previous_phase and current_phase:
-        format_errors = current_state.get("format_error_count", 0)
+        initial_binding_transition = (
+            previous_binding_valid
+            and current_binding_valid
+            and previous_state.get("conversation_binding_state")
+            == "CONVERSATION_UNBOUND"
+            and current_state.get("conversation_binding_state")
+            == "CONVERSATION_BOUND"
+            and previous_phase in {"PREFLIGHT", "REQUIREMENTS_PENDING"}
+            and current_phase == "REQUIREMENTS_PENDING"
+        )
+        if previous_binding_valid and current_binding_valid:
+            previous_binding = previous_state.get("conversation_binding_state")
+            current_binding = current_state.get("conversation_binding_state")
+            if previous_binding == "CONVERSATION_BOUND":
+                if current_binding != "CONVERSATION_BOUND":
+                    errors.append(
+                        "conversation_binding_state: a bound conversation cannot become unbound"
+                    )
+                else:
+                    for field in (
+                        "bound_conversation_url",
+                        "visible_model_label",
+                    ):
+                        if current_state.get(field) != previous_state.get(field):
+                            errors.append(
+                                f"{field}: must match the bound conversation state"
+                            )
+            elif current_binding == "CONVERSATION_BOUND" and not initial_binding_transition:
+                errors.append(
+                    "conversation_binding_state: binding is allowed only for the initial requirements conversation"
+                )
+        format_errors = current_state.get("format_error_count")
         if not isinstance(format_errors, int) or isinstance(format_errors, bool) or format_errors < 0:
             errors.append("format_error_count: must be a non-negative integer")
         elif format_errors > MAX_FORMAT_ERRORS:
             errors.append("format_error_count: repeated malformed response blocks the loop")
         same_phase_format_correction = (
             previous_phase == current_phase
-            and isinstance(previous_state.get("format_error_count", 0), int)
-            and format_errors == previous_state.get("format_error_count", 0) + 1
+            and isinstance(previous_state.get("format_error_count"), int)
+            and format_errors == previous_state.get("format_error_count") + 1
         )
-        reconnects = current_state.get("browser_reconnect_count", 0)
-        previous_reconnects = previous_state.get("browser_reconnect_count", 0)
+        reconnects = current_state.get("browser_reconnect_count")
+        previous_reconnects = previous_state.get("browser_reconnect_count")
         same_phase_browser_reconnect = (
             previous_phase == current_phase
             and isinstance(reconnects, int)
@@ -622,9 +756,49 @@ def validate_transition(previous, current):
             and not isinstance(previous_reconnects, bool)
             and reconnects == previous_reconnects + 1
         )
-        same_phase_maintenance = same_phase_format_correction or same_phase_browser_reconnect
+        same_phase_maintenance = (
+            same_phase_format_correction
+            or same_phase_browser_reconnect
+            or initial_binding_transition
+        )
         if current_phase not in STATE_TRANSITIONS[previous_phase] and not same_phase_maintenance:
             errors.append(f"phase: illegal transition from {previous_phase} to {current_phase}")
+        consumes_requirements = (
+            previous_phase == "REQUIREMENTS_PENDING"
+            and current_phase != previous_phase
+        )
+        if consumes_requirements:
+            expected_requirements_target = _expected_requirements_target(
+                current_state, errors
+            )
+            if (
+                expected_requirements_target
+                and current_phase != expected_requirements_target
+            ):
+                errors.append(
+                    "phase: requirements routing requires transition to "
+                    f"{expected_requirements_target}, not {current_phase}"
+                )
+        if (
+            previous_phase in {"USER_DECISION_REQUIRED", "BLOCKED"}
+            and current_phase == "REQUIREMENTS_PENDING"
+        ):
+            expected_prior_decision = (
+                "NEED_USER_INPUT"
+                if previous_phase == "USER_DECISION_REQUIRED"
+                else "BLOCK"
+            )
+            if (
+                previous_state.get("latest_requirements_decision")
+                != expected_prior_decision
+            ):
+                errors.append(
+                    "phase: requirements resume requires a prior NEED_USER_INPUT or BLOCK decision"
+                )
+            if current_state.get("latest_requirements_decision") is not None:
+                errors.append(
+                    "latest_requirements_decision: resume must clear the prior requirements decision"
+                )
         consumes_review = previous_phase == "REVIEW_PENDING" and current_phase != previous_phase
         if consumes_review:
             history_results = [
@@ -658,8 +832,30 @@ def validate_transition(previous, current):
                 and current_round == previous_round + 1
                 and history_valid
             )
-        elif previous_round_valid and current_round_valid and current_round != previous_round:
-            errors.append("review_round: non-review transitions must preserve the review round")
+        elif previous_round_valid and current_round_valid:
+            approved_material_reset = (
+                previous_phase == "REQUIREMENTS_PENDING"
+                and current_phase == "REQUIREMENTS_FROZEN"
+                and current_state.get("review_round_reset") is True
+                and current_state.get("user_approval_received") is True
+            )
+            if approved_material_reset and current_round != 0:
+                errors.append(
+                    "review_round: approved material revision must reset the review round to zero"
+                )
+            elif (
+                previous_phase == "REQUIREMENTS_PENDING"
+                and current_phase == "REQUIREMENTS_FROZEN"
+                and current_state.get("review_round_reset") is True
+                and current_state.get("user_approval_received") is not True
+            ):
+                errors.append(
+                    "review_round: reset requires an approved material revision"
+                )
+            elif current_round != previous_round and not approved_material_reset:
+                errors.append(
+                    "review_round: non-review transitions must preserve the review round"
+                )
         if same_phase_maintenance and current_state.get("latest_decision") != previous_state.get(
             "latest_decision"
         ):

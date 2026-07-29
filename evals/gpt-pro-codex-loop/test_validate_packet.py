@@ -121,21 +121,33 @@ def valid_state(
     review_round: int,
     *,
     latest_decision: object = None,
+    latest_requirements_decision: object = None,
     required_actions: list[str] | None = None,
     unresolved_finding_ids: list[str] | None = None,
     blocker_fingerprints: list[str] | None = None,
     format_error_count: int = 0,
     browser_reconnect_count: int = 0,
+    conversation_binding_state: str = "CONVERSATION_BOUND",
+    bound_conversation_url: object = "https://chatgpt.com/c/test-conversation",
+    visible_model_label: object = "Pro",
+    review_round_reset: bool = False,
+    user_approval_received: bool = False,
 ) -> dict[str, object]:
     return {
         "phase": phase,
         "review_round": review_round,
         "latest_decision": latest_decision,
+        "latest_requirements_decision": latest_requirements_decision,
         "required_actions": required_actions or [],
         "unresolved_finding_ids": unresolved_finding_ids or [],
         "blocker_fingerprints": blocker_fingerprints or [],
         "format_error_count": format_error_count,
         "browser_reconnect_count": browser_reconnect_count,
+        "conversation_binding_state": conversation_binding_state,
+        "bound_conversation_url": bound_conversation_url,
+        "visible_model_label": visible_model_label,
+        "review_round_reset": review_round_reset,
+        "user_approval_received": user_approval_received,
     }
 
 
@@ -401,6 +413,144 @@ class ReviewPacketTests(unittest.TestCase):
 
 
 class TransitionTests(unittest.TestCase):
+    def test_only_approved_material_revision_resets_round_on_freeze(self) -> None:
+        review_pending = valid_state("REVIEW_PENDING", 1)
+        previous = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+        )
+        self.assertEqual(validate_transition(review_pending, previous), [])
+
+        approved = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            latest_decision="CHANGES_REQUESTED",
+            latest_requirements_decision="PLAN_READY",
+            required_actions=["REQUIREMENTS_REVISION"],
+            review_round_reset=True,
+            user_approval_received=True,
+        )
+        self.assertEqual(validate_transition(previous, approved), [])
+
+        unapproved = dict(approved, user_approval_received=False)
+        self.assertIn(
+            "review_round: reset requires an approved material revision",
+            validate_transition(previous, unapproved),
+        )
+
+        arbitrary = dict(
+            approved,
+            review_round_reset=False,
+            user_approval_received=False,
+        )
+        self.assertIn(
+            "review_round: non-review transitions must preserve the review round",
+            validate_transition(previous, arbitrary),
+        )
+
+    def test_requirements_decisions_route_and_resume_without_consuming_round(self) -> None:
+        previous = valid_state("REQUIREMENTS_PENDING", 2)
+        routes = (
+            ("NEED_USER_INPUT", "USER_DECISION_REQUIRED"),
+            ("BLOCK", "BLOCKED"),
+        )
+        for decision, target in routes:
+            with self.subTest(decision=decision):
+                stopped = valid_state(
+                    target,
+                    2,
+                    latest_requirements_decision=decision,
+                )
+                self.assertEqual(validate_transition(previous, stopped), [])
+                resumed = valid_state("REQUIREMENTS_PENDING", 2)
+                self.assertEqual(validate_transition(stopped, resumed), [])
+
+        wrong_route = valid_state(
+            "REQUIREMENTS_FROZEN",
+            2,
+            latest_requirements_decision="NEED_USER_INPUT",
+        )
+        self.assertIn(
+            "phase: requirements routing requires transition to USER_DECISION_REQUIRED, not REQUIREMENTS_FROZEN",
+            validate_transition(previous, wrong_route),
+        )
+        unrelated_block = valid_state("BLOCKED", 2)
+        self.assertIn(
+            "phase: requirements resume requires a prior NEED_USER_INPUT or BLOCK decision",
+            validate_transition(
+                unrelated_block,
+                valid_state("REQUIREMENTS_PENDING", 2),
+            ),
+        )
+
+    def test_conversation_is_bound_once_then_preserved_with_visible_model(self) -> None:
+        unbound = valid_state(
+            "PREFLIGHT",
+            0,
+            conversation_binding_state="CONVERSATION_UNBOUND",
+            bound_conversation_url=None,
+            visible_model_label=None,
+        )
+        bound = valid_state("REQUIREMENTS_PENDING", 0)
+        self.assertEqual(validate_transition(unbound, bound), [])
+
+        for field, value in (
+            ("bound_conversation_url", "https://chatgpt.com/c/other-conversation"),
+            ("visible_model_label", "Free"),
+        ):
+            with self.subTest(field=field):
+                mismatched = valid_state("LOCAL_VERIFICATION", 0)
+                mismatched[field] = value
+                self.assertIn(
+                    f"{field}: must match the bound conversation state",
+                    validate_transition(
+                        valid_state("IMPLEMENTING", 0),
+                        mismatched,
+                    ),
+                )
+
+        missing_identity = valid_state("LOCAL_VERIFICATION", 0)
+        del missing_identity["bound_conversation_url"]
+        self.assertIn(
+            "current.bound_conversation_url: missing required field",
+            validate_transition(
+                valid_state("IMPLEMENTING", 0),
+                missing_identity,
+            ),
+        )
+
+    def test_transition_requires_complete_structured_state_packets(self) -> None:
+        shorthand_errors = validate_transition(
+            "PREFLIGHT",
+            "REQUIREMENTS_PENDING",
+        )
+        self.assertIn("previous: must be a state object", shorthand_errors)
+        self.assertIn("current: must be a state object", shorthand_errors)
+
+        required_fields = (
+            "review_round",
+            "latest_decision",
+            "latest_requirements_decision",
+            "required_actions",
+            "format_error_count",
+            "browser_reconnect_count",
+            "review_round_reset",
+            "user_approval_received",
+        )
+        for field in required_fields:
+            with self.subTest(field=field):
+                incomplete = valid_state("IMPLEMENTING", 0)
+                del incomplete[field]
+                self.assertIn(
+                    f"previous.{field}: missing required field",
+                    validate_transition(
+                        incomplete,
+                        valid_state("LOCAL_VERIFICATION", 0),
+                    ),
+                )
+
     def test_transition_rejects_an_illegal_edge(self) -> None:
         self.assertIn(
             "phase: illegal transition from PREFLIGHT to IMPLEMENTING",
