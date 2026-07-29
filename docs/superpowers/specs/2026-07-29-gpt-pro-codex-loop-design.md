@@ -81,11 +81,13 @@ skills/gpt-pro-codex-loop/
 │   ├── packet-contract.md
 │   └── prompt-contract.md
 └── scripts/
-    └── validate_packet.py
+    ├── validate_packet.py
+    └── capture_snapshot.py
 
 evals/gpt-pro-codex-loop/
 ├── cases.json
-└── test_validate_packet.py
+├── test_validate_packet.py
+└── test_capture_snapshot.py
 ```
 
 The Skill is Codex Desktop-specific. `docs/host-compatibility.md` will state
@@ -178,6 +180,9 @@ state transitions without storing browser credentials or session data.
 ## Packet Contracts
 
 Use JSON so packets can be checked with Python's standard library.
+Use `capture_snapshot.py` to derive the baseline-bound tracked diff digest,
+untracked product manifest digest, and combined product snapshot digest. Keep
+snapshot capture separate from packet parsing and state-transition validation.
 
 ### JSON transport
 
