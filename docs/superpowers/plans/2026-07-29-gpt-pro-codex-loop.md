@@ -24,16 +24,23 @@
 
 ## Stage 0 Evidence at Plan Creation
 
-Status: `BLOCKED_ON_LOGIN`
+Status: `PASS` (2026-07-29)
 
 - Browser runtime selected `Codex In-app Browser`.
-- `https://chatgpt.com/` loaded and exposed a usable DOM.
-- The page showed the anonymous ChatGPT experience and a `ログイン` button.
-- No alternate connected browser was available.
-- The login tab was left visible for user handoff.
+- The signed-in `https://chatgpt.com/` composer exposed a visible `Pro`
+  reasoning option, and the selected composer label remained `Pro`.
+- The first strict probe returned exactly the requested object:
+  `{"schema_version":1,"spike":"turn-1","nonce":"gpt-pro-codex-loop-20260729"}`.
+- After the first response, ChatGPT assigned a persistent `/c/` conversation
+  URL. The identifier is intentionally redacted from this tracked plan.
+- The second probe returned exactly the requested object:
+  `{"schema_version":1,"spike":"turn-2","previous_nonce":"gpt-pro-codex-loop-20260729"}`.
+- The persistent URL and visible `Pro` label were unchanged across the second
+  turn.
+- A fresh tab handle reacquired the same conversation and found both exact
+  response objects once each, with the visible `Pro` label.
 
-Task 0 replaces this status with `PASS` only after the remaining two-turn,
-model-selection, URL-binding, extraction, and tab-reacquisition checks succeed.
+The mutable browser assumptions required by Task 0 are therefore verified.
 
 ## File Map
 
@@ -63,7 +70,7 @@ model-selection, URL-binding, extraction, and tab-reacquisition checks succeed.
 - Consumes: signed-in ChatGPT Pro account in the existing Codex in-app Browser tab.
 - Produces: a recorded `PASS` gate with verified model label, persistent conversation URL, two parsed JSON responses, and successful tab reacquisition.
 
-- [ ] **Step 1: Confirm authentication and Pro model availability**
+- [x] **Step 1: Confirm authentication and Pro model availability**
 
 After the user signs in, reacquire the existing ChatGPT tab, take a fresh DOM
 snapshot, and verify a Pro reasoning model is visibly selectable. Select it
@@ -72,7 +79,7 @@ using only controls present in the fresh snapshot.
 Expected: the composer is authenticated and the visible selected model label
 contains the available Pro reasoning model name.
 
-- [ ] **Step 2: Send the first strict transport probe**
+- [x] **Step 2: Send the first strict transport probe**
 
 Send this exact content:
 
@@ -89,13 +96,13 @@ The object must be:
 Expected: exactly one JSON fence whose parsed object equals the requested
 object.
 
-- [ ] **Step 3: Bind the persistent conversation**
+- [x] **Step 3: Bind the persistent conversation**
 
 After the first response, record the current ChatGPT URL whose path begins with
 `/c/` and the visible model label. Verify the URL is no longer the unbound root
 URL.
 
-- [ ] **Step 4: Send the second probe in the same conversation**
+- [x] **Step 4: Send the second probe in the same conversation**
 
 Send:
 
@@ -112,17 +119,17 @@ The object must be:
 Expected: exactly one JSON fence, the requested parsed object, the same
 conversation URL, and the same visible Pro model label.
 
-- [ ] **Step 5: Reacquire and verify identity**
+- [x] **Step 5: Reacquire and verify identity**
 
 Release the tab, reacquire a controllable tab, navigate to the recorded
 conversation URL if needed, and verify that both spike turns are visible in
 that conversation.
 
-- [ ] **Step 6: Record and commit the spike**
+- [x] **Step 6: Record and commit the spike**
 
-Replace `Status: BLOCKED_ON_LOGIN` above with `Status: PASS` and append the
-observed model label, bound conversation URL with its conversation identifier
-redacted, the two parsed objects, and the tab-reacquisition result.
+The `PASS` record above includes the observed model label, the bound
+conversation URL with its identifier redacted, both parsed objects, and the
+tab-reacquisition result.
 
 Run:
 

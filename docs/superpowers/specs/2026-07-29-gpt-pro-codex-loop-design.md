@@ -114,6 +114,12 @@ sign-in. If model selection, two-turn messaging, response extraction, or
 conversation rebinding cannot be made reliable, stop before building the
 remaining Skill and revise the transport design.
 
+The 2026-07-29 spike passed in the Codex in-app Browser: the signed-in composer
+exposed and retained the visible `Pro` label, two strict JSON probes returned
+the requested objects in one persistent `/c/` conversation, and a fresh tab
+handle recovered that same conversation and both responses. The tracked design
+does not retain the conversation identifier.
+
 ## Browser and Conversation Contract
 
 Use `browser:control-in-app-browser` as the required browser sub-skill and
