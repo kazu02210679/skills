@@ -39,6 +39,11 @@ REQUIRED_REQUIREMENTS_FIELDS = (
     "change_reason",
     "behavior_changed",
     "user_approval_required",
+    "user_approval_received",
+    "scope_changed",
+    "public_contract_changed",
+    "prior_evidence_invalidated",
+    "review_round_reset",
     "decision",
     "objective",
     "requirements",
@@ -211,11 +216,36 @@ def validate_requirements(packet, previous=None):
         errors.append("requirements_revision: must be a positive integer")
     _require_digest(current.get("supersedes_digest"), "supersedes_digest", errors, nullable=True)
     _require_nonempty_string(current, "change_reason", errors)
-    for field in ("behavior_changed", "user_approval_required"):
+    for field in (
+        "behavior_changed",
+        "user_approval_required",
+        "user_approval_received",
+        "scope_changed",
+        "public_contract_changed",
+        "prior_evidence_invalidated",
+        "review_round_reset",
+    ):
         if field in current and not isinstance(current[field], bool):
             errors.append(f"{field}: must be a boolean")
+    material_change = any(
+        current.get(field) is True
+        for field in ("behavior_changed", "scope_changed", "public_contract_changed")
+    )
     if current.get("behavior_changed") is True and current.get("user_approval_required") is not True:
         errors.append("behavior changes require user approval")
+    if current.get("scope_changed") is True or current.get("public_contract_changed") is True:
+        if current.get("behavior_changed") is not True:
+            errors.append(
+                "behavior_changed: material scope or public-contract changes require behavior_changed"
+            )
+    if material_change and current.get("user_approval_required") is not True:
+        errors.append("material changes require user approval")
+    if material_change and current.get("user_approval_received") is not True:
+        errors.append("material changes require explicit user approval")
+    if material_change and current.get("prior_evidence_invalidated") is not True:
+        errors.append("prior_evidence_invalidated: material changes must invalidate prior evidence")
+    if material_change and current.get("review_round_reset") is not True:
+        errors.append("review_round_reset: material changes must reset review round")
     if current.get("decision") not in REQUIREMENTS_DECISIONS:
         errors.append("decision: must be PLAN_READY, NEED_USER_INPUT, or BLOCK")
     _require_nonempty_string(current, "objective", errors)
@@ -232,9 +262,7 @@ def validate_requirements(packet, previous=None):
         errors.append("open_questions: PLAN_READY requires no material open questions")
 
     if previous is None:
-        if revision != 1:
-            errors.append("requirements_revision: initial requirements revision must be 1")
-        if current.get("supersedes_digest") is not None:
+        if revision == 1 and current.get("supersedes_digest") is not None:
             errors.append("supersedes_digest: initial requirements must not supersede a digest")
     else:
         prior_errors: list[str] = []
@@ -254,8 +282,8 @@ def validate_report(packet, requirements):
     """Return all deterministic implementation-report validation errors."""
     errors: list[str] = []
     report = _as_mapping(packet, "packet", errors)
-    req_errors: list[str] = []
-    req = _as_mapping(requirements, "requirements", req_errors)
+    req = _as_mapping(requirements, "requirements", errors)
+    errors.extend(f"requirements.{error}" for error in validate_requirements(req))
     _require_fields(report, REQUIRED_REPORT_FIELDS, errors)
     _require_nonempty_string(report, "baseline_head", errors)
     if report.get("requirements_revision") != req.get("requirements_revision"):
@@ -267,6 +295,8 @@ def validate_report(packet, requirements):
         errors.append("review_round: must be a non-negative integer")
     elif review_round > MAX_REVIEW_ROUNDS:
         errors.append(f"review_round: exceeds maximum of {MAX_REVIEW_ROUNDS}")
+    if req.get("review_round_reset") is True and review_round != 0:
+        errors.append("review_round: material revision requires reset to zero")
     for field in ("snapshot_digest", "tracked_diff_digest", "untracked_manifest_digest"):
         _require_digest(report.get(field), field, errors)
     changed_files = _require_list(report, "changed_files", errors)
@@ -339,6 +369,10 @@ def validate_review(packet, requirements, report):
     review = _as_mapping(packet, "packet", errors)
     req = _as_mapping(requirements, "requirements", errors)
     implementation_report = _as_mapping(report, "report", errors)
+    errors.extend(f"requirements.{error}" for error in validate_requirements(req))
+    for report_error in validate_report(implementation_report, req):
+        if not report_error.startswith("requirements."):
+            errors.append(f"report.{report_error}")
     _require_fields(review, REQUIRED_REVIEW_FIELDS, errors)
     if review.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"schema_version: must equal {SCHEMA_VERSION}")

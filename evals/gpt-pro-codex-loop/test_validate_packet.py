@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import sys
+import json
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 SCRIPT_DIRECTORY = (
@@ -19,6 +23,7 @@ from validate_packet import (  # noqa: E402
     PacketValidationError,
     canonical_digest,
     extract_single_json_object,
+    main,
     validate_report,
     validate_requirements,
     validate_review,
@@ -34,6 +39,11 @@ def valid_requirements(**overrides: object) -> dict[str, object]:
         "change_reason": "initial requirements",
         "behavior_changed": False,
         "user_approval_required": False,
+        "user_approval_received": False,
+        "scope_changed": False,
+        "public_contract_changed": False,
+        "prior_evidence_invalidated": False,
+        "review_round_reset": False,
         "decision": "PLAN_READY",
         "objective": "Validate the protocol.",
         "requirements": [{"id": "REQ-1", "statement": "Packets validate."}],
@@ -143,6 +153,50 @@ class RequirementsPacketTests(unittest.TestCase):
             validate_requirements(revised, previous=valid_requirements()),
         )
 
+    def test_material_scope_change_requires_approval_and_revision_reset(self) -> None:
+        previous = valid_requirements()
+        revised = valid_requirements(
+            requirements_revision=2,
+            supersedes_digest=canonical_digest(previous),
+            scope_changed=True,
+        )
+        errors = validate_requirements(revised, previous=previous)
+        self.assertIn(
+            "behavior_changed: material scope or public-contract changes require behavior_changed",
+            errors,
+        )
+        self.assertIn("material changes require user approval", errors)
+        self.assertIn("material changes require explicit user approval", errors)
+        self.assertIn(
+            "prior_evidence_invalidated: material changes must invalidate prior evidence",
+            errors,
+        )
+        self.assertIn(
+            "review_round_reset: material changes must reset review round",
+            errors,
+        )
+
+    def test_material_public_contract_change_requires_zero_report_round(self) -> None:
+        previous = valid_requirements()
+        revised = valid_requirements(
+            requirements_revision=2,
+            supersedes_digest=canonical_digest(previous),
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            public_contract_changed=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        self.assertEqual(validate_requirements(revised, previous=previous), [])
+        self.assertIn(
+            "review_round: material revision requires reset to zero",
+            validate_report(valid_report(revised), revised),
+        )
+        self.assertEqual(
+            validate_report(valid_report(revised, review_round=0), revised), []
+        )
+
 
 class ReportPacketTests(unittest.TestCase):
     def test_report_requires_evidence_for_every_acceptance_id(self) -> None:
@@ -160,6 +214,31 @@ class ReportPacketTests(unittest.TestCase):
             "requirements_digest: does not match requirements digest",
             validate_report(report, requirements),
         )
+
+    def test_report_rejects_a_malformed_requirements_dependency(self) -> None:
+        requirements = valid_requirements()
+        del requirements["objective"]
+        report = valid_report(requirements)
+        self.assertIn(
+            "requirements.objective: missing required field",
+            validate_report(report, requirements),
+        )
+
+    def test_report_cli_rejects_a_malformed_requirements_dependency(self) -> None:
+        requirements = valid_requirements()
+        del requirements["objective"]
+        report = valid_report(requirements)
+        with TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            requirements_path = directory_path / "requirements.json"
+            report_path = directory_path / "report.json"
+            requirements_path.write_text(json.dumps(requirements), encoding="utf-8")
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                result = main(
+                    ["report", str(report_path), "--requirements", str(requirements_path)]
+                )
+        self.assertEqual(result, 1)
 
 
 class ReviewPacketTests(unittest.TestCase):
@@ -234,6 +313,16 @@ class ReviewPacketTests(unittest.TestCase):
             "findings.0.required_change: PROVIDE_EVIDENCE cannot request a code change",
             validate_review(review, requirements, report),
         )
+
+    def test_review_rejects_malformed_requirements_and_report_dependencies(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        review = valid_review(requirements, report)
+        del requirements["constraints"]
+        del report["snapshot_digest"]
+        errors = validate_review(review, requirements, report)
+        self.assertIn("requirements.constraints: missing required field", errors)
+        self.assertIn("report.snapshot_digest: missing required field", errors)
 
 
 class TransitionTests(unittest.TestCase):
