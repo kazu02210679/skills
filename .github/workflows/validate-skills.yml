@@ -30,7 +30,7 @@ jobs:
             --workdir /workspace \
             bash:4.4.23-alpine3.22 \
             bash -c '
-              apk add --no-cache coreutils findutils git openssl python3
+              apk add --no-cache coreutils findutils git openssl perl python3
               bash --version | head -1
               bash evals/codex-orchestration/run_all.sh
             '
