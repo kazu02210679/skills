@@ -116,6 +116,29 @@ def valid_review(
     return packet
 
 
+def valid_state(
+    phase: str,
+    review_round: int,
+    *,
+    latest_decision: object = None,
+    required_actions: list[str] | None = None,
+    unresolved_finding_ids: list[str] | None = None,
+    blocker_fingerprints: list[str] | None = None,
+    format_error_count: int = 0,
+    browser_reconnect_count: int = 0,
+) -> dict[str, object]:
+    return {
+        "phase": phase,
+        "review_round": review_round,
+        "latest_decision": latest_decision,
+        "required_actions": required_actions or [],
+        "unresolved_finding_ids": unresolved_finding_ids or [],
+        "blocker_fingerprints": blocker_fingerprints or [],
+        "format_error_count": format_error_count,
+        "browser_reconnect_count": browser_reconnect_count,
+    }
+
+
 class PacketTransportTests(unittest.TestCase):
     def test_extract_requires_exactly_one_json_fence(self) -> None:
         self.assertEqual(
@@ -131,6 +154,23 @@ class PacketTransportTests(unittest.TestCase):
 
 
 class RequirementsPacketTests(unittest.TestCase):
+    def test_initial_requirements_must_be_revision_one_without_a_supersedes_digest(self) -> None:
+        self.assertIn(
+            "requirements_revision: initial requirements revision must be 1",
+            validate_requirements(
+                valid_requirements(
+                    requirements_revision=2,
+                    supersedes_digest="sha256:" + "a" * 64,
+                )
+            ),
+        )
+        self.assertIn(
+            "supersedes_digest: initial requirements must not supersede a digest",
+            validate_requirements(
+                valid_requirements(supersedes_digest="sha256:" + "a" * 64)
+            ),
+        )
+
     def test_behavior_change_requires_user_approval(self) -> None:
         revised = valid_requirements(
             requirements_revision=2,
@@ -324,37 +364,229 @@ class ReviewPacketTests(unittest.TestCase):
         self.assertIn("requirements.constraints: missing required field", errors)
         self.assertIn("report.snapshot_digest: missing required field", errors)
 
+    def test_pass_rejects_scope_violations(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        review = valid_review(
+            requirements,
+            report,
+            scope_violations=[{"path": "deployment", "reason": "out of scope"}],
+        )
+        self.assertIn(
+            "decision: PASS requires scope_violations to be empty",
+            validate_review(review, requirements, report),
+        )
+
+    def test_pass_rejects_any_action_finding(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        review = valid_review(
+            requirements,
+            report,
+            findings=[
+                {
+                    "id": "F-1",
+                    "root_cause_fingerprint": "sha256:" + "f" * 64,
+                    "severity": "LOW",
+                    "category": "evidence",
+                    "required_action": "PROVIDE_EVIDENCE",
+                    "evidence": "More output is needed.",
+                }
+            ],
+        )
+        self.assertIn(
+            "decision: PASS requires findings to be empty",
+            validate_review(review, requirements, report),
+        )
+
 
 class TransitionTests(unittest.TestCase):
     def test_transition_rejects_an_illegal_edge(self) -> None:
         self.assertIn(
             "phase: illegal transition from PREFLIGHT to IMPLEMENTING",
-            validate_transition({"phase": "PREFLIGHT"}, {"phase": "IMPLEMENTING"}),
+            validate_transition(
+                valid_state("PREFLIGHT", 0), valid_state("IMPLEMENTING", 0)
+            ),
         )
 
     def test_transition_blocks_the_second_format_error(self) -> None:
         self.assertIn(
             "format_error_count: repeated malformed response blocks the loop",
             validate_transition(
-                {"phase": "REQUIREMENTS_PENDING", "format_error_count": 1},
-                {"phase": "REQUIREMENTS_PENDING", "format_error_count": 2},
+                valid_state("REQUIREMENTS_PENDING", 0, format_error_count=1),
+                valid_state("REQUIREMENTS_PENDING", 0, format_error_count=2),
             ),
         )
 
-    def test_transition_detects_repeated_fingerprint_despite_new_finding_id(self) -> None:
+    def test_review_routing_uses_required_latest_decision(self) -> None:
+        previous = valid_state("REVIEW_PENDING", 0)
+        cases = (
+            ("PASS", [], "FINAL_VERIFICATION"),
+            ("CHANGES_REQUESTED", ["CODE_CHANGE"], "IMPLEMENTING"),
+            ("BLOCK", [], "USER_DECISION_REQUIRED"),
+        )
+        for decision, actions, phase in cases:
+            with self.subTest(decision=decision):
+                current = valid_state(
+                    phase,
+                    1,
+                    latest_decision=decision,
+                    required_actions=actions,
+                )
+                self.assertEqual(validate_transition(previous, current), [])
+        missing_decision = valid_state("FINAL_VERIFICATION", 1)
         self.assertIn(
-            "blocker_fingerprints: repeated blocker fingerprint requires stopping",
+            "latest_decision: a valid review transition requires PASS, CHANGES_REQUESTED, or BLOCK",
+            validate_transition(previous, missing_decision),
+        )
+        wrong_route = valid_state(
+            "IMPLEMENTING", 1, latest_decision="PASS", required_actions=[]
+        )
+        self.assertIn(
+            "phase: review routing requires transition to FINAL_VERIFICATION, not IMPLEMENTING",
+            validate_transition(previous, wrong_route),
+        )
+
+    def test_valid_review_consumption_increments_round_exactly_once(self) -> None:
+        previous = valid_state("REVIEW_PENDING", 1)
+        for invalid_round in (1, 3):
+            with self.subTest(review_round=invalid_round):
+                current = valid_state(
+                    "FINAL_VERIFICATION",
+                    invalid_round,
+                    latest_decision="PASS",
+                )
+                self.assertIn(
+                    "review_round: valid review consumption must increment exactly once",
+                    validate_transition(previous, current),
+                )
+
+    def test_valid_review_consumption_requires_explicit_blocker_history(self) -> None:
+        previous = valid_state("REVIEW_PENDING", 1)
+        current = valid_state(
+            "FINAL_VERIFICATION", 2, latest_decision="PASS"
+        )
+        del previous["unresolved_finding_ids"]
+        del current["blocker_fingerprints"]
+        errors = validate_transition(previous, current)
+        self.assertIn(
+            "previous.unresolved_finding_ids: must be a list of strings", errors
+        )
+        self.assertIn(
+            "current.blocker_fingerprints: must be a list of strings", errors
+        )
+
+    def test_non_review_events_do_not_increment_round(self) -> None:
+        evidence_previous = valid_state(
+            "LOCAL_VERIFICATION",
+            1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["PROVIDE_EVIDENCE"],
+        )
+        self.assertEqual(
             validate_transition(
-                {
-                    "phase": "REVIEW_PENDING",
-                    "unresolved_findings": [{"id": "F-1", "fingerprint": "same-cause"}],
-                },
-                {
-                    "phase": "IMPLEMENTING",
-                    "unresolved_findings": [{"id": "F-2", "fingerprint": "same-cause"}],
-                },
+                evidence_previous,
+                valid_state("REVIEW_PENDING", 1, required_actions=["PROVIDE_EVIDENCE"]),
+            ),
+            [],
+        )
+        reconnect_previous = valid_state("REVIEW_PENDING", 1)
+        self.assertEqual(
+            validate_transition(
+                reconnect_previous,
+                valid_state("REVIEW_PENDING", 1, browser_reconnect_count=1),
+            ),
+            [],
+        )
+        format_previous = valid_state("REVIEW_PENDING", 1)
+        self.assertEqual(
+            validate_transition(
+                format_previous,
+                valid_state("REVIEW_PENDING", 1, format_error_count=1),
+            ),
+            [],
+        )
+        self.assertIn(
+            "review_round: non-review transitions must preserve the review round",
+            validate_transition(
+                valid_state("LOCAL_VERIFICATION", 1),
+                valid_state("REVIEW_PENDING", 2),
             ),
         )
+
+    def test_first_blocker_occurrence_is_allowed(self) -> None:
+        previous = valid_state(
+            "REVIEW_PENDING",
+            0,
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["cause-1"],
+        )
+        current = valid_state(
+            "IMPLEMENTING",
+            1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["cause-1"],
+        )
+        self.assertEqual(validate_transition(previous, current), [])
+
+    def test_second_consecutive_blocker_finding_id_requires_stopping(self) -> None:
+        previous = valid_state(
+            "REVIEW_PENDING",
+            1,
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["cause-1"],
+        )
+        current = valid_state(
+            "IMPLEMENTING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["cause-2"],
+        )
+        self.assertIn(
+            "unresolved_findings: blocker persisted across two consecutive valid review rounds",
+            validate_transition(previous, current),
+        )
+
+    def test_second_consecutive_blocker_fingerprint_requires_stopping(self) -> None:
+        previous = valid_state(
+            "REVIEW_PENDING",
+            1,
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["same-cause"],
+        )
+        current = valid_state(
+            "IMPLEMENTING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+            unresolved_finding_ids=["F-2"],
+            blocker_fingerprints=["same-cause"],
+        )
+        self.assertIn(
+            "unresolved_findings: blocker persisted across two consecutive valid review rounds",
+            validate_transition(previous, current),
+        )
+
+    def test_nonconsecutive_blocker_occurrence_resets_continuity(self) -> None:
+        previous = valid_state(
+            "REVIEW_PENDING",
+            2,
+            unresolved_finding_ids=["F-2"],
+            blocker_fingerprints=["cause-2"],
+        )
+        current = valid_state(
+            "IMPLEMENTING",
+            3,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["cause-1"],
+        )
+        self.assertEqual(validate_transition(previous, current), [])
 
 
 if __name__ == "__main__":

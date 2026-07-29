@@ -204,7 +204,7 @@ def _acceptance_ids(requirements: dict[str, object], errors: list[str]) -> set[s
     )
 
 
-def validate_requirements(packet, previous=None):
+def _validate_requirements(packet, previous=None, *, require_initial: bool):
     """Return all deterministic requirements-packet validation errors."""
     errors: list[str] = []
     current = _as_mapping(packet, "packet", errors)
@@ -262,11 +262,15 @@ def validate_requirements(packet, previous=None):
         errors.append("open_questions: PLAN_READY requires no material open questions")
 
     if previous is None:
+        if require_initial and revision != 1:
+            errors.append("requirements_revision: initial requirements revision must be 1")
         if revision == 1 and current.get("supersedes_digest") is not None:
             errors.append("supersedes_digest: initial requirements must not supersede a digest")
+        if not require_initial and isinstance(revision, int) and revision > 1:
+            if current.get("supersedes_digest") is None:
+                errors.append("supersedes_digest: revised requirements must supersede a digest")
     else:
-        prior_errors: list[str] = []
-        prior = _as_mapping(previous, "previous", prior_errors)
+        prior = _as_mapping(previous, "previous", errors)
         prior_revision = prior.get("requirements_revision")
         if not isinstance(prior_revision, int) or isinstance(prior_revision, bool):
             errors.append("previous.requirements_revision: must be a positive integer")
@@ -278,12 +282,20 @@ def validate_requirements(packet, previous=None):
     return _errors_sorted(errors)
 
 
+def validate_requirements(packet, previous=None):
+    """Return all deterministic requirements-packet validation errors."""
+    return _validate_requirements(packet, previous, require_initial=True)
+
+
 def validate_report(packet, requirements):
     """Return all deterministic implementation-report validation errors."""
     errors: list[str] = []
     report = _as_mapping(packet, "packet", errors)
     req = _as_mapping(requirements, "requirements", errors)
-    errors.extend(f"requirements.{error}" for error in validate_requirements(req))
+    errors.extend(
+        f"requirements.{error}"
+        for error in _validate_requirements(req, require_initial=False)
+    )
     _require_fields(report, REQUIRED_REPORT_FIELDS, errors)
     _require_nonempty_string(report, "baseline_head", errors)
     if report.get("requirements_revision") != req.get("requirements_revision"):
@@ -369,7 +381,10 @@ def validate_review(packet, requirements, report):
     review = _as_mapping(packet, "packet", errors)
     req = _as_mapping(requirements, "requirements", errors)
     implementation_report = _as_mapping(report, "report", errors)
-    errors.extend(f"requirements.{error}" for error in validate_requirements(req))
+    errors.extend(
+        f"requirements.{error}"
+        for error in _validate_requirements(req, require_initial=False)
+    )
     for report_error in validate_report(implementation_report, req):
         if not report_error.startswith("requirements."):
             errors.append(f"report.{report_error}")
@@ -396,6 +411,8 @@ def validate_review(packet, requirements, report):
         errors.append("decision: PASS requires every acceptance result to be PASS")
 
     findings = _require_list(review, "findings", errors)
+    if review.get("decision") == "PASS" and findings:
+        errors.append("decision: PASS requires findings to be empty")
     seen_finding_ids: set[str] = set()
     for index, finding_value in enumerate(findings):
         path = f"findings.{index}"
@@ -419,8 +436,9 @@ def validate_review(packet, requirements, report):
             errors.append(f"{path}.required_change: PROVIDE_EVIDENCE cannot request a code change")
         if review.get("decision") == "PASS" and finding.get("severity") == "BLOCKER":
             errors.append("decision: PASS cannot leave a blocking finding")
-    for field in ("scope_violations",):
-        _require_list(review, field, errors)
+    scope_violations = _require_list(review, "scope_violations", errors)
+    if review.get("decision") == "PASS" and scope_violations:
+        errors.append("decision: PASS requires scope_violations to be empty")
     _require_nonempty_string(review, "next_instruction", errors)
     return _errors_sorted(errors)
 
@@ -443,32 +461,77 @@ def _state_mapping(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _fingerprints(state: dict[str, object]) -> set[str]:
-    values = state.get("blocker_fingerprints")
-    if isinstance(values, list):
-        return {value for value in values if _is_nonempty_string(value)}
+def _state_string_set(state: dict[str, object], field: str) -> set[str]:
+    values = state.get(field)
+    if not isinstance(values, list):
+        return set()
+    return {value for value in values if _is_nonempty_string(value)}
+
+
+def _validate_state_string_list(
+    state: dict[str, object], name: str, field: str, errors: list[str]
+) -> bool:
+    values = state.get(field)
+    if not isinstance(values, list) or any(
+        not _is_nonempty_string(value) for value in values
+    ):
+        errors.append(f"{name}.{field}: must be a list of strings")
+        return False
+    return True
+
+
+def _finding_ids(state: dict[str, object]) -> set[str]:
+    identifiers = _state_string_set(state, "unresolved_finding_ids")
+    if identifiers:
+        return identifiers
     findings = state.get("unresolved_findings")
-    if isinstance(findings, list):
-        return {
-            fingerprint
-            for item in findings
-            if isinstance(item, dict)
-            for fingerprint in (item.get("fingerprint", item.get("root_cause_fingerprint")),)
-            if _is_nonempty_string(fingerprint)
-        }
-    return set()
+    if not isinstance(findings, list):
+        return set()
+    return {
+        identifier
+        for item in findings
+        if isinstance(item, dict)
+        for identifier in (item.get("id"),)
+        if _is_nonempty_string(identifier)
+    }
 
 
-def _expected_review_target(state: dict[str, object]) -> str | None:
-    decision = state.get("decision")
+def _fingerprints(state: dict[str, object]) -> set[str]:
+    fingerprints = _state_string_set(state, "blocker_fingerprints")
+    if fingerprints:
+        return fingerprints
+    findings = state.get("unresolved_findings")
+    if not isinstance(findings, list):
+        return set()
+    return {
+        fingerprint
+        for item in findings
+        if isinstance(item, dict)
+        for fingerprint in (item.get("fingerprint", item.get("root_cause_fingerprint")),)
+        if _is_nonempty_string(fingerprint)
+    }
+
+
+def _expected_review_target(state: dict[str, object], errors: list[str]) -> str | None:
+    decision = state.get("latest_decision")
     if decision == "PASS":
         return "FINAL_VERIFICATION"
     if decision == "BLOCK":
         return "USER_DECISION_REQUIRED"
+    if decision != "CHANGES_REQUESTED":
+        return None
     actions = state.get("required_actions")
-    if not isinstance(actions, list):
+    if (
+        not isinstance(actions, list)
+        or not actions
+        or any(not _is_nonempty_string(action) for action in actions)
+    ):
+        errors.append("required_actions: CHANGES_REQUESTED requires at least one valid action")
         return None
     action_set = set(actions)
+    if not action_set <= REQUIRED_ACTIONS:
+        errors.append("required_actions: contains an invalid required action")
+        return None
     if "USER_DECISION" in action_set:
         return "USER_DECISION_REQUIRED"
     if "REQUIREMENTS_REVISION" in action_set:
@@ -487,6 +550,39 @@ def validate_transition(previous, current):
     current_phase = _phase(current, "current", errors)
     previous_state = _state_mapping(previous)
     current_state = _state_mapping(current)
+    for name, value, state in (
+        ("previous", previous, previous_state),
+        ("current", current, current_state),
+    ):
+        if isinstance(value, dict):
+            if "latest_decision" not in state:
+                errors.append(f"{name}.latest_decision: missing required field")
+            elif state.get("latest_decision") is not None and (
+                not isinstance(state.get("latest_decision"), str)
+                or state.get("latest_decision") not in REVIEW_DECISIONS
+            ):
+                errors.append(
+                    f"{name}.latest_decision: must be PASS, CHANGES_REQUESTED, BLOCK, or null"
+                )
+
+    previous_round = previous_state.get("review_round", 0)
+    current_round = current_state.get("review_round", 0)
+    previous_round_valid = (
+        isinstance(previous_round, int)
+        and not isinstance(previous_round, bool)
+        and 0 <= previous_round <= MAX_REVIEW_ROUNDS
+    )
+    current_round_valid = (
+        isinstance(current_round, int)
+        and not isinstance(current_round, bool)
+        and 0 <= current_round <= MAX_REVIEW_ROUNDS
+    )
+    if not previous_round_valid:
+        errors.append("previous.review_round: must be an integer within the review limit")
+    if not current_round_valid:
+        errors.append("review_round: must be an integer within the review limit")
+
+    valid_review_consumption = False
     if previous_phase and current_phase:
         format_errors = current_state.get("format_error_count", 0)
         if not isinstance(format_errors, int) or isinstance(format_errors, bool) or format_errors < 0:
@@ -496,22 +592,68 @@ def validate_transition(previous, current):
         same_phase_format_correction = (
             previous_phase == current_phase
             and isinstance(previous_state.get("format_error_count", 0), int)
-            and format_errors > previous_state.get("format_error_count", 0)
+            and format_errors == previous_state.get("format_error_count", 0) + 1
         )
-        if current_phase not in STATE_TRANSITIONS[previous_phase] and not same_phase_format_correction:
+        reconnects = current_state.get("browser_reconnect_count", 0)
+        previous_reconnects = previous_state.get("browser_reconnect_count", 0)
+        same_phase_browser_reconnect = (
+            previous_phase == current_phase
+            and isinstance(reconnects, int)
+            and not isinstance(reconnects, bool)
+            and isinstance(previous_reconnects, int)
+            and not isinstance(previous_reconnects, bool)
+            and reconnects == previous_reconnects + 1
+        )
+        same_phase_maintenance = same_phase_format_correction or same_phase_browser_reconnect
+        if current_phase not in STATE_TRANSITIONS[previous_phase] and not same_phase_maintenance:
             errors.append(f"phase: illegal transition from {previous_phase} to {current_phase}")
-        expected_target = _expected_review_target(previous_state) if previous_phase == "REVIEW_PENDING" else None
-        if expected_target and current_phase != expected_target:
-            errors.append(
-                f"phase: review routing requires transition to {expected_target}, not {current_phase}"
+        consumes_review = previous_phase == "REVIEW_PENDING" and current_phase != previous_phase
+        if consumes_review:
+            history_results = [
+                _validate_state_string_list(state, name, field, errors)
+                for name, state in (
+                    ("previous", previous_state),
+                    ("current", current_state),
+                )
+                for field in ("unresolved_finding_ids", "blocker_fingerprints")
+            ]
+            history_valid = all(history_results)
+            decision = current_state.get("latest_decision")
+            if decision not in REVIEW_DECISIONS:
+                errors.append(
+                    "latest_decision: a valid review transition requires PASS, CHANGES_REQUESTED, or BLOCK"
+                )
+                expected_target = None
+            else:
+                expected_target = _expected_review_target(current_state, errors)
+            if expected_target and current_phase != expected_target:
+                errors.append(
+                    f"phase: review routing requires transition to {expected_target}, not {current_phase}"
+                )
+            if previous_round_valid and current_round_valid and current_round != previous_round + 1:
+                errors.append("review_round: valid review consumption must increment exactly once")
+            valid_review_consumption = (
+                decision in REVIEW_DECISIONS
+                and expected_target == current_phase
+                and previous_round_valid
+                and current_round_valid
+                and current_round == previous_round + 1
+                and history_valid
             )
-    review_round = current_state.get("review_round", 0)
-    if not isinstance(review_round, int) or isinstance(review_round, bool) or review_round < 0:
-        errors.append("review_round: must be a non-negative integer")
-    elif review_round > MAX_REVIEW_ROUNDS:
-        errors.append(f"review_round: exceeds maximum of {MAX_REVIEW_ROUNDS}")
-    if _fingerprints(previous_state) & _fingerprints(current_state):
-        errors.append("blocker_fingerprints: repeated blocker fingerprint requires stopping")
+        elif previous_round_valid and current_round_valid and current_round != previous_round:
+            errors.append("review_round: non-review transitions must preserve the review round")
+        if same_phase_maintenance and current_state.get("latest_decision") != previous_state.get(
+            "latest_decision"
+        ):
+            errors.append("latest_decision: maintenance transitions cannot consume a review")
+
+    if valid_review_consumption and previous_round >= 1 and (
+        _finding_ids(previous_state) & _finding_ids(current_state)
+        or _fingerprints(previous_state) & _fingerprints(current_state)
+    ):
+        errors.append(
+            "unresolved_findings: blocker persisted across two consecutive valid review rounds"
+        )
     return _errors_sorted(errors)
 
 
