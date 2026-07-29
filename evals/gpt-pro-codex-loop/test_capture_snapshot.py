@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import unittest
@@ -147,6 +148,38 @@ class CaptureSnapshotTests(unittest.TestCase):
         else:
             self.assertIn(".AI-PRO-LOOP/task/state.json", changed_paths)
 
+    def test_unchanged_tracked_case_variant_metadata_is_rejected_when_aliased(self) -> None:
+        metadata = self.repo / ".AI-PRO-LOOP" / "task" / "state.json"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("{}\n", encoding="utf-8")
+        aliases_metadata_directory = (self.repo / ".ai-pro-loop").exists()
+        run_git(self.repo, "add", str(metadata))
+        run_git(self.repo, "commit", "-qm", "track case-variant metadata")
+        baseline = run_git(self.repo, "rev-parse", "HEAD").decode().strip()
+
+        if aliases_metadata_directory:
+            with self.assertRaises(SnapshotError):
+                capture_snapshot(self.repo, baseline)
+        else:
+            snapshot = capture_snapshot(self.repo, baseline)
+            self.assertEqual([], snapshot["changed_files"])
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX case-sensitive paths")
+    def test_git_case_symlink_does_not_spoof_metadata_alias_detection(self) -> None:
+        (self.repo / ".git" / "info" / "exclude").write_text(
+            ".GIT\n", encoding="utf-8"
+        )
+        (self.repo / ".GIT").symlink_to(".git", target_is_directory=True)
+        product = self.repo / ".AI-PRO-LOOP" / "task" / "product.txt"
+        product.parent.mkdir(parents=True)
+        product.write_text("legitimate product content\n", encoding="utf-8")
+
+        snapshot = capture_snapshot(self.repo, self.baseline)
+        self.assertIn(
+            ".AI-PRO-LOOP/task/product.txt",
+            [item["path"] for item in snapshot["changed_files"]],
+        )
+
     def test_renamed_files_have_normalized_manifest_entries(self) -> None:
         (self.repo / "old.txt").rename(self.repo / "renamed.txt")
         run_git(self.repo, "add", "-A")
@@ -264,6 +297,28 @@ class CaptureSnapshotTests(unittest.TestCase):
 
         stable_snapshot = capture_snapshot(self.repo, self.baseline)
         self.assertGreaterEqual(tracked_diff_calls, 3)
+        self.assertEqual(stable_snapshot, snapshot)
+
+    def test_snapshot_brackets_a_mixed_component_sample_before_retrying(self) -> None:
+        tracked_diff_calls = 0
+        original_run_git = snapshot_module.run_git
+
+        def drifting_run_git(repository: Path, *args: str) -> bytes:
+            nonlocal tracked_diff_calls
+            result = original_run_git(repository, *args)
+            if args[:3] == ("diff", "--binary", "--no-ext-diff"):
+                tracked_diff_calls += 1
+                if tracked_diff_calls == 1:
+                    (self.repo / "app.py").write_text(
+                        "print('changed between observations')\n", encoding="utf-8"
+                    )
+            return result
+
+        with patch.object(snapshot_module, "run_git", side_effect=drifting_run_git):
+            snapshot = capture_snapshot(self.repo, self.baseline)
+
+        stable_snapshot = capture_snapshot(self.repo, self.baseline)
+        self.assertEqual(4, tracked_diff_calls)
         self.assertEqual(stable_snapshot, snapshot)
 
 

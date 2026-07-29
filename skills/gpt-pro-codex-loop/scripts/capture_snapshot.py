@@ -100,35 +100,32 @@ def _normalize_path(repository: Path, value: str) -> str:
     return normalized
 
 
-def _filesystem_is_case_insensitive(repository: Path) -> bool:
-    if os.path.normcase("A") == os.path.normcase("a"):
-        return True
-    git_directory = repository / ".git"
-    case_variant = repository / ".GIT"
-    try:
-        return case_variant.exists() and git_directory.samefile(case_variant)
-    except OSError as exc:
-        raise SnapshotError("could not determine filesystem path case rules") from exc
-
-
 def _is_metadata_path(repository: Path, path: str) -> bool:
     first_component = path.split("/", 1)[0]
     if first_component == METADATA_DIRECTORY:
         return True
     if first_component.casefold() != METADATA_DIRECTORY.casefold():
         return False
-    return _filesystem_is_case_insensitive(repository)
+    if os.path.normcase(first_component) == os.path.normcase(METADATA_DIRECTORY):
+        return True
+    actual = repository / first_component
+    canonical = repository / METADATA_DIRECTORY
+    try:
+        return actual.exists() and canonical.exists() and actual.samefile(canonical)
+    except OSError as exc:
+        raise SnapshotError("could not determine metadata path identity") from exc
 
 
-def _reject_tracked_or_staged_metadata(repository: Path) -> None:
-    tracked = _decode_paths(run_git(repository, "ls-files", "-z", "--", METADATA_DIRECTORY))
-    staged = _decode_paths(
-        run_git(repository, "diff", "--cached", "--name-only", "-z", "--", METADATA_DIRECTORY)
-    )
+def _reject_tracked_or_staged_metadata(repository: Path) -> tuple[bytes, bytes]:
+    tracked_raw = run_git(repository, "ls-files", "-z")
+    staged_raw = run_git(repository, "diff", "--cached", "--name-only", "-z")
+    tracked = _decode_paths(tracked_raw)
+    staged = _decode_paths(staged_raw)
     for path in [*tracked, *staged]:
         normalized = _normalize_path(repository, path)
         if _is_metadata_path(repository, normalized):
             raise SnapshotError(".ai-pro-loop metadata must not be tracked or staged")
+    return tracked_raw, staged_raw
 
 
 def _untracked_files(repository: Path) -> list[dict[str, str]]:
@@ -149,19 +146,21 @@ def _untracked_files(repository: Path) -> list[dict[str, str]]:
     return sorted(files, key=lambda item: item["path"])
 
 
-def _tracked_changes(repository: Path, baseline_head: str) -> list[dict[str, str]]:
-    tokens = _decode_paths(
-        run_git(
-            repository,
-            "diff",
-            "--name-status",
-            "-z",
-            "-M",
-            "--no-ext-diff",
-            baseline_head,
-            "--",
-        )
+def _tracked_status(repository: Path, baseline_head: str) -> bytes:
+    return run_git(
+        repository,
+        "diff",
+        "--name-status",
+        "-z",
+        "-M",
+        "--no-ext-diff",
+        baseline_head,
+        "--",
     )
+
+
+def _parse_tracked_changes(repository: Path, raw: bytes) -> list[dict[str, str]]:
+    tokens = _decode_paths(raw)
     status_names = {
         "A": "added",
         "C": "copied",
@@ -201,7 +200,40 @@ def _tracked_changes(repository: Path, baseline_head: str) -> list[dict[str, str
 
 def _preflight_manifest(repository: Path, baseline_head: str) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     _reject_tracked_or_staged_metadata(repository)
-    return _tracked_changes(repository, baseline_head), _untracked_files(repository)
+    tracked = _parse_tracked_changes(repository, _tracked_status(repository, baseline_head))
+    return tracked, _untracked_files(repository)
+
+
+def _component_observation(
+    repository: Path, baseline_head: str
+) -> tuple[bytes, bytes, bytes, bytes, list[dict[str, str]]]:
+    tracked_paths, staged_paths = _reject_tracked_or_staged_metadata(repository)
+    tracked_diff = run_git(
+        repository, "diff", "--binary", "--no-ext-diff", baseline_head, "--"
+    )
+    tracked_status = _tracked_status(repository, baseline_head)
+    untracked = _untracked_files(repository)
+    return tracked_paths, staged_paths, tracked_diff, tracked_status, untracked
+
+
+def _capture_components(
+    repository: Path, baseline_head: str
+) -> tuple[bytes, list[dict[str, str]], list[dict[str, str]]]:
+    """Return components observed unchanged across a bracketed interval.
+
+    This proves a stable observed interval; it is not OS-level transactional locking.
+    """
+    for _ in range(MAX_STABILITY_SAMPLES):
+        before = _component_observation(repository, baseline_head)
+        after = _component_observation(repository, baseline_head)
+        if before == after:
+            _, _, tracked_diff, tracked_status, untracked = after
+            return (
+                tracked_diff,
+                _parse_tracked_changes(repository, tracked_status),
+                untracked,
+            )
+    raise SnapshotError("product paths changed while capturing snapshot")
 
 
 def inspect_preflight(repository: Path, baseline_head: str) -> dict[str, object]:
@@ -287,22 +319,7 @@ def capture_snapshot(repository: Path, baseline_head: str) -> dict[str, object]:
     """Capture a canonical baseline-relative snapshot of all product changes."""
     root = _repository_root(repository)
     baseline = _baseline_commit(root, baseline_head)
-    previous: tuple[bytes, list[dict[str, str]], list[dict[str, str]]] | None = None
-    stable: tuple[bytes, list[dict[str, str]], list[dict[str, str]]] | None = None
-    for _ in range(MAX_STABILITY_SAMPLES):
-        _reject_tracked_or_staged_metadata(root)
-        tracked_diff = run_git(
-            root, "diff", "--binary", "--no-ext-diff", baseline, "--"
-        )
-        current = (tracked_diff, _tracked_changes(root, baseline), _untracked_files(root))
-        if current == previous:
-            stable = current
-            break
-        previous = current
-    if stable is None:
-        raise SnapshotError("product paths changed while capturing snapshot")
-
-    tracked_diff, tracked, untracked = stable
+    tracked_diff, tracked, untracked = _capture_components(root, baseline)
     tracked_digest = _bytes_digest(tracked_diff)
     untracked_digest = _canonical_digest(untracked)
     snapshot_digest = _canonical_digest(
