@@ -48,7 +48,9 @@ BOUNDED REPOSITORY EVIDENCE
 {{REPOSITORY_EVIDENCE}}
 
 The closed requirements payload has exactly these fields:
-schema_version=1; requirements_revision=1; supersedes_digest=null; change_reason; behavior_changed=false; user_approval_required=false; user_approval_received=false; scope_changed=false; public_contract_changed=false; prior_evidence_invalidated=false; review_round_reset=false; decision (PLAN_READY, NEED_USER_INPUT, or BLOCK); objective; requirements (unique id and statement); in_scope; out_of_scope; constraints; acceptance_criteria (unique id, criterion, required_evidence); design_direction; risk_items (unique id, risk, required_mitigation); verification_strategy; open_questions.
+schema_version=1; requirements_revision=1; supersedes_digest=null; change_reason as a non-empty string; behavior_changed=false; user_approval_required=false; user_approval_received=false; scope_changed=false; public_contract_changed=false; prior_evidence_invalidated=false; review_round_reset=false; decision (PLAN_READY, NEED_USER_INPUT, or BLOCK); objective; requirements; in_scope; out_of_scope; constraints; acceptance_criteria; design_direction; risk_items; verification_strategy; open_questions.
+
+Each requirements item is exactly {id, statement}. Each acceptance_criteria item is exactly {id, criterion, required_evidence}. Each risk_items item is exactly {id, risk, required_mitigation}. in_scope, out_of_scope, constraints, design_direction, verification_strategy, and open_questions are arrays of strings. Do not add fields such as text, requirement_ids, description, mitigation, acceptance_criterion_id, or method.
 
 PLAN_READY requires open_questions=[].
 
@@ -92,9 +94,11 @@ VALIDATED IMPLEMENTATION REPORT
 {{IMPLEMENTATION_REPORT_JSON}}
 
 The closed review payload has exactly:
-schema_version=1; requirements_digest={{REQUIREMENTS_DIGEST}}; reviewed_snapshot_digest={{SNAPSHOT_DIGEST}}; decision (PASS, CHANGES_REQUESTED, or BLOCK); acceptance_results keyed by every acceptance ID with status (PASS, FAIL, or UNVERIFIED) and non-empty evidence; findings; scope_violations; next_instruction.
+schema_version=1; requirements_digest={{REQUIREMENTS_DIGEST}}; reviewed_snapshot_digest={{SNAPSHOT_DIGEST}}; decision (PASS, CHANGES_REQUESTED, or BLOCK); acceptance_results keyed by every acceptance ID; findings; scope_violations; next_instruction.
 
-Each finding has exactly id, acceptance_id, root_cause_key, severity, category, required_action, evidence, and optional required_change. acceptance_id names an active criterion. root_cause_key is a stable descriptive key, not a digest. Do not include root_cause_fingerprint; Codex derives it locally after validation. Allowed actions: CODE_CHANGE, TEST_CHANGE, PROVIDE_EVIDENCE, REQUIREMENTS_REVISION, USER_DECISION.
+Each acceptance_results value is exactly {status, evidence}. status is PASS, FAIL, or UNVERIFIED. evidence is one non-empty string, never an array or object.
+
+Each finding has exactly id, acceptance_id, root_cause_key, severity, category, required_action, evidence, and optional required_change. severity is exactly BLOCKER, HIGH, MEDIUM, or LOW. acceptance_id names an active criterion. root_cause_key is a stable descriptive key, not a digest. Do not include root_cause_fingerprint; Codex derives it locally after validation. Allowed actions: CODE_CHANGE, TEST_CHANGE, PROVIDE_EVIDENCE, REQUIREMENTS_REVISION, USER_DECISION.
 
 PASS requires every acceptance result PASS, findings=[], scope_violations=[], exact digests, and sufficient supplied evidence.
 

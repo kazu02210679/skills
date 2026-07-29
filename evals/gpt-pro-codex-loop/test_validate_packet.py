@@ -2965,6 +2965,26 @@ class TransitionTests(unittest.TestCase):
             validate_bound_review_transition(previous, current),
         )
 
+    def test_prompt_contract_spells_out_closed_nested_shapes_and_enums(self) -> None:
+        prompt_contract = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "gpt-pro-codex-loop"
+            / "references"
+            / "prompt-contract.md"
+        ).read_text(encoding="utf-8")
+
+        required_fragments = (
+            "Each requirements item is exactly {id, statement}.",
+            "Each acceptance_criteria item is exactly {id, criterion, required_evidence}.",
+            "Each risk_items item is exactly {id, risk, required_mitigation}.",
+            "evidence is one non-empty string, never an array or object.",
+            "severity is exactly BLOCKER, HIGH, MEDIUM, or LOW.",
+        )
+        for fragment in required_fragments:
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, prompt_contract)
+
 
 if __name__ == "__main__":
     unittest.main()
