@@ -379,7 +379,7 @@ git commit -m "Add GPT Pro loop packet validation"
 - Consumes: repository root, baseline commit, and optional user-approved pre-existing product paths.
 - Produces: a preflight product manifest plus canonical snapshot JSON with `baseline_head`, `tracked_diff_digest`, `untracked_manifest_digest`, `snapshot_digest`, and normalized changed-file manifests.
 
-- [ ] **Step 1: Write failing snapshot tests**
+- [x] **Step 1: Write failing snapshot tests**
 
 Create temporary Git repositories and cover:
 
@@ -413,7 +413,7 @@ For pre-existing changes, assert that `validate_preflight()` rejects an
 unapproved initial path and accepts the same manifest only when that exact path
 is user-approved.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```powershell
 python evals/gpt-pro-codex-loop/test_capture_snapshot.py -v
@@ -421,7 +421,7 @@ python evals/gpt-pro-codex-loop/test_capture_snapshot.py -v
 
 Expected: FAIL because `capture_snapshot.py` does not exist.
 
-- [ ] **Step 3: Implement snapshot capture**
+- [x] **Step 3: Implement snapshot capture**
 
 Implement the public signatures
 `inspect_preflight(repository: Path, baseline_head: str) -> dict[str, object]`,
@@ -463,7 +463,7 @@ tracked and untracked product paths. `validate_preflight()` compares that
 immutable initial manifest with the exact user-approved path set. Do not apply
 this approval check to implementation changes captured later.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 ```powershell
 python evals/gpt-pro-codex-loop/test_capture_snapshot.py -v
@@ -471,7 +471,7 @@ python evals/gpt-pro-codex-loop/test_capture_snapshot.py -v
 
 Expected: all snapshot tests PASS.
 
-- [ ] **Step 5: Commit snapshot capture**
+- [x] **Step 5: Commit snapshot capture**
 
 ```powershell
 git add skills/gpt-pro-codex-loop/scripts/capture_snapshot.py evals/gpt-pro-codex-loop/test_capture_snapshot.py
