@@ -252,3 +252,88 @@ diff checks passed.
 
 None within Task 2. Paused Task 4 changes remain present and unstaged for their
 owning task.
+
+## Fix Round 5
+
+### Changed files
+
+- `skills/gpt-pro-codex-loop/scripts/validate_packet.py`
+- `evals/gpt-pro-codex-loop/test_validate_packet.py`
+- `.superpowers/sdd/2026-07-29-gpt-pro-codex-loop/task-2-report.md`
+
+The concurrent Task 4 Skill, UI metadata, README, evaluation README, and
+reference changes were not edited or staged by this round.
+
+### RED evidence
+
+The first focused run after adding the reset- and stop-provenance regressions
+reported `Ran 42 tests` and failed 29 assertions. The failures were specific to
+the old validator accepting self-asserted reset flags, missing or mismatched
+revision provenance, stale-label stop resumes, missing resolution evidence,
+retained stop provenance, and omitted required state fields.
+
+Subsequent focused RED cycles caught and proved the breaker-round edge cases:
+
+- non-material evidence invalidation was incorrectly treated as a material
+  round reset;
+- Browser-reconnect maintenance, non-requirements phases, and preflight could
+  inject pending material-reset authority;
+- active requirements provenance could remain null or be injected late;
+- resolution evidence was not bound to a unique stop instance; and
+- a prior approval event could be replayed against a later requirements
+  digest.
+
+Each targeted command exited 1 for its intended assertion before the matching
+validator change. The independent breaker review reproduced the lifecycle,
+active-provenance, resolution-replay, and approval-replay holes before their
+fixes.
+
+### GREEN commands and results
+
+```powershell
+python evals/gpt-pro-codex-loop/test_validate_packet.py -v
+python evals/gpt-pro-codex-loop/test_capture_snapshot.py -v
+python -m py_compile skills/gpt-pro-codex-loop/scripts/validate_packet.py
+python 'C:\Users\楫屋寿弥\.codex\skills\.system\skill-creator\scripts\quick_validate.py' skills/gpt-pro-codex-loop
+git diff --check
+```
+
+All commands exited 0. Packet validation reported `Ran 50 tests` and `OK`.
+Snapshot validation reported `Ran 16 tests` and `OK (skipped=1)` with the
+expected Windows POSIX-path skip. Compilation, direct Skill validation, and
+diff checks passed.
+
+### Self-review and breaker review
+
+- Material reset authority now belongs to a phase-scoped pending revision:
+  active revision/digest are immutable after their one allowed initialization;
+  pending revision is exactly next, has a new digest, and supersedes the active
+  digest.
+- Material flags match the requirements validator semantics. Approval is bound
+  to the pending digest and a monotonic approval sequence with explicit
+  evidence; evidence invalidation and reset are required.
+- Freezing promotes active revision/digest and approval sequence, resets the
+  review round to zero only for a material revision, and consumes every pending
+  provenance and authorization field. Maintenance and unrelated phases cannot
+  inject or mutate that authority.
+- Stop entry records the actual origin phase, route category, reason, and a
+  monotonic stop sequence. Resume targets are category-specific, preserve the
+  review round, require evidence bound to that exact stop sequence, and consume
+  origin provenance. The next transition must clear the resolution binding.
+- Exact revision reset replay, stale approval replay, stale decision-label
+  routing, wrong-origin resume, and nonadjacent resolution replay all fail
+  closed in a validated state chain.
+
+### Concerns
+
+DONE_WITH_CONCERNS. The final independent breaker pass found that approval or
+resolution evidence could be reused if a party able to rewrite Codex-owned
+local control artifacts also relabeled it with the expected next
+sequence/digest. The controller parked this as a real but out-of-scope
+adversarial-local-state concern: untrusted inputs are Pro browser packets,
+whereas state and events are trusted Codex-owned control artifacts. This
+validator guarantees transition continuity and stale-metadata detection; it
+does not provide cryptographic authenticity against arbitrary local-state
+rewrites. Literal protection would require signed or append-only trusted
+storage outside the approved Skill scope. Task 4 must document this trust
+boundary and preserve raw responses/events.

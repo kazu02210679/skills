@@ -116,6 +116,9 @@ def valid_review(
     return packet
 
 
+_UNSET_STATE_VALUE = object()
+
+
 def valid_state(
     phase: str,
     review_round: int,
@@ -130,9 +133,35 @@ def valid_state(
     conversation_binding_state: str = "CONVERSATION_BOUND",
     bound_conversation_url: object = "https://chatgpt.com/c/test-conversation",
     visible_model_label: object = "Pro",
+    active_requirements_revision: object = _UNSET_STATE_VALUE,
+    active_requirements_digest: object = _UNSET_STATE_VALUE,
+    approval_sequence: object = 0,
+    pending_requirements_revision: object = None,
+    pending_requirements_digest: object = None,
+    pending_supersedes_digest: object = None,
+    pending_approval_sequence: object = None,
+    pending_approved_requirements_digest: object = None,
+    pending_user_approval_evidence: object = None,
+    behavior_changed: bool = False,
+    user_approval_required: bool = False,
+    scope_changed: bool = False,
+    public_contract_changed: bool = False,
+    prior_evidence_invalidated: bool = False,
     review_round_reset: bool = False,
     user_approval_received: bool = False,
+    stop_origin_phase: object = None,
+    stop_origin_category: object = None,
+    stop_reason: object = None,
+    stop_sequence: object = 0,
+    resolution_evidence: object = None,
+    resolution_stop_sequence: object = None,
 ) -> dict[str, object]:
+    if active_requirements_revision is _UNSET_STATE_VALUE:
+        active_requirements_revision = None if phase == "PREFLIGHT" else 1
+    if active_requirements_digest is _UNSET_STATE_VALUE:
+        active_requirements_digest = (
+            None if phase == "PREFLIGHT" else "sha256:" + "a" * 64
+        )
     return {
         "phase": phase,
         "review_round": review_round,
@@ -146,8 +175,28 @@ def valid_state(
         "conversation_binding_state": conversation_binding_state,
         "bound_conversation_url": bound_conversation_url,
         "visible_model_label": visible_model_label,
+        "active_requirements_revision": active_requirements_revision,
+        "active_requirements_digest": active_requirements_digest,
+        "approval_sequence": approval_sequence,
+        "pending_requirements_revision": pending_requirements_revision,
+        "pending_requirements_digest": pending_requirements_digest,
+        "pending_supersedes_digest": pending_supersedes_digest,
+        "pending_approval_sequence": pending_approval_sequence,
+        "pending_approved_requirements_digest": pending_approved_requirements_digest,
+        "pending_user_approval_evidence": pending_user_approval_evidence,
+        "behavior_changed": behavior_changed,
+        "user_approval_required": user_approval_required,
+        "scope_changed": scope_changed,
+        "public_contract_changed": public_contract_changed,
+        "prior_evidence_invalidated": prior_evidence_invalidated,
         "review_round_reset": review_round_reset,
         "user_approval_received": user_approval_received,
+        "stop_origin_phase": stop_origin_phase,
+        "stop_origin_category": stop_origin_category,
+        "stop_reason": stop_reason,
+        "stop_sequence": stop_sequence,
+        "resolution_evidence": resolution_evidence,
+        "resolution_stop_sequence": resolution_stop_sequence,
     }
 
 
@@ -413,17 +462,67 @@ class ReviewPacketTests(unittest.TestCase):
 
 
 class TransitionTests(unittest.TestCase):
-    def test_only_approved_material_revision_resets_round_on_freeze(self) -> None:
+    def test_approved_material_revision_promotes_and_consumes_provenance(self) -> None:
         review_pending = valid_state("REVIEW_PENDING", 1)
-        previous = valid_state(
+        pending = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            pending_approval_sequence=1,
+            pending_approved_requirements_digest="sha256:" + "b" * 64,
+            pending_user_approval_evidence="The user approved revision 2.",
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        self.assertEqual(validate_transition(review_pending, pending), [])
+
+        frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            latest_decision="CHANGES_REQUESTED",
+            latest_requirements_decision="PLAN_READY",
+            required_actions=["REQUIREMENTS_REVISION"],
+            active_requirements_revision=2,
+            active_requirements_digest="sha256:" + "b" * 64,
+            approval_sequence=1,
+        )
+        self.assertEqual(validate_transition(pending, frozen), [])
+
+    def test_nonmaterial_revision_promotes_without_resetting_review_round(self) -> None:
+        pending = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            prior_evidence_invalidated=True,
+        )
+        frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            2,
+            latest_requirements_decision="PLAN_READY",
+            active_requirements_revision=2,
+            active_requirements_digest="sha256:" + "b" * 64,
+        )
+        self.assertEqual(validate_transition(pending, frozen), [])
+
+    def test_material_reset_rejects_self_asserted_or_unapproved_authority(self) -> None:
+        no_pending_provenance = valid_state(
             "REQUIREMENTS_PENDING",
             2,
             latest_decision="CHANGES_REQUESTED",
             required_actions=["REQUIREMENTS_REVISION"],
         )
-        self.assertEqual(validate_transition(review_pending, previous), [])
-
-        approved = valid_state(
+        self_asserted = valid_state(
             "REQUIREMENTS_FROZEN",
             0,
             latest_decision="CHANGES_REQUESTED",
@@ -432,39 +531,393 @@ class TransitionTests(unittest.TestCase):
             review_round_reset=True,
             user_approval_received=True,
         )
-        self.assertEqual(validate_transition(previous, approved), [])
-
-        unapproved = dict(approved, user_approval_received=False)
         self.assertIn(
-            "review_round: reset requires an approved material revision",
-            validate_transition(previous, unapproved),
+            "pending_requirements_revision: material reset requires the next requirements revision",
+            validate_transition(no_pending_provenance, self_asserted),
         )
 
-        arbitrary = dict(
-            approved,
-            review_round_reset=False,
-            user_approval_received=False,
+        unapproved = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            pending_approval_sequence=1,
+            pending_approved_requirements_digest="sha256:" + "b" * 64,
+            pending_user_approval_evidence="The user approved revision 2.",
+            behavior_changed=True,
+            user_approval_required=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
         )
         self.assertIn(
-            "review_round: non-review transitions must preserve the review round",
-            validate_transition(previous, arbitrary),
+            "user_approval_received: material reset requires explicit user approval",
+            validate_transition(
+                unapproved,
+                valid_state(
+                    "REQUIREMENTS_FROZEN",
+                    0,
+                    latest_requirements_decision="PLAN_READY",
+                    active_requirements_revision=2,
+                    active_requirements_digest="sha256:" + "b" * 64,
+                ),
+            ),
         )
 
-    def test_requirements_decisions_route_and_resume_without_consuming_round(self) -> None:
+    def test_material_reset_rejects_mismatched_revision_and_digest_provenance(self) -> None:
+        valid_pending = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            pending_approval_sequence=1,
+            pending_approved_requirements_digest="sha256:" + "b" * 64,
+            pending_user_approval_evidence="The user approved revision 2.",
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        valid_frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            latest_requirements_decision="PLAN_READY",
+            active_requirements_revision=2,
+            active_requirements_digest="sha256:" + "b" * 64,
+            approval_sequence=1,
+        )
+        cases = (
+            (
+                dict(valid_pending, pending_requirements_revision=3),
+                valid_frozen,
+                "pending_requirements_revision: material reset requires the next requirements revision",
+            ),
+            (
+                dict(
+                    valid_pending,
+                    pending_requirements_digest="sha256:" + "a" * 64,
+                ),
+                valid_frozen,
+                "pending_requirements_digest: material reset requires a new requirements digest",
+            ),
+            (
+                dict(
+                    valid_pending,
+                    pending_supersedes_digest="sha256:" + "c" * 64,
+                ),
+                valid_frozen,
+                "pending_supersedes_digest: must equal the active requirements digest",
+            ),
+            (
+                valid_pending,
+                dict(valid_frozen, active_requirements_revision=1),
+                "active_requirements_revision: frozen state must promote the pending revision",
+            ),
+            (
+                valid_pending,
+                dict(
+                    valid_frozen,
+                    active_requirements_digest="sha256:" + "c" * 64,
+                ),
+                "active_requirements_digest: frozen state must promote the pending digest",
+            ),
+        )
+        for pending, frozen, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, validate_transition(pending, frozen))
+
+    def test_material_reset_requires_and_consumes_every_authorization_field(self) -> None:
+        valid_pending = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            pending_approval_sequence=1,
+            pending_approved_requirements_digest="sha256:" + "b" * 64,
+            pending_user_approval_evidence="The user approved revision 2.",
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        valid_frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            latest_requirements_decision="PLAN_READY",
+            active_requirements_revision=2,
+            active_requirements_digest="sha256:" + "b" * 64,
+            approval_sequence=1,
+        )
+        cases = (
+            (
+                dict(valid_pending, required_actions=[]),
+                valid_frozen,
+                "required_actions: material reset requires prior REQUIREMENTS_REVISION routing",
+            ),
+            (
+                dict(valid_pending, behavior_changed=False),
+                valid_frozen,
+                "behavior_changed: material reset requires a behavior, scope, or public-contract change",
+            ),
+            (
+                dict(valid_pending, user_approval_required=False),
+                valid_frozen,
+                "user_approval_required: material reset requires user approval",
+            ),
+            (
+                dict(valid_pending, user_approval_received=False),
+                valid_frozen,
+                "user_approval_received: material reset requires explicit user approval",
+            ),
+            (
+                dict(valid_pending, prior_evidence_invalidated=False),
+                valid_frozen,
+                "prior_evidence_invalidated: material reset must invalidate prior evidence",
+            ),
+            (
+                dict(valid_pending, review_round_reset=False),
+                valid_frozen,
+                "review_round_reset: material revision must require a reset",
+            ),
+            (
+                valid_pending,
+                dict(valid_frozen, user_approval_received=True),
+                "user_approval_received: frozen state must consume pending revision flags",
+            ),
+            (
+                valid_pending,
+                dict(valid_frozen, pending_requirements_revision=2),
+                "pending_requirements_revision: frozen state must consume pending requirements provenance",
+            ),
+        )
+        for pending, frozen, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, validate_transition(pending, frozen))
+
+    def test_material_reset_authorization_cannot_be_replayed(self) -> None:
+        replayed_pending = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            active_requirements_revision=2,
+            active_requirements_digest="sha256:" + "b" * 64,
+            approval_sequence=1,
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            pending_approval_sequence=1,
+            pending_approved_requirements_digest="sha256:" + "b" * 64,
+            pending_user_approval_evidence="The user approved revision 2.",
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+        )
+        replayed_frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            active_requirements_revision=2,
+            active_requirements_digest="sha256:" + "b" * 64,
+            approval_sequence=1,
+            latest_requirements_decision="PLAN_READY",
+        )
+        errors = validate_transition(replayed_pending, replayed_frozen)
+        self.assertIn(
+            "pending_requirements_revision: material reset requires the next requirements revision",
+            errors,
+        )
+        self.assertIn(
+            "pending_requirements_digest: material reset requires a new requirements digest",
+            errors,
+        )
+
+    def test_material_reset_rejects_replayed_approval_event(self) -> None:
+        stale_approval = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            active_requirements_revision=2,
+            active_requirements_digest="sha256:" + "b" * 64,
+            approval_sequence=1,
+            pending_requirements_revision=3,
+            pending_requirements_digest="sha256:" + "c" * 64,
+            pending_supersedes_digest="sha256:" + "b" * 64,
+            pending_approval_sequence=1,
+            pending_approved_requirements_digest="sha256:" + "b" * 64,
+            pending_user_approval_evidence="The user approved revision 2.",
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+        )
+        frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            active_requirements_revision=3,
+            active_requirements_digest="sha256:" + "c" * 64,
+            approval_sequence=1,
+            latest_requirements_decision="PLAN_READY",
+        )
+        errors = validate_transition(stale_approval, frozen)
+        self.assertIn(
+            "pending_approval_sequence: material reset requires a fresh approval event",
+            errors,
+        )
+        self.assertIn(
+            "pending_approved_requirements_digest: must equal the pending requirements digest",
+            errors,
+        )
+
+    def test_maintenance_cannot_inject_material_reset_provenance(self) -> None:
+        pending_without_revision = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+        )
+        injected = valid_state(
+            "REQUIREMENTS_PENDING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+            browser_reconnect_count=1,
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        self.assertIn(
+            "pending_requirements: maintenance transitions must preserve revision provenance",
+            validate_transition(pending_without_revision, injected),
+        )
+
+    def test_material_reset_provenance_exists_only_while_requirements_are_pending(self) -> None:
+        injected = valid_state(
+            "LOCAL_VERIFICATION",
+            2,
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        self.assertIn(
+            "current.pending_requirements: revision provenance is allowed only while requirements are pending",
+            validate_transition(valid_state("IMPLEMENTING", 2), injected),
+        )
+
+    def test_preflight_cannot_self_assert_material_reset_provenance(self) -> None:
+        injected = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            pending_requirements_revision=2,
+            pending_requirements_digest="sha256:" + "b" * 64,
+            pending_supersedes_digest="sha256:" + "a" * 64,
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        self.assertIn(
+            "pending_requirements: provenance may be introduced only by requirements revision routing or a resolved requirements stop",
+            validate_transition(valid_state("PREFLIGHT", 0), injected),
+        )
+
+    def test_active_requirements_provenance_is_initialized_once_after_preflight(self) -> None:
+        self.assertEqual(
+            validate_transition(
+                valid_state("PREFLIGHT", 0),
+                valid_state("REQUIREMENTS_PENDING", 0),
+            ),
+            [],
+        )
+
+        null_pending = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+        )
+        null_frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            latest_requirements_decision="PLAN_READY",
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+        )
+        self.assertIn(
+            "current.active_requirements: revision and digest are required after preflight",
+            validate_transition(null_pending, null_frozen),
+        )
+
+        late_source = valid_state(
+            "IMPLEMENTING",
+            1,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+        )
+        late_injection = valid_state(
+            "LOCAL_VERIFICATION",
+            1,
+            active_requirements_revision=99,
+            active_requirements_digest="sha256:" + "b" * 64,
+        )
+        self.assertIn(
+            "active_requirements: may be initialized only when preflight enters requirements pending",
+            validate_transition(late_source, late_injection),
+        )
+
+    def test_requirements_stops_resume_with_provenance_without_consuming_round(self) -> None:
         previous = valid_state("REQUIREMENTS_PENDING", 2)
         routes = (
-            ("NEED_USER_INPUT", "USER_DECISION_REQUIRED"),
-            ("BLOCK", "BLOCKED"),
+            (
+                "NEED_USER_INPUT",
+                "USER_DECISION_REQUIRED",
+                "REQUIREMENTS_NEED_USER_INPUT",
+            ),
+            ("BLOCK", "BLOCKED", "REQUIREMENTS_BLOCK"),
         )
-        for decision, target in routes:
+        for decision, target, category in routes:
             with self.subTest(decision=decision):
                 stopped = valid_state(
                     target,
                     2,
                     latest_requirements_decision=decision,
+                    stop_origin_phase="REQUIREMENTS_PENDING",
+                    stop_origin_category=category,
+                    stop_reason="Requirements need explicit user resolution.",
+                    stop_sequence=1,
                 )
                 self.assertEqual(validate_transition(previous, stopped), [])
-                resumed = valid_state("REQUIREMENTS_PENDING", 2)
+                resumed = valid_state(
+                    "REQUIREMENTS_PENDING",
+                    2,
+                    stop_sequence=1,
+                    resolution_evidence="The user supplied the required decision.",
+                    resolution_stop_sequence=1,
+                )
                 self.assertEqual(validate_transition(stopped, resumed), [])
 
         wrong_route = valid_state(
@@ -476,13 +929,277 @@ class TransitionTests(unittest.TestCase):
             "phase: requirements routing requires transition to USER_DECISION_REQUIRED, not REQUIREMENTS_FROZEN",
             validate_transition(previous, wrong_route),
         )
-        unrelated_block = valid_state("BLOCKED", 2)
-        self.assertIn(
-            "phase: requirements resume requires a prior NEED_USER_INPUT or BLOCK decision",
-            validate_transition(
-                unrelated_block,
-                valid_state("REQUIREMENTS_PENDING", 2),
+
+    def test_stop_entry_requires_actual_origin_category_and_reason(self) -> None:
+        previous = valid_state("REQUIREMENTS_PENDING", 2)
+        base = valid_state(
+            "USER_DECISION_REQUIRED",
+            2,
+            latest_requirements_decision="NEED_USER_INPUT",
+            stop_origin_phase="REQUIREMENTS_PENDING",
+            stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
+            stop_reason="A product choice remains open.",
+            stop_sequence=1,
+        )
+        cases = (
+            (
+                dict(base, stop_origin_phase="REVIEW_PENDING"),
+                "stop_origin_phase: must match the actual stop origin REQUIREMENTS_PENDING",
             ),
+            (
+                dict(base, stop_origin_category="REVIEW_USER_DECISION"),
+                "stop_origin_category: does not match the stop route",
+            ),
+            (
+                dict(base, stop_reason=None),
+                "stop_reason: stop entry requires a non-empty reason",
+            ),
+            (
+                dict(base, resolution_evidence="Forged early resolution."),
+                "resolution_evidence: must be null when entering a stop state",
+            ),
+            (
+                dict(base, stop_sequence=0),
+                "stop_sequence: stop entry must increment exactly once",
+            ),
+        )
+        for stopped, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertIn(expected, validate_transition(previous, stopped))
+
+    def test_review_and_final_verification_stops_record_route_provenance(self) -> None:
+        cases = (
+            (
+                valid_state("REVIEW_PENDING", 1),
+                valid_state(
+                    "USER_DECISION_REQUIRED",
+                    2,
+                    latest_decision="CHANGES_REQUESTED",
+                    required_actions=["USER_DECISION"],
+                    stop_origin_phase="REVIEW_PENDING",
+                    stop_origin_category="REVIEW_USER_DECISION",
+                    stop_reason="The review requires a user decision.",
+                    stop_sequence=1,
+                ),
+            ),
+            (
+                valid_state("REVIEW_PENDING", 1),
+                valid_state(
+                    "USER_DECISION_REQUIRED",
+                    2,
+                    latest_decision="BLOCK",
+                    stop_origin_phase="REVIEW_PENDING",
+                    stop_origin_category="REVIEW_BLOCK",
+                    stop_reason="The review reported a blocker.",
+                    stop_sequence=1,
+                ),
+            ),
+            (
+                valid_state("FINAL_VERIFICATION", 2, latest_decision="PASS"),
+                valid_state(
+                    "BLOCKED",
+                    2,
+                    latest_decision="PASS",
+                    stop_origin_phase="FINAL_VERIFICATION",
+                    stop_origin_category="FINAL_VERIFICATION_BLOCK",
+                    stop_reason="A final local gate cannot proceed.",
+                    stop_sequence=1,
+                ),
+            ),
+        )
+        for previous, stopped in cases:
+            with self.subTest(category=stopped["stop_origin_category"]):
+                self.assertEqual(validate_transition(previous, stopped), [])
+
+    def test_stop_resume_target_is_bound_to_origin_not_stale_decision_labels(self) -> None:
+        review_stop = valid_state(
+            "USER_DECISION_REQUIRED",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            latest_requirements_decision="NEED_USER_INPUT",
+            required_actions=["USER_DECISION"],
+            stop_origin_phase="REVIEW_PENDING",
+            stop_origin_category="REVIEW_USER_DECISION",
+            stop_reason="The review requires a user decision.",
+            stop_sequence=1,
+        )
+        self.assertIn(
+            "phase: REVIEW_USER_DECISION stop may resume only to IMPLEMENTING or REVIEW_PENDING, not REQUIREMENTS_PENDING",
+            validate_transition(
+                review_stop,
+                valid_state(
+                    "REQUIREMENTS_PENDING",
+                    2,
+                    stop_sequence=1,
+                    resolution_evidence="A stale requirements label was forged.",
+                    resolution_stop_sequence=1,
+                ),
+            ),
+        )
+
+        final_stop = valid_state(
+            "BLOCKED",
+            2,
+            latest_requirements_decision="BLOCK",
+            stop_origin_phase="FINAL_VERIFICATION",
+            stop_origin_category="FINAL_VERIFICATION_BLOCK",
+            stop_reason="A final local gate cannot proceed.",
+            stop_sequence=1,
+        )
+        self.assertIn(
+            "phase: FINAL_VERIFICATION_BLOCK stop may resume only to FINAL_VERIFICATION or IMPLEMENTING, not REQUIREMENTS_PENDING",
+            validate_transition(
+                final_stop,
+                valid_state(
+                    "REQUIREMENTS_PENDING",
+                    2,
+                    stop_sequence=1,
+                    resolution_evidence="A stale requirements label was forged.",
+                    resolution_stop_sequence=1,
+                ),
+            ),
+        )
+
+    def test_review_and_final_stops_resume_only_with_resolution_evidence(self) -> None:
+        review_stop = valid_state(
+            "USER_DECISION_REQUIRED",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["USER_DECISION"],
+            stop_origin_phase="REVIEW_PENDING",
+            stop_origin_category="REVIEW_USER_DECISION",
+            stop_reason="The review requires a user decision.",
+            stop_sequence=1,
+        )
+        self.assertEqual(
+            validate_transition(
+                review_stop,
+                valid_state(
+                    "IMPLEMENTING",
+                    2,
+                    stop_sequence=1,
+                    resolution_evidence="The user selected the implementation behavior.",
+                    resolution_stop_sequence=1,
+                ),
+            ),
+            [],
+        )
+        self.assertIn(
+            "resolution_evidence: stop resume requires explicit resolution evidence",
+            validate_transition(
+                review_stop,
+                valid_state("IMPLEMENTING", 2, stop_sequence=1),
+            ),
+        )
+
+        final_stop = valid_state(
+            "BLOCKED",
+            2,
+            stop_origin_phase="FINAL_VERIFICATION",
+            stop_origin_category="FINAL_VERIFICATION_BLOCK",
+            stop_reason="A final local gate cannot proceed.",
+            stop_sequence=1,
+        )
+        self.assertEqual(
+            validate_transition(
+                final_stop,
+                valid_state(
+                    "FINAL_VERIFICATION",
+                    2,
+                    stop_sequence=1,
+                    resolution_evidence="The unavailable local gate is restored.",
+                    resolution_stop_sequence=1,
+                ),
+            ),
+            [],
+        )
+
+    def test_resume_consumes_stop_provenance_and_resolution_is_one_shot(self) -> None:
+        stopped = valid_state(
+            "USER_DECISION_REQUIRED",
+            1,
+            latest_requirements_decision="NEED_USER_INPUT",
+            stop_origin_phase="REQUIREMENTS_PENDING",
+            stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
+            stop_reason="A product choice remains open.",
+            stop_sequence=1,
+        )
+        retained = valid_state(
+            "REQUIREMENTS_PENDING",
+            1,
+            stop_origin_phase="REQUIREMENTS_PENDING",
+            stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
+            stop_reason="A product choice remains open.",
+            stop_sequence=1,
+            resolution_evidence="The user resolved the choice.",
+            resolution_stop_sequence=1,
+        )
+        self.assertIn(
+            "stop_provenance: resume must consume origin phase, category, and reason",
+            validate_transition(stopped, retained),
+        )
+
+        resumed = valid_state(
+            "REQUIREMENTS_PENDING",
+            1,
+            stop_sequence=1,
+            resolution_evidence="The user resolved the choice.",
+            resolution_stop_sequence=1,
+        )
+        replayed = valid_state(
+            "REQUIREMENTS_FROZEN",
+            1,
+            latest_requirements_decision="PLAN_READY",
+            stop_sequence=1,
+            resolution_evidence="The user resolved the choice.",
+            resolution_stop_sequence=1,
+        )
+        self.assertIn(
+            "resolution_evidence: must be cleared after the resumed transition",
+            validate_transition(resumed, replayed),
+        )
+
+    def test_resolution_evidence_is_bound_to_the_current_stop_sequence(self) -> None:
+        pending = valid_state("REQUIREMENTS_PENDING", 1)
+        first_stop = valid_state(
+            "USER_DECISION_REQUIRED",
+            1,
+            latest_requirements_decision="NEED_USER_INPUT",
+            stop_origin_phase="REQUIREMENTS_PENDING",
+            stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
+            stop_reason="A product choice remains open.",
+            stop_sequence=1,
+        )
+        first_resume = valid_state(
+            "REQUIREMENTS_PENDING",
+            1,
+            stop_sequence=1,
+            resolution_evidence="The user resolved the choice.",
+            resolution_stop_sequence=1,
+        )
+        second_stop = valid_state(
+            "USER_DECISION_REQUIRED",
+            1,
+            latest_requirements_decision="NEED_USER_INPUT",
+            stop_origin_phase="REQUIREMENTS_PENDING",
+            stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
+            stop_reason="A later product choice remains open.",
+            stop_sequence=2,
+        )
+        self.assertEqual(validate_transition(pending, first_stop), [])
+        self.assertEqual(validate_transition(first_stop, first_resume), [])
+        self.assertEqual(validate_transition(first_resume, second_stop), [])
+
+        replayed_resolution = valid_state(
+            "REQUIREMENTS_PENDING",
+            1,
+            stop_sequence=2,
+            resolution_evidence="The user resolved the choice.",
+            resolution_stop_sequence=1,
+        )
+        self.assertIn(
+            "resolution_stop_sequence: must match the current stop sequence",
+            validate_transition(second_stop, replayed_resolution),
         )
 
     def test_conversation_is_bound_once_then_preserved_with_visible_model(self) -> None:
@@ -536,8 +1253,28 @@ class TransitionTests(unittest.TestCase):
             "required_actions",
             "format_error_count",
             "browser_reconnect_count",
+            "active_requirements_revision",
+            "active_requirements_digest",
+            "approval_sequence",
+            "pending_requirements_revision",
+            "pending_requirements_digest",
+            "pending_supersedes_digest",
+            "pending_approval_sequence",
+            "pending_approved_requirements_digest",
+            "pending_user_approval_evidence",
+            "behavior_changed",
+            "user_approval_required",
+            "scope_changed",
+            "public_contract_changed",
+            "prior_evidence_invalidated",
             "review_round_reset",
             "user_approval_received",
+            "stop_origin_phase",
+            "stop_origin_category",
+            "stop_reason",
+            "stop_sequence",
+            "resolution_evidence",
+            "resolution_stop_sequence",
         )
         for field in required_fields:
             with self.subTest(field=field):
@@ -571,17 +1308,28 @@ class TransitionTests(unittest.TestCase):
     def test_review_routing_uses_required_latest_decision(self) -> None:
         previous = valid_state("REVIEW_PENDING", 0)
         cases = (
-            ("PASS", [], "FINAL_VERIFICATION"),
-            ("CHANGES_REQUESTED", ["CODE_CHANGE"], "IMPLEMENTING"),
-            ("BLOCK", [], "USER_DECISION_REQUIRED"),
+            ("PASS", [], "FINAL_VERIFICATION", {}),
+            ("CHANGES_REQUESTED", ["CODE_CHANGE"], "IMPLEMENTING", {}),
+            (
+                "BLOCK",
+                [],
+                "USER_DECISION_REQUIRED",
+                {
+                    "stop_origin_phase": "REVIEW_PENDING",
+                    "stop_origin_category": "REVIEW_BLOCK",
+                    "stop_reason": "The review reported a blocker.",
+                    "stop_sequence": 1,
+                },
+            ),
         )
-        for decision, actions, phase in cases:
+        for decision, actions, phase, stop_provenance in cases:
             with self.subTest(decision=decision):
                 current = valid_state(
                     phase,
                     1,
                     latest_decision=decision,
                     required_actions=actions,
+                    **stop_provenance,
                 )
                 self.assertEqual(validate_transition(previous, current), [])
         missing_decision = valid_state("FINAL_VERIFICATION", 1)

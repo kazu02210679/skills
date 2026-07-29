@@ -32,6 +32,66 @@ REQUIRED_ACTIONS = frozenset(
     }
 )
 FINDING_SEVERITIES = frozenset({"BLOCKER", "HIGH", "MEDIUM", "LOW"})
+MATERIAL_CHANGE_FIELDS = (
+    "behavior_changed",
+    "scope_changed",
+    "public_contract_changed",
+)
+MATERIAL_REVISION_FLAGS = (
+    "behavior_changed",
+    "user_approval_required",
+    "user_approval_received",
+    "scope_changed",
+    "public_contract_changed",
+    "prior_evidence_invalidated",
+    "review_round_reset",
+)
+MATERIAL_RESET_SIGNALS = (
+    *MATERIAL_CHANGE_FIELDS,
+    "user_approval_required",
+    "user_approval_received",
+    "review_round_reset",
+)
+PENDING_REVISION_PROVENANCE_FIELDS = (
+    "pending_requirements_revision",
+    "pending_requirements_digest",
+    "pending_supersedes_digest",
+    "pending_approval_sequence",
+    "pending_approved_requirements_digest",
+    "pending_user_approval_evidence",
+    *MATERIAL_REVISION_FLAGS,
+)
+STOP_PHASES = frozenset({"USER_DECISION_REQUIRED", "BLOCKED"})
+STOP_ORIGIN_CATEGORIES = frozenset(
+    {
+        "REQUIREMENTS_NEED_USER_INPUT",
+        "REQUIREMENTS_BLOCK",
+        "REVIEW_USER_DECISION",
+        "REVIEW_BLOCK",
+        "FINAL_VERIFICATION_BLOCK",
+    }
+)
+STOP_CATEGORY_ORIGINS = {
+    "REQUIREMENTS_NEED_USER_INPUT": "REQUIREMENTS_PENDING",
+    "REQUIREMENTS_BLOCK": "REQUIREMENTS_PENDING",
+    "REVIEW_USER_DECISION": "REVIEW_PENDING",
+    "REVIEW_BLOCK": "REVIEW_PENDING",
+    "FINAL_VERIFICATION_BLOCK": "FINAL_VERIFICATION",
+}
+STOP_CATEGORY_PHASES = {
+    "REQUIREMENTS_NEED_USER_INPUT": "USER_DECISION_REQUIRED",
+    "REQUIREMENTS_BLOCK": "BLOCKED",
+    "REVIEW_USER_DECISION": "USER_DECISION_REQUIRED",
+    "REVIEW_BLOCK": "USER_DECISION_REQUIRED",
+    "FINAL_VERIFICATION_BLOCK": "BLOCKED",
+}
+STOP_RESUME_TARGETS = {
+    "REQUIREMENTS_NEED_USER_INPUT": ("REQUIREMENTS_PENDING",),
+    "REQUIREMENTS_BLOCK": ("REQUIREMENTS_PENDING",),
+    "REVIEW_USER_DECISION": ("IMPLEMENTING", "REVIEW_PENDING"),
+    "REVIEW_BLOCK": ("IMPLEMENTING", "REVIEW_PENDING"),
+    "FINAL_VERIFICATION_BLOCK": ("FINAL_VERIFICATION", "IMPLEMENTING"),
+}
 REQUIRED_REQUIREMENTS_FIELDS = (
     "schema_version",
     "requirements_revision",
@@ -93,8 +153,28 @@ REQUIRED_STATE_FIELDS = (
     "conversation_binding_state",
     "bound_conversation_url",
     "visible_model_label",
+    "active_requirements_revision",
+    "active_requirements_digest",
+    "approval_sequence",
+    "pending_requirements_revision",
+    "pending_requirements_digest",
+    "pending_supersedes_digest",
+    "pending_approval_sequence",
+    "pending_approved_requirements_digest",
+    "pending_user_approval_evidence",
+    "behavior_changed",
+    "user_approval_required",
+    "scope_changed",
+    "public_contract_changed",
+    "prior_evidence_invalidated",
     "review_round_reset",
     "user_approval_received",
+    "stop_origin_phase",
+    "stop_origin_category",
+    "stop_reason",
+    "stop_sequence",
+    "resolution_evidence",
+    "resolution_stop_sequence",
 )
 STATE_TRANSITIONS = {
     "PREFLIGHT": frozenset({"REQUIREMENTS_PENDING"}),
@@ -113,10 +193,14 @@ STATE_TRANSITIONS = {
             "FINAL_VERIFICATION",
         }
     ),
-    "USER_DECISION_REQUIRED": frozenset({"REQUIREMENTS_PENDING"}),
+    "USER_DECISION_REQUIRED": frozenset(
+        {"REQUIREMENTS_PENDING", "IMPLEMENTING", "REVIEW_PENDING"}
+    ),
     "FINAL_VERIFICATION": frozenset({"COMPLETE", "REVIEW_PENDING", "BLOCKED"}),
     "COMPLETE": frozenset(),
-    "BLOCKED": frozenset({"REQUIREMENTS_PENDING"}),
+    "BLOCKED": frozenset(
+        {"REQUIREMENTS_PENDING", "FINAL_VERIFICATION", "IMPLEMENTING"}
+    ),
 }
 MAX_REVIEW_ROUNDS = 3
 MAX_FORMAT_ERRORS = 1
@@ -474,6 +558,23 @@ def _state_mapping(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+def _has_pending_requirements_provenance(state: dict[str, object]) -> bool:
+    return (
+        any(
+            state.get(field) is not None
+            for field in (
+                "pending_requirements_revision",
+                "pending_requirements_digest",
+                "pending_supersedes_digest",
+                "pending_approval_sequence",
+                "pending_approved_requirements_digest",
+                "pending_user_approval_evidence",
+            )
+        )
+        or any(state.get(field) is True for field in MATERIAL_REVISION_FLAGS)
+    )
+
+
 def _validate_conversation_binding(
     state: dict[str, object], name: str, errors: list[str]
 ) -> bool:
@@ -536,9 +637,197 @@ def _validate_state_fields(
             or value < 0
         ):
             errors.append(f"{name}.{field}: must be a non-negative integer")
-    for field in ("review_round_reset", "user_approval_received"):
+    for field in MATERIAL_REVISION_FLAGS:
         if field in state and not isinstance(state.get(field), bool):
             errors.append(f"{name}.{field}: must be a boolean")
+    for field in (
+        "active_requirements_revision",
+        "pending_requirements_revision",
+    ):
+        value = state.get(field)
+        if field in state and value is not None and (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 1
+        ):
+            errors.append(f"{name}.{field}: must be a positive integer or null")
+    approval_sequence = state.get("approval_sequence")
+    if "approval_sequence" in state and (
+        not isinstance(approval_sequence, int)
+        or isinstance(approval_sequence, bool)
+        or approval_sequence < 0
+    ):
+        errors.append(f"{name}.approval_sequence: must be a non-negative integer")
+    pending_approval_sequence = state.get("pending_approval_sequence")
+    if "pending_approval_sequence" in state and (
+        pending_approval_sequence is not None
+        and (
+            not isinstance(pending_approval_sequence, int)
+            or isinstance(pending_approval_sequence, bool)
+            or pending_approval_sequence < 1
+        )
+    ):
+        errors.append(
+            f"{name}.pending_approval_sequence: must be a positive integer or null"
+        )
+    for field in (
+        "active_requirements_digest",
+        "pending_requirements_digest",
+        "pending_supersedes_digest",
+        "pending_approved_requirements_digest",
+    ):
+        if field in state:
+            _require_digest(
+                state.get(field),
+                f"{name}.{field}",
+                errors,
+                nullable=True,
+            )
+    active_revision = state.get("active_requirements_revision")
+    active_digest = state.get("active_requirements_digest")
+    if (
+        "active_requirements_revision" in state
+        and "active_requirements_digest" in state
+        and (active_revision is None) != (active_digest is None)
+    ):
+        errors.append(
+            f"{name}.active_requirements: revision and digest must both be set or null"
+        )
+    if state.get("phase") == "PREFLIGHT":
+        if active_revision is not None or active_digest is not None:
+            errors.append(
+                f"{name}.active_requirements: must be null during preflight"
+            )
+    elif (
+        not isinstance(active_revision, int)
+        or isinstance(active_revision, bool)
+        or active_revision < 1
+        or not isinstance(active_digest, str)
+        or not DIGEST_PATTERN.fullmatch(active_digest)
+    ):
+        errors.append(
+            f"{name}.active_requirements: revision and digest are required after preflight"
+        )
+    pending_revision = state.get("pending_requirements_revision")
+    pending_digest = state.get("pending_requirements_digest")
+    if (
+        "pending_requirements_revision" in state
+        and "pending_requirements_digest" in state
+        and (pending_revision is None) != (pending_digest is None)
+    ):
+        errors.append(
+            f"{name}.pending_requirements: revision and digest must both be set or null"
+        )
+    if (
+        pending_revision is None
+        and state.get("pending_supersedes_digest") is not None
+    ):
+        errors.append(
+            f"{name}.pending_supersedes_digest: must be null without pending requirements"
+        )
+    pending_approval_values = (
+        pending_approval_sequence,
+        state.get("pending_approved_requirements_digest"),
+        state.get("pending_user_approval_evidence"),
+    )
+    if any(value is not None for value in pending_approval_values) and not all(
+        value is not None for value in pending_approval_values
+    ):
+        errors.append(
+            f"{name}.pending_approval: sequence, approved digest, and evidence must all be set or null"
+        )
+    pending_approval_evidence = state.get("pending_user_approval_evidence")
+    if (
+        "pending_user_approval_evidence" in state
+        and pending_approval_evidence is not None
+        and not _is_nonempty_string(pending_approval_evidence)
+    ):
+        errors.append(
+            f"{name}.pending_user_approval_evidence: must be a non-empty string or null"
+        )
+    if (
+        state.get("phase") == "REQUIREMENTS_PENDING"
+        and state.get("user_approval_received") is True
+        and not all(value is not None for value in pending_approval_values)
+    ):
+        errors.append(
+            f"{name}.pending_approval: explicit user approval requires bound approval provenance"
+        )
+    if (
+        all(value is not None for value in pending_approval_values)
+        and state.get("user_approval_received") is not True
+    ):
+        errors.append(
+            f"{name}.user_approval_received: bound approval provenance requires explicit approval"
+        )
+    if (
+        state.get("scope_changed") is True
+        or state.get("public_contract_changed") is True
+    ) and state.get("behavior_changed") is not True:
+        errors.append(
+            f"{name}.behavior_changed: material scope or public-contract changes require behavior_changed"
+        )
+    if (
+        state.get("phase") != "REQUIREMENTS_PENDING"
+        and _has_pending_requirements_provenance(state)
+    ):
+        errors.append(
+            f"{name}.pending_requirements: revision provenance is allowed only while requirements are pending"
+        )
+    stop_origin_phase = state.get("stop_origin_phase")
+    if (
+        "stop_origin_phase" in state
+        and stop_origin_phase is not None
+        and stop_origin_phase not in STATE_TRANSITIONS
+    ):
+        errors.append(
+            f"{name}.stop_origin_phase: must be a workflow phase or null"
+        )
+    stop_origin_category = state.get("stop_origin_category")
+    if (
+        "stop_origin_category" in state
+        and stop_origin_category is not None
+        and stop_origin_category not in STOP_ORIGIN_CATEGORIES
+    ):
+        errors.append(
+            f"{name}.stop_origin_category: must be a valid stop category or null"
+        )
+    for field in ("stop_reason", "resolution_evidence"):
+        value = state.get(field)
+        if (
+            field in state
+            and value is not None
+            and not _is_nonempty_string(value)
+        ):
+            errors.append(f"{name}.{field}: must be a non-empty string or null")
+    stop_sequence = state.get("stop_sequence")
+    if "stop_sequence" in state and (
+        not isinstance(stop_sequence, int)
+        or isinstance(stop_sequence, bool)
+        or stop_sequence < 0
+    ):
+        errors.append(f"{name}.stop_sequence: must be a non-negative integer")
+    resolution_stop_sequence = state.get("resolution_stop_sequence")
+    if "resolution_stop_sequence" in state and (
+        resolution_stop_sequence is not None
+        and (
+            not isinstance(resolution_stop_sequence, int)
+            or isinstance(resolution_stop_sequence, bool)
+            or resolution_stop_sequence < 1
+        )
+    ):
+        errors.append(
+            f"{name}.resolution_stop_sequence: must be a positive integer or null"
+        )
+    if (
+        "resolution_evidence" in state
+        and "resolution_stop_sequence" in state
+        and (state.get("resolution_evidence") is None)
+        != (resolution_stop_sequence is None)
+    ):
+        errors.append(
+            f"{name}.resolution: evidence and stop sequence must both be set or null"
+        )
 
 
 def _state_string_set(state: dict[str, object], field: str) -> set[str]:
@@ -658,6 +947,370 @@ def _expected_requirements_target(
     return target
 
 
+def _expected_stop_category(
+    previous_phase: str,
+    current_phase: str,
+    current_state: dict[str, object],
+) -> str | None:
+    if previous_phase == "REQUIREMENTS_PENDING":
+        decision = current_state.get("latest_requirements_decision")
+        if decision == "NEED_USER_INPUT" and current_phase == "USER_DECISION_REQUIRED":
+            return "REQUIREMENTS_NEED_USER_INPUT"
+        if decision == "BLOCK" and current_phase == "BLOCKED":
+            return "REQUIREMENTS_BLOCK"
+    if previous_phase == "REVIEW_PENDING" and current_phase == "USER_DECISION_REQUIRED":
+        decision = current_state.get("latest_decision")
+        actions = current_state.get("required_actions")
+        if (
+            decision == "CHANGES_REQUESTED"
+            and isinstance(actions, list)
+            and "USER_DECISION" in actions
+        ):
+            return "REVIEW_USER_DECISION"
+        if decision == "BLOCK":
+            return "REVIEW_BLOCK"
+    if previous_phase == "FINAL_VERIFICATION" and current_phase == "BLOCKED":
+        return "FINAL_VERIFICATION_BLOCK"
+    return None
+
+
+def _validate_stop_state_shape(
+    state: dict[str, object],
+    name: str,
+    errors: list[str],
+) -> None:
+    phase = state.get("phase")
+    provenance = (
+        state.get("stop_origin_phase"),
+        state.get("stop_origin_category"),
+        state.get("stop_reason"),
+    )
+    if phase in STOP_PHASES:
+        if state.get("stop_origin_phase") is None:
+            errors.append(f"{name}.stop_origin_phase: stop state requires an origin")
+        if state.get("stop_origin_category") is None:
+            errors.append(f"{name}.stop_origin_category: stop state requires a category")
+        if not _is_nonempty_string(state.get("stop_reason")):
+            errors.append(f"{name}.stop_reason: stop state requires a reason")
+        if state.get("resolution_evidence") is not None:
+            errors.append(
+                f"{name}.resolution_evidence: unresolved stop state must be null"
+            )
+        if state.get("resolution_stop_sequence") is not None:
+            errors.append(
+                f"{name}.resolution_stop_sequence: unresolved stop state must be null"
+            )
+    elif any(value is not None for value in provenance):
+        errors.append(
+            f"{name}.stop_provenance: origin phase, category, and reason are allowed only in stop states"
+        )
+
+
+def _validate_stop_entry(
+    previous_phase: str,
+    current_phase: str,
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+    errors: list[str],
+) -> None:
+    expected_category = _expected_stop_category(
+        previous_phase,
+        current_phase,
+        current_state,
+    )
+    if current_state.get("stop_origin_phase") != previous_phase:
+        errors.append(
+            "stop_origin_phase: must match the actual stop origin "
+            f"{previous_phase}"
+        )
+    if (
+        expected_category is None
+        or current_state.get("stop_origin_category") != expected_category
+    ):
+        errors.append("stop_origin_category: does not match the stop route")
+    if not _is_nonempty_string(current_state.get("stop_reason")):
+        errors.append("stop_reason: stop entry requires a non-empty reason")
+    if current_state.get("resolution_evidence") is not None:
+        errors.append(
+            "resolution_evidence: must be null when entering a stop state"
+        )
+    previous_sequence = previous_state.get("stop_sequence")
+    if (
+        not isinstance(previous_sequence, int)
+        or isinstance(previous_sequence, bool)
+        or current_state.get("stop_sequence") != previous_sequence + 1
+    ):
+        errors.append("stop_sequence: stop entry must increment exactly once")
+    if current_state.get("resolution_stop_sequence") is not None:
+        errors.append(
+            "resolution_stop_sequence: must be null when entering a stop state"
+        )
+
+
+def _resume_target_description(targets: tuple[str, ...]) -> str:
+    if len(targets) == 1:
+        return targets[0]
+    return " or ".join(targets)
+
+
+def _validate_stop_resume(
+    previous_phase: str,
+    current_phase: str,
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+    errors: list[str],
+) -> None:
+    category = previous_state.get("stop_origin_category")
+    targets = STOP_RESUME_TARGETS.get(category)
+    expected_origin = STOP_CATEGORY_ORIGINS.get(category)
+    expected_stop_phase = STOP_CATEGORY_PHASES.get(category)
+    if targets is None:
+        errors.append("stop_origin_category: stop resume requires a valid category")
+    else:
+        if current_phase not in targets:
+            errors.append(
+                f"phase: {category} stop may resume only to "
+                f"{_resume_target_description(targets)}, not {current_phase}"
+            )
+        if previous_state.get("stop_origin_phase") != expected_origin:
+            errors.append("stop_origin_phase: does not match the stop category")
+        if previous_phase != expected_stop_phase:
+            errors.append("stop_origin_category: does not match the stop phase")
+    if not _is_nonempty_string(previous_state.get("stop_reason")):
+        errors.append("stop_reason: stop resume requires the recorded reason")
+    if not _is_nonempty_string(current_state.get("resolution_evidence")):
+        errors.append(
+            "resolution_evidence: stop resume requires explicit resolution evidence"
+        )
+    if (
+        current_state.get("resolution_stop_sequence")
+        != previous_state.get("stop_sequence")
+    ):
+        errors.append(
+            "resolution_stop_sequence: must match the current stop sequence"
+        )
+    if current_state.get("stop_sequence") != previous_state.get("stop_sequence"):
+        errors.append("stop_sequence: stop resume must preserve the stop sequence")
+    if any(
+        current_state.get(field) is not None
+        for field in (
+            "stop_origin_phase",
+            "stop_origin_category",
+            "stop_reason",
+        )
+    ):
+        errors.append(
+            "stop_provenance: resume must consume origin phase, category, and reason"
+        )
+    if (
+        category in {"REQUIREMENTS_NEED_USER_INPUT", "REQUIREMENTS_BLOCK"}
+        and current_state.get("latest_requirements_decision") is not None
+    ):
+        errors.append(
+            "latest_requirements_decision: resume must clear the prior requirements decision"
+        )
+
+
+def _validate_resolution_lifecycle(
+    previous_phase: str,
+    current_phase: str,
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+    errors: list[str],
+) -> None:
+    if previous_phase in STOP_PHASES:
+        return
+    current_resolution = (
+        current_state.get("resolution_evidence"),
+        current_state.get("resolution_stop_sequence"),
+    )
+    if current_resolution == (None, None):
+        return
+    if (
+        previous_state.get("resolution_evidence") is not None
+        or previous_state.get("resolution_stop_sequence") is not None
+    ):
+        errors.append(
+            "resolution_evidence: must be cleared after the resumed transition"
+        )
+    elif current_phase not in STOP_PHASES:
+        errors.append(
+            "resolution_evidence: is allowed only on the immediate stop resume"
+        )
+
+
+def _validate_requirements_promotion(
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+    previous_round: object,
+    current_round: object,
+    errors: list[str],
+) -> tuple[bool, bool]:
+    pending_fields = (
+        "pending_requirements_revision",
+        "pending_requirements_digest",
+        "pending_supersedes_digest",
+    )
+    pending_approval_fields = (
+        "pending_approval_sequence",
+        "pending_approved_requirements_digest",
+        "pending_user_approval_evidence",
+    )
+    pending_present = any(
+        previous_state.get(field) is not None for field in pending_fields
+    )
+    reset_attempt = (
+        previous_state.get("review_round_reset") is True
+        or current_state.get("review_round_reset") is True
+        or any(previous_state.get(field) is True for field in MATERIAL_RESET_SIGNALS)
+        or any(current_state.get(field) is True for field in MATERIAL_RESET_SIGNALS)
+        or (
+            isinstance(previous_round, int)
+            and not isinstance(previous_round, bool)
+            and isinstance(current_round, int)
+            and not isinstance(current_round, bool)
+            and current_round != previous_round
+        )
+    )
+    promotion_attempt = (
+        pending_present
+        or reset_attempt
+        or previous_state.get("prior_evidence_invalidated") is True
+        or any(current_state.get(field) is True for field in MATERIAL_REVISION_FLAGS)
+    )
+    if not promotion_attempt:
+        return False, False
+
+    active_revision = previous_state.get("active_requirements_revision")
+    pending_revision = previous_state.get("pending_requirements_revision")
+    if (
+        not isinstance(active_revision, int)
+        or isinstance(active_revision, bool)
+        or pending_revision != active_revision + 1
+    ):
+        errors.append(
+            "pending_requirements_revision: material reset requires the next requirements revision"
+        )
+    active_digest = previous_state.get("active_requirements_digest")
+    pending_digest = previous_state.get("pending_requirements_digest")
+    if (
+        not isinstance(pending_digest, str)
+        or not DIGEST_PATTERN.fullmatch(pending_digest)
+        or pending_digest == active_digest
+    ):
+        errors.append(
+            "pending_requirements_digest: material reset requires a new requirements digest"
+        )
+    if previous_state.get("pending_supersedes_digest") != active_digest:
+        errors.append(
+            "pending_supersedes_digest: must equal the active requirements digest"
+        )
+    if current_state.get("active_requirements_revision") != pending_revision:
+        errors.append(
+            "active_requirements_revision: frozen state must promote the pending revision"
+        )
+    if current_state.get("active_requirements_digest") != pending_digest:
+        errors.append(
+            "active_requirements_digest: frozen state must promote the pending digest"
+        )
+    for field in pending_fields:
+        if current_state.get(field) is not None:
+            errors.append(
+                f"{field}: frozen state must consume pending requirements provenance"
+            )
+    for field in pending_approval_fields:
+        if current_state.get(field) is not None:
+            errors.append(
+                f"{field}: frozen state must consume pending approval provenance"
+            )
+    for field in MATERIAL_REVISION_FLAGS:
+        if current_state.get(field) is not False:
+            errors.append(
+                f"{field}: frozen state must consume pending revision flags"
+            )
+
+    if reset_attempt:
+        actions = previous_state.get("required_actions")
+        if (
+            not isinstance(actions, list)
+            or "REQUIREMENTS_REVISION" not in actions
+        ):
+            errors.append(
+                "required_actions: material reset requires prior REQUIREMENTS_REVISION routing"
+            )
+        if not any(
+            previous_state.get(field) is True
+            for field in MATERIAL_CHANGE_FIELDS
+        ):
+            errors.append(
+                "behavior_changed: material reset requires a behavior, scope, or public-contract change"
+            )
+        if (
+            previous_state.get("scope_changed") is True
+            or previous_state.get("public_contract_changed") is True
+        ) and previous_state.get("behavior_changed") is not True:
+            errors.append(
+                "behavior_changed: material scope or public-contract changes require behavior_changed"
+            )
+        if previous_state.get("user_approval_required") is not True:
+            errors.append(
+                "user_approval_required: material reset requires user approval"
+            )
+        if previous_state.get("user_approval_received") is not True:
+            errors.append(
+                "user_approval_received: material reset requires explicit user approval"
+            )
+        active_approval_sequence = previous_state.get("approval_sequence")
+        pending_approval_sequence = previous_state.get(
+            "pending_approval_sequence"
+        )
+        if (
+            not isinstance(active_approval_sequence, int)
+            or isinstance(active_approval_sequence, bool)
+            or pending_approval_sequence != active_approval_sequence + 1
+        ):
+            errors.append(
+                "pending_approval_sequence: material reset requires a fresh approval event"
+            )
+        if (
+            previous_state.get("pending_approved_requirements_digest")
+            != pending_digest
+        ):
+            errors.append(
+                "pending_approved_requirements_digest: must equal the pending requirements digest"
+            )
+        if not _is_nonempty_string(
+            previous_state.get("pending_user_approval_evidence")
+        ):
+            errors.append(
+                "pending_user_approval_evidence: material reset requires explicit approval evidence"
+            )
+        if current_state.get("approval_sequence") != pending_approval_sequence:
+            errors.append(
+                "approval_sequence: frozen state must consume the pending approval event"
+            )
+        if previous_state.get("prior_evidence_invalidated") is not True:
+            errors.append(
+                "prior_evidence_invalidated: material reset must invalidate prior evidence"
+            )
+        if previous_state.get("review_round_reset") is not True:
+            errors.append(
+                "review_round_reset: material revision must require a reset"
+            )
+        if current_round != 0:
+            errors.append(
+                "review_round: approved material revision must reset the review round to zero"
+            )
+    elif (
+        current_state.get("approval_sequence")
+        != previous_state.get("approval_sequence")
+    ):
+        errors.append(
+            "approval_sequence: non-material revision must preserve approval history"
+        )
+    return promotion_attempt, reset_attempt
+
+
 def validate_transition(previous, current):
     """Return all deterministic workflow-state transition validation errors."""
     errors: list[str] = []
@@ -667,6 +1320,8 @@ def validate_transition(previous, current):
     current_state = _state_mapping(current)
     _validate_state_fields(previous_state, "previous", errors)
     _validate_state_fields(current_state, "current", errors)
+    _validate_stop_state_shape(previous_state, "previous", errors)
+    _validate_stop_state_shape(current_state, "current", errors)
     previous_binding_valid = _validate_conversation_binding(
         previous_state, "previous", errors
     )
@@ -761,8 +1416,98 @@ def validate_transition(previous, current):
             or same_phase_browser_reconnect
             or initial_binding_transition
         )
+        if (
+            previous_phase == "REQUIREMENTS_PENDING"
+            and current_phase == "REQUIREMENTS_PENDING"
+            and same_phase_maintenance
+            and any(
+                current_state.get(field) != previous_state.get(field)
+                for field in PENDING_REVISION_PROVENANCE_FIELDS
+            )
+        ):
+            errors.append(
+                "pending_requirements: maintenance transitions must preserve revision provenance"
+            )
+        if (
+            not _has_pending_requirements_provenance(previous_state)
+            and _has_pending_requirements_provenance(current_state)
+        ):
+            current_actions = current_state.get("required_actions")
+            review_revision_route = (
+                previous_phase == "REVIEW_PENDING"
+                and current_phase == "REQUIREMENTS_PENDING"
+                and current_state.get("latest_decision")
+                == "CHANGES_REQUESTED"
+                and isinstance(current_actions, list)
+                and "REQUIREMENTS_REVISION" in current_actions
+            )
+            resolved_requirements_stop = (
+                previous_phase in STOP_PHASES
+                and current_phase == "REQUIREMENTS_PENDING"
+                and previous_state.get("stop_origin_category")
+                in {
+                    "REQUIREMENTS_NEED_USER_INPUT",
+                    "REQUIREMENTS_BLOCK",
+                }
+                and _is_nonempty_string(current_state.get("resolution_evidence"))
+            )
+            if not review_revision_route and not resolved_requirements_stop:
+                errors.append(
+                    "pending_requirements: provenance may be introduced only by requirements revision routing or a resolved requirements stop"
+                )
         if current_phase not in STATE_TRANSITIONS[previous_phase] and not same_phase_maintenance:
             errors.append(f"phase: illegal transition from {previous_phase} to {current_phase}")
+        if current_phase in STOP_PHASES and previous_phase not in STOP_PHASES:
+            _validate_stop_entry(
+                previous_phase,
+                current_phase,
+                previous_state,
+                current_state,
+                errors,
+            )
+        if previous_phase in STOP_PHASES and current_phase not in STOP_PHASES:
+            _validate_stop_resume(
+                previous_phase,
+                current_phase,
+                previous_state,
+                current_state,
+                errors,
+            )
+        if (
+            not (
+                current_phase in STOP_PHASES
+                and previous_phase not in STOP_PHASES
+            )
+            and current_state.get("stop_sequence")
+            != previous_state.get("stop_sequence")
+        ):
+            errors.append(
+                "stop_sequence: non-entry transitions must preserve the stop sequence"
+            )
+        if (
+            previous_phase in STOP_PHASES
+            and current_phase == previous_phase
+            and same_phase_maintenance
+            and any(
+                current_state.get(field) != previous_state.get(field)
+                for field in (
+                    "stop_origin_phase",
+                    "stop_origin_category",
+                    "stop_reason",
+                    "stop_sequence",
+                )
+            )
+        ):
+            errors.append(
+                "stop_provenance: maintenance transitions must preserve the active stop"
+            )
+        _validate_resolution_lifecycle(
+            previous_phase,
+            current_phase,
+            previous_state,
+            current_state,
+            errors,
+        )
         consumes_requirements = (
             previous_phase == "REQUIREMENTS_PENDING"
             and current_phase != previous_phase
@@ -779,26 +1524,72 @@ def validate_transition(previous, current):
                     "phase: requirements routing requires transition to "
                     f"{expected_requirements_target}, not {current_phase}"
                 )
+        promotion_attempt = False
+        reset_attempt = False
         if (
-            previous_phase in {"USER_DECISION_REQUIRED", "BLOCKED"}
-            and current_phase == "REQUIREMENTS_PENDING"
+            previous_phase == "REQUIREMENTS_PENDING"
+            and current_phase == "REQUIREMENTS_FROZEN"
         ):
-            expected_prior_decision = (
-                "NEED_USER_INPUT"
-                if previous_phase == "USER_DECISION_REQUIRED"
-                else "BLOCK"
+            promotion_attempt, reset_attempt = _validate_requirements_promotion(
+                previous_state,
+                current_state,
+                previous_round,
+                current_round,
+                errors,
             )
+        previous_active_revision = previous_state.get(
+            "active_requirements_revision"
+        )
+        previous_active_digest = previous_state.get(
+            "active_requirements_digest"
+        )
+        current_active_revision = current_state.get(
+            "active_requirements_revision"
+        )
+        current_active_digest = current_state.get("active_requirements_digest")
+        initial_active_binding = (
+            previous_phase == "PREFLIGHT"
+            and current_phase == "REQUIREMENTS_PENDING"
+            and previous_active_revision is None
+            and previous_active_digest is None
+            and current_active_revision == 1
+            and isinstance(current_active_digest, str)
+            and bool(DIGEST_PATTERN.fullmatch(current_active_digest))
+        )
+        if not promotion_attempt and not initial_active_binding:
             if (
-                previous_state.get("latest_requirements_decision")
-                != expected_prior_decision
+                previous_active_revision is None
+                and previous_active_digest is None
+                and (
+                    current_active_revision is not None
+                    or current_active_digest is not None
+                )
             ):
                 errors.append(
-                    "phase: requirements resume requires a prior NEED_USER_INPUT or BLOCK decision"
+                    "active_requirements: may be initialized only when preflight enters requirements pending"
                 )
-            if current_state.get("latest_requirements_decision") is not None:
+            if (
+                current_active_revision
+                != previous_active_revision
+            ):
                 errors.append(
-                    "latest_requirements_decision: resume must clear the prior requirements decision"
+                    "active_requirements_revision: must preserve active requirements provenance"
                 )
+            if (
+                current_active_digest
+                != previous_active_digest
+            ):
+                errors.append(
+                    "active_requirements_digest: must preserve active requirements provenance"
+                )
+        if (
+            not promotion_attempt
+            and current_state.get("approval_sequence")
+            != previous_state.get("approval_sequence")
+        ):
+            errors.append(
+                "approval_sequence: must preserve consumed approval history"
+            )
         consumes_review = previous_phase == "REVIEW_PENDING" and current_phase != previous_phase
         if consumes_review:
             history_results = [
@@ -833,26 +1624,7 @@ def validate_transition(previous, current):
                 and history_valid
             )
         elif previous_round_valid and current_round_valid:
-            approved_material_reset = (
-                previous_phase == "REQUIREMENTS_PENDING"
-                and current_phase == "REQUIREMENTS_FROZEN"
-                and current_state.get("review_round_reset") is True
-                and current_state.get("user_approval_received") is True
-            )
-            if approved_material_reset and current_round != 0:
-                errors.append(
-                    "review_round: approved material revision must reset the review round to zero"
-                )
-            elif (
-                previous_phase == "REQUIREMENTS_PENDING"
-                and current_phase == "REQUIREMENTS_FROZEN"
-                and current_state.get("review_round_reset") is True
-                and current_state.get("user_approval_received") is not True
-            ):
-                errors.append(
-                    "review_round: reset requires an approved material revision"
-                )
-            elif current_round != previous_round and not approved_material_reset:
+            if current_round != previous_round and not reset_attempt:
                 errors.append(
                     "review_round: non-review transitions must preserve the review round"
                 )
