@@ -93,7 +93,7 @@ REVIEW_CONTEXT.json:
 }
 ```
 
-Only `PLAN_READY` with no material open question advances. A revision increments by one and supersedes the exact prior payload digest. Material behavior, scope, or public-contract changes require a digest-bound user approval receipt, invalidate prior evidence, and reset review accounting.
+Only `PLAN_READY` with no material open question advances automatically. A revision increments by one and supersedes the exact prior payload digest. An unapproved material proposal returns `NEED_USER_INPUT`; the controller preserves its revision, digest, supersedes digest, and material flags in `USER_DECISION_REQUIRED`. Approval uses the exact receipt `user-approval:stop-<stop_sequence>:<pending_requirements_digest>` and promotes that stored proposal directly to `REQUIREMENTS_FROZEN`. It must not request a rewritten packet from Pro after approval. Material behavior, scope, or public-contract changes invalidate prior evidence and reset review accounting.
 
 ## Implementation report
 
@@ -106,6 +106,10 @@ The closed report object requires:
 - evidence for every acceptance ID;
 - test commands with outcomes and bounded summaries;
 - diff evidence, explicit omissions, and unresolved risks/blockers.
+
+Each `acceptance_evidence` value is a non-empty list of non-empty strings.
+Nested objects and arbitrary credential/session-shaped evidence are rejected;
+perform disclosure review before putting any string into the report.
 
 Report validation must use `report-context`; the context-free `report` command is diagnostic only. Context binds the report to active approved requirements, trusted round/report digest, and exact captured snapshot.
 
@@ -179,7 +183,7 @@ This PASS example refers to the requirements payload above and a report whose sn
 
 ## Canonical preflight and snapshot
 
-`inspect-preflight` records a versioned immutable baseline with `baseline_head`, `baseline_snapshot_digest`, tracked/untracked manifest digests, complete tracked/untracked entries, and initial product paths. Capture rejects a tampered or wrong-baseline preflight, unmerged index, dirty submodule, unstable observation, unsafe path, or tracked/staged run metadata.
+`inspect-preflight` records a versioned immutable baseline with `baseline_head`, `baseline_snapshot_digest`, tracked/untracked manifest digests, complete tracked/untracked entries, and initial product paths. Every captured snapshot also carries the canonical `preflight_digest` and the unchanged `initial_product_paths`; report context binds those values to trusted state and the exact user-approved path set. Capture rejects a tampered or wrong-baseline preflight, unmerged index, dirty submodule, unstable observation, unsafe path, or tracked/staged run metadata.
 
 Tracked entries record baseline, index, and worktree state including Git mode, kind, and content/object digest. Snapshot identity is canonical JSON over:
 
@@ -214,7 +218,7 @@ Never store credentials, tokens, cookies, or Browser session state. Never stage,
 
 ## State and final gate
 
-Fixed state/control objects are closed. State records phase, round, binding/model policy, active and pending requirements lineage, approval provenance, envelope receipts/chain head, active report/review/snapshot digests, routed actions, derived finding history, stop provenance, and maintenance counters. A valid review consumes exactly one round. Reconnect, first format correction, and evidence preparation do not; the next Pro decision does.
+Fixed state/control objects are closed. State records phase, round, binding/model policy, immutable baseline HEAD, preflight digest, exact user-approved pre-existing paths, active and pending requirements lineage, approval provenance, envelope receipts/chain head, active report/review/snapshot digests, routed actions, derived finding history, stop provenance, and maintenance counters. A valid review consumes exactly one round. Reconnect, first format correction, and evidence preparation do not; the next Pro decision does.
 
 Complete staged `REVIEW_PENDING` state for the PASS review example:
 
@@ -264,7 +268,10 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "active_report_digest": "sha256:4198d50d6002e2ac6819ba5f7398d4df12e457a9ee58f0d7d50538cc32a93204",
   "current_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "active_review_packet_digest": "sha256:b873cdabd3063d440545ce8ca76a55442f488c1b4c9a692009ba8c99e5582f9a",
-  "reviewed_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  "reviewed_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseline_head": "1111111111111111111111111111111111111111",
+  "preflight_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "approved_existing_paths": []
 }
 ```
 
@@ -283,7 +290,7 @@ review_context = {
 }
 ```
 
-The requirements context uses the same first three fields plus `requirements` and `approval_receipt`. These are controller-built transition inputs, not Pro output.
+The requirements context uses the same first three fields plus `requirements` and `approval_receipt`. These are controller-built transition inputs, not Pro output. When a material proposal needs approval, its pending identity and flags survive the requirements stop unchanged. A valid digest-bound receipt resumes directly to `REQUIREMENTS_FROZEN`, promotes exactly the pending revision/digest, consumes pending provenance, increments `approval_sequence`, and resets the review round. The frozen artifact retains its original `NEED_USER_INPUT`/`user_approval_received=false` model fields; report-context recognizes it only when the trusted active digest and consumed controller approval sequence match. Any different digest or free-form receipt fails closed.
 
 Review-origin resume clears decision, actions, and pending review identity. A later review route requires a fresh validated envelope. The same finding ID or derived fingerprint across two consecutive valid review consumptions stops the loop.
 

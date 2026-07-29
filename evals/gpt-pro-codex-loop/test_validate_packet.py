@@ -132,6 +132,8 @@ def valid_snapshot(
     snapshot: dict[str, object] = {
         "schema_version": 1,
         "baseline_head": report["baseline_head"],
+        "preflight_digest": "sha256:" + "f" * 64,
+        "initial_product_paths": [],
         "snapshot_digest": report["snapshot_digest"],
         "tracked_diff_digest": report["tracked_diff_digest"],
         "untracked_manifest_digest": report["untracked_manifest_digest"],
@@ -228,6 +230,9 @@ def valid_state(
     current_snapshot_digest: object = None,
     active_review_packet_digest: object = _UNSET_STATE_VALUE,
     reviewed_snapshot_digest: object = _UNSET_STATE_VALUE,
+    baseline_head: object = "a" * 40,
+    preflight_digest: object = "sha256:" + "f" * 64,
+    approved_existing_paths: object = None,
 ) -> dict[str, object]:
     if active_requirements_revision is _UNSET_STATE_VALUE:
         active_requirements_revision = None if phase == "PREFLIGHT" else 1
@@ -332,6 +337,11 @@ def valid_state(
         "current_snapshot_digest": current_snapshot_digest,
         "active_review_packet_digest": active_review_packet_digest,
         "reviewed_snapshot_digest": reviewed_snapshot_digest,
+        "baseline_head": baseline_head,
+        "preflight_digest": preflight_digest,
+        "approved_existing_paths": (
+            [] if approved_existing_paths is None else approved_existing_paths
+        ),
     }
 
 
@@ -599,10 +609,16 @@ def bind_requirements_transition_context(
             pending_requirements_digest=requirements_digest,
             pending_supersedes_digest=supersedes_digest,
         )
-        if previous.get("user_approval_required") is True:
+        if (
+            previous.get("user_approval_required") is True
+            and previous.get("user_approval_received") is True
+        ):
             previous[
                 "pending_approved_requirements_digest"
             ] = requirements_digest
+        if current.get("phase") == "USER_DECISION_REQUIRED":
+            for field in packet_validator.PENDING_REVISION_PROVENANCE_FIELDS:
+                current[field] = previous[field]
         if current.get("phase") == "REQUIREMENTS_FROZEN":
             current.update(
                 active_requirements_revision=revision,
@@ -964,6 +980,33 @@ class TransportEnvelopeTests(unittest.TestCase):
 
 
 class RequirementsPacketTests(unittest.TestCase):
+    def test_unapproved_material_revision_can_request_user_input(self) -> None:
+        previous = valid_requirements()
+        revised = valid_requirements(
+            requirements_revision=2,
+            supersedes_digest=canonical_digest(previous),
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=False,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+            decision="NEED_USER_INPUT",
+            open_questions=["Approve the proposed observable behavior change?"],
+        )
+        self.assertEqual(validate_requirements(revised, previous=previous), [])
+
+    def test_plan_ready_requires_nonempty_requirements_and_acceptance(self) -> None:
+        empty_requirements = valid_requirements(requirements=[])
+        self.assertIn(
+            "requirements: PLAN_READY requires at least one requirement",
+            validate_requirements(empty_requirements),
+        )
+        empty_acceptance = valid_requirements(acceptance_criteria=[])
+        self.assertIn(
+            "acceptance_criteria: PLAN_READY requires at least one criterion",
+            validate_requirements(empty_acceptance),
+        )
+
     def test_closed_packets_reject_boolean_versions_and_unknown_fields(self) -> None:
         boolean_version = valid_requirements(schema_version=True)
         self.assertIn(
@@ -1089,6 +1132,24 @@ class RequirementsPacketTests(unittest.TestCase):
 
 
 class ReportPacketTests(unittest.TestCase):
+    def test_acceptance_evidence_is_a_nonempty_string_list(self) -> None:
+        requirements = valid_requirements()
+        for invalid in (
+            {"password": "hunter2"},
+            ["valid", ""],
+            "unit tests pass",
+            [],
+        ):
+            with self.subTest(invalid=invalid):
+                report = valid_report(
+                    requirements,
+                    acceptance_evidence={"AC-1": invalid},
+                )
+                self.assertIn(
+                    "acceptance_evidence.AC-1: must be a non-empty list of non-empty strings",
+                    validate_report(report, requirements),
+                )
+
     def test_report_is_versioned_and_closed(self) -> None:
         requirements = valid_requirements()
         boolean_version = valid_report(requirements, schema_version=True)
@@ -1150,6 +1211,19 @@ class ReportPacketTests(unittest.TestCase):
 
 
 class ReviewPacketTests(unittest.TestCase):
+    def test_pass_rejects_an_empty_acceptance_set(self) -> None:
+        requirements = valid_requirements(acceptance_criteria=[])
+        report = valid_report(requirements, acceptance_evidence={})
+        review = valid_review(
+            requirements,
+            report,
+            acceptance_results={},
+        )
+        self.assertIn(
+            "decision: PASS requires at least one active acceptance criterion",
+            validate_review(review, requirements, report),
+        )
+
     def test_review_is_closed_and_rejects_a_model_selected_fingerprint(self) -> None:
         requirements = valid_requirements()
         report = valid_report(requirements)
@@ -1459,6 +1533,23 @@ class ContextValidationTests(unittest.TestCase):
                     ),
                 )
 
+        wrong_baseline = dict(state)
+        wrong_baseline["baseline_head"] = "9" * 40
+        self.assertIn(
+            "baseline_head: does not match trusted workflow baseline",
+            packet_validator.validate_report_context(
+                report, requirements, wrong_baseline, snapshot
+            ),
+        )
+        wrong_preflight = dict(snapshot)
+        wrong_preflight["preflight_digest"] = "sha256:" + "8" * 64
+        self.assertIn(
+            "snapshot.preflight_digest: does not match trusted preflight",
+            packet_validator.validate_report_context(
+                report, requirements, state, wrong_preflight
+            ),
+        )
+
     def test_review_context_requires_a_fresh_prevalidated_envelope(self) -> None:
         report, requirements, state, snapshot = self._valid_report_context()
         review = valid_review(requirements, report)
@@ -1587,6 +1678,18 @@ class TransitionTests(unittest.TestCase):
             "previous.routing_hint: unknown field",
             validate_transition(previous, current),
         )
+        missing_preflight = valid_state(
+            "IMPLEMENTING",
+            0,
+            preflight_digest=None,
+        )
+        self.assertIn(
+            "previous.preflight_digest: must be a sha256 digest",
+            validate_transition(
+                missing_preflight,
+                valid_state("LOCAL_VERIFICATION", 0),
+            ),
+        )
 
     def test_format_correction_cannot_mutate_domain_state(self) -> None:
         previous = valid_state(
@@ -1599,6 +1702,8 @@ class TransitionTests(unittest.TestCase):
             ("required_actions", ["CODE_CHANGE"]),
             ("active_report_digest", "sha256:" + "c" * 64),
             ("current_snapshot_digest", "sha256:" + "d" * 64),
+            ("baseline_head", "9" * 40),
+            ("approved_existing_paths", ["unexpected.py"]),
         ):
             with self.subTest(field=field):
                 current = dict(previous)
@@ -2164,7 +2269,7 @@ class TransitionTests(unittest.TestCase):
             review_round_reset=True,
         )
         self.assertIn(
-            "current.pending_requirements: revision provenance is allowed only while requirements are pending",
+            "current.pending_requirements: revision provenance is allowed only while requirements are pending or awaiting approval",
             validate_transition(valid_state("IMPLEMENTING", 2), injected),
         )
 
@@ -2281,6 +2386,107 @@ class TransitionTests(unittest.TestCase):
         self.assertIn(
             "phase: requirements routing requires transition to USER_DECISION_REQUIRED, not REQUIREMENTS_FROZEN",
             validate_transition(previous, wrong_route),
+        )
+
+    def test_unapproved_material_revision_is_approved_and_promoted_exactly(self) -> None:
+        active_digest = canonical_digest(valid_requirements())
+        proposal_digest = "sha256:" + "6" * 64
+        previous = valid_state(
+            "REQUIREMENTS_PENDING",
+            1,
+            required_actions=["REQUIREMENTS_REVISION"],
+            active_requirements_revision=1,
+            active_requirements_digest=active_digest,
+            pending_requirements_revision=2,
+            pending_requirements_digest=proposal_digest,
+            pending_supersedes_digest=active_digest,
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=False,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        stopped = valid_state(
+            "USER_DECISION_REQUIRED",
+            1,
+            latest_requirements_decision="NEED_USER_INPUT",
+            required_actions=["REQUIREMENTS_REVISION"],
+            active_requirements_revision=1,
+            active_requirements_digest=active_digest,
+            pending_requirements_revision=2,
+            pending_requirements_digest=proposal_digest,
+            pending_supersedes_digest=active_digest,
+            behavior_changed=True,
+            user_approval_required=True,
+            user_approval_received=False,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+            stop_origin_phase="REQUIREMENTS_PENDING",
+            stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
+            stop_reason="The proposed material revision needs user approval.",
+            stop_sequence=1,
+        )
+        requirements_context = bind_requirements_transition_context(
+            previous,
+            stopped,
+        )
+        self.assertEqual(
+            validate_transition(
+                previous,
+                stopped,
+                requirements_context=requirements_context,
+            ),
+            [],
+        )
+        approved_proposal = requirements_context["requirements"]
+        proposal_digest = stopped["pending_requirements_digest"]
+        approval_receipt = f"user-approval:stop-1:{proposal_digest}"
+        frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            active_requirements_revision=2,
+            active_requirements_digest=proposal_digest,
+            approval_sequence=1,
+            stop_sequence=1,
+            resolution_evidence=approval_receipt,
+            resolution_stop_sequence=1,
+        )
+        self.assertEqual(validate_transition(stopped, frozen), [])
+        implementation_state = valid_state(
+            "LOCAL_VERIFICATION",
+            0,
+            active_requirements_revision=2,
+            active_requirements_digest=proposal_digest,
+            approval_sequence=1,
+        )
+        report = valid_report(approved_proposal, review_round=0)
+        snapshot = valid_snapshot(report)
+        implementation_state.update(
+            active_report_digest=canonical_digest(report),
+            current_snapshot_digest=report["snapshot_digest"],
+        )
+        self.assertEqual(
+            packet_validator.validate_report_context(
+                report,
+                approved_proposal,
+                implementation_state,
+                snapshot,
+            ),
+            [],
+        )
+
+        swapped = dict(frozen)
+        swapped["active_requirements_digest"] = "sha256:" + "7" * 64
+        self.assertIn(
+            "active_requirements_digest: frozen state must promote the pending digest",
+            validate_transition(stopped, swapped),
+        )
+
+        unbound_receipt = dict(frozen)
+        unbound_receipt["resolution_evidence"] = "The user approved revision 2."
+        self.assertIn(
+            "resolution_evidence: material approval must bind the stop sequence and pending requirements digest",
+            validate_transition(stopped, unbound_receipt),
         )
 
     def test_stop_entry_requires_actual_origin_category_and_reason(self) -> None:

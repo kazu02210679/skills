@@ -5,7 +5,7 @@
 Completed the signed-in Codex Desktop Browser smoke test in one persistent
 ChatGPT Pro conversation:
 
-`https://chatgpt.com/c/6a69c31c-4460-83ee-92dc-915865d1645b`
+`https://chatgpt.com/c/[redacted]`
 
 The smoke repository contained `normalize_name(value: str)`, initially
 implemented as only `value.strip()`, plus one trimming test. The frozen
@@ -58,3 +58,21 @@ constraints from disappearing.
 
 Sensitive run artifacts remain untracked under the temporary smoke repository's
 `.ai-pro-loop/` directory and are not part of the Skill commit.
+
+## Final review hardening
+
+The whole-feature review found no Critical issue and identified five Important
+safety gaps. They were resolved before handoff:
+
+- an unapproved material revision now validates only as `NEED_USER_INPUT`,
+  preserves its exact proposal digest through the user-decision stop, and can
+  reach `REQUIREMENTS_FROZEN` only with the canonical receipt
+  `user-approval:stop-<sequence>:<pending-digest>`; no later Pro rewrite can
+  substitute a different proposal;
+- `PLAN_READY` and `PASS` can no longer succeed with an empty requirements or
+  acceptance set;
+- closed state now preserves immutable baseline HEAD, canonical preflight
+  digest, and the exact user-approved pre-existing path set;
+- report acceptance evidence is restricted to non-empty lists of non-empty
+  strings, rejecting nested credential/session-shaped data;
+- the persistent conversation identifier is redacted from tracked reports.

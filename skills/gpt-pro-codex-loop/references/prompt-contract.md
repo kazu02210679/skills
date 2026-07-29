@@ -52,7 +52,8 @@ schema_version=1; requirements_revision=1; supersedes_digest=null; change_reason
 
 Each requirements item is exactly {id, statement}. Each acceptance_criteria item is exactly {id, criterion, required_evidence}. Each risk_items item is exactly {id, risk, required_mitigation}. in_scope, out_of_scope, constraints, design_direction, verification_strategy, and open_questions are arrays of strings. Do not add fields such as text, requirement_ids, description, mitigation, acceptance_criterion_id, or method.
 
-PLAN_READY requires open_questions=[].
+PLAN_READY requires open_questions=[], at least one requirement, and at least
+one independently observable acceptance criterion.
 
 {{SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REQUIREMENTS}}
 ```
@@ -74,7 +75,7 @@ CONFLICT EVIDENCE
 DIGEST-BOUND USER APPROVAL RECEIPT
 {{APPROVAL_RECEIPT_OR_NULL}}
 
-Return the complete closed requirements payload. Set requirements_revision={{NEXT_REVISION}} and supersedes_digest={{PREVIOUS_REQUIREMENTS_DIGEST}}. A material change without explicit approval returns NEED_USER_INPUT. An approved material change sets behavior_changed=true, user_approval_required=true, user_approval_received=true, prior_evidence_invalidated=true, review_round_reset=true, and applicable scope/public-contract flags.
+Return the complete closed requirements payload. Set requirements_revision={{NEXT_REVISION}} and supersedes_digest={{PREVIOUS_REQUIREMENTS_DIGEST}}. A material change returns NEED_USER_INPUT with user_approval_required=true, user_approval_received=false, prior_evidence_invalidated=true, review_round_reset=true, and applicable scope/public-contract flags. Codex preserves that exact proposal while the user decides. Do not emit a rewritten "approved" packet: a digest-bound user approval promotes the stored proposal locally.
 
 {{SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REQUIREMENTS}}
 ```

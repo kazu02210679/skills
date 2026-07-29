@@ -109,6 +109,10 @@ class CaptureSnapshotTests(unittest.TestCase):
     def test_snapshot_changes_when_tracked_content_changes(self) -> None:
         preflight = inspect_preflight(self.repo, self.baseline)
         first = capture_snapshot(self.repo, self.baseline, preflight)
+        self.assertEqual(
+            first["preflight_digest"],
+            canonical_digest(preflight),
+        )
         (self.repo / "app.py").write_text("print('changed')\n", encoding="utf-8")
         second = capture_snapshot(self.repo, self.baseline, preflight)
         self.assertNotEqual(first["snapshot_digest"], second["snapshot_digest"])

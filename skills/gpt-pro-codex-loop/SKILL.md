@@ -15,7 +15,7 @@ Read [references/packet-contract.md](references/packet-contract.md) before creat
 
 1. Preflight the repository and disclosure boundary. Capture and validate the immutable baseline; require explicit inclusion of pre-existing product paths. Refuse tracked or staged `.ai-pro-loop/` metadata.
 2. Open a new ChatGPT conversation, visibly verify the requested Pro model policy, and send one correlated requirements-envelope prompt. Bind the persistent conversation URL only after the first valid response. A response from any other conversation is a hard stop recorded as `conversation_identity_mismatch`.
-3. Save the raw response, strictly decode exactly one fenced JSON object, validate its envelope against trusted attempt data, and freeze only a valid `PLAN_READY` requirements payload.
+3. Save the raw response, strictly decode exactly one fenced JSON object, and validate its envelope against trusted attempt data. Freeze a valid `PLAN_READY` payload, or preserve an unapproved material proposal unchanged in `USER_DECISION_REQUIRED`. If the user approves, bind the receipt to that stop sequence and exact proposal digest and promote it directly; never ask Pro to rewrite an approved proposal.
 4. Implement and verify locally. Capture a stable product snapshot and validate the report against active requirements, trusted state, and that snapshot.
 5. In the same bound conversation and model, send a fresh correlated review turn. Validate the envelope and review context before routing `CODE_CHANGE`, `TEST_CHANGE`, `PROVIDE_EVIDENCE`, `REQUIREMENTS_REVISION`, or `USER_DECISION`.
 6. Derive every root-cause fingerprint locally from the finding's acceptance ID, category, required action, and stable root-cause key. Never trust a model-selected digest.

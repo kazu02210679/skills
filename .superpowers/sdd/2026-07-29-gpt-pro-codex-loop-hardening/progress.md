@@ -41,11 +41,13 @@
 ## H5 — completed
 
 - Live Browser conversation:
-  `https://chatgpt.com/c/6a69c31c-4460-83ee-92dc-915865d1645b`
+  `https://chatgpt.com/c/[redacted]`
 - Strict requirements packet validated on the first corrected attempt.
 - Pro returned `CHANGES_REQUESTED`; Codex applied both `CODE_CHANGE` and
   `TEST_CHANGE`; the second Pro review returned `PASS`.
 - Final local tests: 2/2 passed.
 - Final snapshot exactly matched the reviewed snapshot.
 - Explicit final gate validated successfully.
+- Final protocol hardening: packet tests 82/82; snapshot tests 34/34 with two
+  expected host skips; catalog/host integration tests 25/25.
 - Report: `task-H5-report.md`

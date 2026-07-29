@@ -800,6 +800,8 @@ def capture_snapshot(
     return {
         "schema_version": SCHEMA_VERSION,
         "baseline_head": baseline,
+        "preflight_digest": _canonical_digest(preflight),
+        "initial_product_paths": list(preflight["initial_product_paths"]),
         "baseline_snapshot_digest": preflight["baseline_snapshot_digest"],
         "tracked_manifest_digest": tracked_manifest_digest,
         "tracked_diff_digest": _bytes_digest(tracked_diff),

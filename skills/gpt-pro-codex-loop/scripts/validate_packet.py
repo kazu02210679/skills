@@ -19,6 +19,7 @@ FENCE_PATTERN = re.compile(
 
 SCHEMA_VERSION = 1
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+COMMIT_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 TRANSPORT_HEADER_FIELDS = (
     "schema_version",
     "packet_type",
@@ -98,7 +99,10 @@ STOP_CATEGORY_PHASES = {
     "FINAL_VERIFICATION_BLOCK": "BLOCKED",
 }
 STOP_RESUME_TARGETS = {
-    "REQUIREMENTS_NEED_USER_INPUT": ("REQUIREMENTS_PENDING",),
+    "REQUIREMENTS_NEED_USER_INPUT": (
+        "REQUIREMENTS_PENDING",
+        "REQUIREMENTS_FROZEN",
+    ),
     "REQUIREMENTS_BLOCK": ("REQUIREMENTS_PENDING",),
     "REVIEW_USER_DECISION": ("IMPLEMENTING", "REVIEW_PENDING"),
     "REVIEW_BLOCK": ("IMPLEMENTING", "REVIEW_PENDING"),
@@ -201,6 +205,9 @@ REQUIRED_STATE_FIELDS = (
     "current_snapshot_digest",
     "active_review_packet_digest",
     "reviewed_snapshot_digest",
+    "baseline_head",
+    "preflight_digest",
+    "approved_existing_paths",
 )
 OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
 FINAL_GATE_FIELDS = (
@@ -247,7 +254,12 @@ STATE_TRANSITIONS = {
         }
     ),
     "USER_DECISION_REQUIRED": frozenset(
-        {"REQUIREMENTS_PENDING", "IMPLEMENTING", "REVIEW_PENDING"}
+        {
+            "REQUIREMENTS_PENDING",
+            "REQUIREMENTS_FROZEN",
+            "IMPLEMENTING",
+            "REVIEW_PENDING",
+        }
     ),
     "FINAL_VERIFICATION": frozenset({"COMPLETE", "REVIEW_PENDING", "BLOCKED"}),
     "COMPLETE": frozenset(),
@@ -596,7 +608,11 @@ def _validate_requirements(packet, previous=None, *, require_initial: bool):
             )
     if material_change and current.get("user_approval_required") is not True:
         errors.append("material changes require user approval")
-    if material_change and current.get("user_approval_received") is not True:
+    if (
+        material_change
+        and current.get("user_approval_received") is not True
+        and current.get("decision") != "NEED_USER_INPUT"
+    ):
         errors.append("material changes require explicit user approval")
     if material_change and current.get("prior_evidence_invalidated") is not True:
         errors.append("prior_evidence_invalidated: material changes must invalidate prior evidence")
@@ -613,12 +629,18 @@ def _validate_requirements(packet, previous=None, *, require_initial: bool):
     _stable_ids(requirements, "requirements", ("id", "statement"), errors)
     for field in ("in_scope", "out_of_scope", "constraints", "design_direction", "verification_strategy"):
         _require_list(current, field, errors)
-    _acceptance_ids(current, errors)
+    acceptance_ids = _acceptance_ids(current, errors)
     risks = _require_list(current, "risk_items", errors)
     _stable_ids(risks, "risk_items", ("id", "risk", "required_mitigation"), errors)
     open_questions = _require_list(current, "open_questions", errors)
     if current.get("decision") == "PLAN_READY" and open_questions:
         errors.append("open_questions: PLAN_READY requires no material open questions")
+    if current.get("decision") == "PLAN_READY" and not requirements:
+        errors.append("requirements: PLAN_READY requires at least one requirement")
+    if current.get("decision") == "PLAN_READY" and not acceptance_ids:
+        errors.append(
+            "acceptance_criteria: PLAN_READY requires at least one criterion"
+        )
 
     if previous is None:
         if require_initial and revision != 1:
@@ -699,8 +721,18 @@ def validate_report(packet, requirements):
         evidence = {}
     acceptance_ids = _acceptance_ids(req, errors)
     for acceptance_id in acceptance_ids:
-        if acceptance_id not in evidence or not evidence[acceptance_id]:
+        if acceptance_id not in evidence:
             errors.append(f"acceptance_evidence.{acceptance_id}: missing acceptance evidence")
+            continue
+        item = evidence[acceptance_id]
+        if (
+            not isinstance(item, list)
+            or not item
+            or any(not _is_nonempty_string(entry) for entry in item)
+        ):
+            errors.append(
+                f"acceptance_evidence.{acceptance_id}: must be a non-empty list of non-empty strings"
+            )
     for acceptance_id in evidence:
         if acceptance_id not in acceptance_ids:
             errors.append(f"acceptance_evidence.{acceptance_id}: unknown acceptance ID")
@@ -831,6 +863,10 @@ def validate_review(packet, requirements, report):
         result.get("status") != "PASS" for result in results.values()
     ):
         errors.append("decision: PASS requires every acceptance result to be PASS")
+    if review.get("decision") == "PASS" and not acceptance_ids:
+        errors.append(
+            "decision: PASS requires at least one active acceptance criterion"
+        )
 
     findings = _require_list(review, "findings", errors)
     if review.get("decision") == "PASS" and findings:
@@ -921,13 +957,23 @@ def validate_report_context(
                 "state.phase: report context requires LOCAL_VERIFICATION or REVIEW_PENDING"
             )
 
-    if req.get("decision") != "PLAN_READY":
+    controller_approved_material_proposal = (
+        req.get("decision") == "NEED_USER_INPUT"
+        and req.get("user_approval_required") is True
+        and req.get("user_approval_received") is False
+        and isinstance(trusted_state.get("approval_sequence"), int)
+        and not isinstance(trusted_state.get("approval_sequence"), bool)
+        and trusted_state.get("approval_sequence", 0) >= 1
+    )
+    if (
+        req.get("decision") != "PLAN_READY"
+        and not controller_approved_material_proposal
+    ):
         errors.append("requirements: report requires PLAN_READY requirements")
     if (
         req.get("user_approval_required") is True
         and (
-            req.get("user_approval_received") is not True
-            or not isinstance(trusted_state.get("approval_sequence"), int)
+            not isinstance(trusted_state.get("approval_sequence"), int)
             or isinstance(trusted_state.get("approval_sequence"), bool)
             or trusted_state.get("approval_sequence", 0) < 1
         )
@@ -970,6 +1016,29 @@ def validate_report_context(
         errors.append("active_report_digest: does not match implementation report")
 
     _require_schema_version(captured, errors, path="snapshot")
+    if implementation_report.get("baseline_head") != trusted_state.get(
+        "baseline_head"
+    ):
+        errors.append(
+            "baseline_head: does not match trusted workflow baseline"
+        )
+    _require_digest(
+        captured.get("preflight_digest"),
+        "snapshot.preflight_digest",
+        errors,
+    )
+    if captured.get("preflight_digest") != trusted_state.get(
+        "preflight_digest"
+    ):
+        errors.append(
+            "snapshot.preflight_digest: does not match trusted preflight"
+        )
+    if captured.get("initial_product_paths") != trusted_state.get(
+        "approved_existing_paths"
+    ):
+        errors.append(
+            "snapshot.initial_product_paths: do not match approved pre-existing paths"
+        )
     for field in (
         "baseline_head",
         "snapshot_digest",
@@ -1389,6 +1458,37 @@ def _validate_state_fields(
                 errors,
                 nullable=True,
             )
+    if "preflight_digest" in state:
+        _require_digest(
+            state.get("preflight_digest"),
+            f"{name}.preflight_digest",
+            errors,
+        )
+    baseline_head = state.get("baseline_head")
+    if "baseline_head" in state and (
+        not isinstance(baseline_head, str)
+        or not COMMIT_PATTERN.fullmatch(baseline_head)
+    ):
+        errors.append(
+            f"{name}.baseline_head: must be a canonical lowercase commit ID"
+        )
+    approved_paths = state.get("approved_existing_paths")
+    if "approved_existing_paths" in state:
+        if (
+            not isinstance(approved_paths, list)
+            or any(not _is_nonempty_string(path) for path in approved_paths)
+            or approved_paths != sorted(set(approved_paths))
+            or any(
+                "\\" in path
+                or path.startswith("/")
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                for path in approved_paths
+                if isinstance(path, str)
+            )
+        ):
+            errors.append(
+                f"{name}.approved_existing_paths: must be sorted unique safe repository-relative paths"
+            )
     blocker_fingerprints = state.get("blocker_fingerprints")
     if "blocker_fingerprints" in state and (
         not isinstance(blocker_fingerprints, list)
@@ -1513,12 +1613,17 @@ def _validate_state_fields(
         errors.append(
             f"{name}.behavior_changed: material scope or public-contract changes require behavior_changed"
         )
+    preserves_stopped_requirements_proposal = (
+        state.get("phase") == "USER_DECISION_REQUIRED"
+        and state.get("stop_origin_category") == "REQUIREMENTS_NEED_USER_INPUT"
+    )
     if (
         state.get("phase") != "REQUIREMENTS_PENDING"
+        and not preserves_stopped_requirements_proposal
         and _has_pending_requirements_provenance(state)
     ):
         errors.append(
-            f"{name}.pending_requirements: revision provenance is allowed only while requirements are pending"
+            f"{name}.pending_requirements: revision provenance is allowed only while requirements are pending or awaiting approval"
         )
     stop_origin_phase = state.get("stop_origin_phase")
     if (
@@ -1756,6 +1861,12 @@ def _validate_stop_entry(
         errors.append(
             "resolution_stop_sequence: must be null when entering a stop state"
         )
+    if expected_category == "REQUIREMENTS_NEED_USER_INPUT":
+        for field in PENDING_REVISION_PROVENANCE_FIELDS:
+            if current_state.get(field) != previous_state.get(field):
+                errors.append(
+                    f"{field}: requirements approval stop must preserve the proposed revision"
+                )
 
 
 def _resume_target_description(targets: tuple[str, ...]) -> str:
@@ -1825,6 +1936,23 @@ def _validate_stop_resume(
         errors.append(
             "latest_requirements_decision: resume must clear the prior requirements decision"
         )
+    material_approval_promotion = (
+        category == "REQUIREMENTS_NEED_USER_INPUT"
+        and current_phase == "REQUIREMENTS_FROZEN"
+        and previous_state.get("user_approval_required") is True
+        and previous_state.get("user_approval_received") is False
+        and previous_state.get("pending_requirements_digest") is not None
+    )
+    if material_approval_promotion:
+        proposal_digest = previous_state.get("pending_requirements_digest")
+        expected_receipt = (
+            f"user-approval:stop-{previous_state.get('stop_sequence')}:"
+            f"{proposal_digest}"
+        )
+        if current_state.get("resolution_evidence") != expected_receipt:
+            errors.append(
+                "resolution_evidence: material approval must bind the stop sequence and pending requirements digest"
+            )
     if isinstance(category, str) and category in {
         "REVIEW_USER_DECISION",
         "REVIEW_BLOCK",
@@ -1961,6 +2089,12 @@ def _validate_requirements_promotion(
                 f"{field}: frozen state must consume pending revision flags"
             )
 
+    direct_stop_approval = (
+        previous_state.get("phase") == "USER_DECISION_REQUIRED"
+        and previous_state.get("stop_origin_category")
+        == "REQUIREMENTS_NEED_USER_INPUT"
+        and current_state.get("phase") == "REQUIREMENTS_FROZEN"
+    )
     if reset_attempt:
         actions = previous_state.get("required_actions")
         if (
@@ -1988,13 +2122,13 @@ def _validate_requirements_promotion(
             errors.append(
                 "user_approval_required: material reset requires user approval"
             )
-        if previous_state.get("user_approval_received") is not True:
-            errors.append(
-                "user_approval_received: material reset requires explicit user approval"
-            )
         active_approval_sequence = previous_state.get("approval_sequence")
-        pending_approval_sequence = previous_state.get(
-            "pending_approval_sequence"
+        pending_approval_sequence = (
+            active_approval_sequence + 1
+            if direct_stop_approval
+            and isinstance(active_approval_sequence, int)
+            and not isinstance(active_approval_sequence, bool)
+            else previous_state.get("pending_approval_sequence")
         )
         if (
             not isinstance(active_approval_sequence, int)
@@ -2004,19 +2138,33 @@ def _validate_requirements_promotion(
             errors.append(
                 "pending_approval_sequence: material reset requires a fresh approval event"
             )
-        if (
-            previous_state.get("pending_approved_requirements_digest")
-            != pending_digest
-        ):
-            errors.append(
-                "pending_approved_requirements_digest: must equal the pending requirements digest"
+        if direct_stop_approval:
+            expected_receipt = (
+                f"user-approval:stop-{previous_state.get('stop_sequence')}:"
+                f"{pending_digest}"
             )
-        if not _is_nonempty_string(
-            previous_state.get("pending_user_approval_evidence")
-        ):
-            errors.append(
-                "pending_user_approval_evidence: material reset requires explicit approval evidence"
-            )
+            if current_state.get("resolution_evidence") != expected_receipt:
+                errors.append(
+                    "resolution_evidence: material approval must bind the stop sequence and pending requirements digest"
+                )
+        else:
+            if previous_state.get("user_approval_received") is not True:
+                errors.append(
+                    "user_approval_received: material reset requires explicit user approval"
+                )
+            if (
+                previous_state.get("pending_approved_requirements_digest")
+                != pending_digest
+            ):
+                errors.append(
+                    "pending_approved_requirements_digest: must equal the pending requirements digest"
+                )
+            if not _is_nonempty_string(
+                previous_state.get("pending_user_approval_evidence")
+            ):
+                errors.append(
+                    "pending_user_approval_evidence: material reset requires explicit approval evidence"
+                )
         if current_state.get("approval_sequence") != pending_approval_sequence:
             errors.append(
                 "approval_sequence: frozen state must consume the pending approval event"
@@ -2352,7 +2500,28 @@ def _validate_requirements_transition_context(
             )
 
     approval_receipt = context.get("approval_receipt")
-    if requirements_packet.get("user_approval_required") is True:
+    approval_pending = (
+        requirements_packet.get("user_approval_required") is True
+        and requirements_packet.get("user_approval_received") is False
+        and requirements_packet.get("decision") == "NEED_USER_INPUT"
+    )
+    if approval_pending:
+        if approval_receipt is not None:
+            errors.append(
+                "requirements_context.approval_receipt: must be null while user approval is pending"
+            )
+        if any(
+            previous_state.get(field) is not None
+            for field in (
+                "pending_approval_sequence",
+                "pending_approved_requirements_digest",
+                "pending_user_approval_evidence",
+            )
+        ):
+            errors.append(
+                "requirements_context.pending_approval: unapproved proposal cannot carry approval provenance"
+            )
+    elif requirements_packet.get("user_approval_required") is True:
         if not _is_nonempty_string(approval_receipt):
             errors.append(
                 "requirements_context.approval_receipt: required user approval receipt is missing"
@@ -2515,6 +2684,15 @@ def validate_transition(
                     errors.append(
                         f"{field}: browser reconnect must preserve domain state"
                     )
+        for field in (
+            "baseline_head",
+            "preflight_digest",
+            "approved_existing_paths",
+        ):
+            if current_state.get(field) != previous_state.get(field):
+                errors.append(
+                    f"{field}: must preserve immutable preflight provenance"
+                )
         if (
             previous_phase == "REQUIREMENTS_PENDING"
             and current_phase == "REQUIREMENTS_PENDING"
@@ -2639,6 +2817,11 @@ def validate_transition(
         reset_attempt = False
         if (
             previous_phase == "REQUIREMENTS_PENDING"
+            and current_phase == "REQUIREMENTS_FROZEN"
+        ) or (
+            previous_phase == "USER_DECISION_REQUIRED"
+            and previous_state.get("stop_origin_category")
+            == "REQUIREMENTS_NEED_USER_INPUT"
             and current_phase == "REQUIREMENTS_FROZEN"
         ):
             promotion_attempt, reset_attempt = _validate_requirements_promotion(
