@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 
 METADATA_DIRECTORY = ".ai-pro-loop"
+SNAPSHOT_DISCOVERY_INTENT = "snapshot-discovered product change"
+MAX_STABILITY_SAMPLES = 3
 
 
 class SnapshotError(RuntimeError):
@@ -97,8 +100,24 @@ def _normalize_path(repository: Path, value: str) -> str:
     return normalized
 
 
-def _is_metadata_path(path: str) -> bool:
-    return path == METADATA_DIRECTORY or path.startswith(METADATA_DIRECTORY + "/")
+def _filesystem_is_case_insensitive(repository: Path) -> bool:
+    if os.path.normcase("A") == os.path.normcase("a"):
+        return True
+    git_directory = repository / ".git"
+    case_variant = repository / ".GIT"
+    try:
+        return case_variant.exists() and git_directory.samefile(case_variant)
+    except OSError as exc:
+        raise SnapshotError("could not determine filesystem path case rules") from exc
+
+
+def _is_metadata_path(repository: Path, path: str) -> bool:
+    first_component = path.split("/", 1)[0]
+    if first_component == METADATA_DIRECTORY:
+        return True
+    if first_component.casefold() != METADATA_DIRECTORY.casefold():
+        return False
+    return _filesystem_is_case_insensitive(repository)
 
 
 def _reject_tracked_or_staged_metadata(repository: Path) -> None:
@@ -108,7 +127,7 @@ def _reject_tracked_or_staged_metadata(repository: Path) -> None:
     )
     for path in [*tracked, *staged]:
         normalized = _normalize_path(repository, path)
-        if _is_metadata_path(normalized):
+        if _is_metadata_path(repository, normalized):
             raise SnapshotError(".ai-pro-loop metadata must not be tracked or staged")
 
 
@@ -119,7 +138,7 @@ def _untracked_files(repository: Path) -> list[dict[str, str]]:
     files: list[dict[str, str]] = []
     for candidate in candidates:
         normalized = _normalize_path(repository, candidate)
-        if _is_metadata_path(normalized):
+        if _is_metadata_path(repository, normalized):
             continue
         path = (repository / Path(*PurePosixPath(normalized).parts)).resolve()
         try:
@@ -167,7 +186,7 @@ def _tracked_changes(repository: Path, baseline_head: str) -> list[dict[str, str
             raise SnapshotError("git returned an incomplete diff status record")
         paths = [_normalize_path(repository, token) for token in tokens[index : index + path_count]]
         index += path_count
-        if any(_is_metadata_path(path) for path in paths):
+        if any(_is_metadata_path(repository, path) for path in paths):
             raise SnapshotError(".ai-pro-loop metadata must not be tracked or staged")
         entry = {
             "path": paths[-1],
@@ -268,11 +287,23 @@ def capture_snapshot(repository: Path, baseline_head: str) -> dict[str, object]:
     """Capture a canonical baseline-relative snapshot of all product changes."""
     root = _repository_root(repository)
     baseline = _baseline_commit(root, baseline_head)
-    _reject_tracked_or_staged_metadata(root)
-    tracked_diff = run_git(root, "diff", "--binary", "--no-ext-diff", baseline, "--")
+    previous: tuple[bytes, list[dict[str, str]], list[dict[str, str]]] | None = None
+    stable: tuple[bytes, list[dict[str, str]], list[dict[str, str]]] | None = None
+    for _ in range(MAX_STABILITY_SAMPLES):
+        _reject_tracked_or_staged_metadata(root)
+        tracked_diff = run_git(
+            root, "diff", "--binary", "--no-ext-diff", baseline, "--"
+        )
+        current = (tracked_diff, _tracked_changes(root, baseline), _untracked_files(root))
+        if current == previous:
+            stable = current
+            break
+        previous = current
+    if stable is None:
+        raise SnapshotError("product paths changed while capturing snapshot")
+
+    tracked_diff, tracked, untracked = stable
     tracked_digest = _bytes_digest(tracked_diff)
-    tracked = _tracked_changes(root, baseline)
-    untracked = _untracked_files(root)
     untracked_digest = _canonical_digest(untracked)
     snapshot_digest = _canonical_digest(
         {
@@ -281,13 +312,16 @@ def capture_snapshot(repository: Path, baseline_head: str) -> dict[str, object]:
             "untracked_manifest_digest": untracked_digest,
         }
     )
-    changed_files: list[dict[str, str]] = [*tracked]
+    changed_files: list[dict[str, str]] = [
+        {**entry, "intent": SNAPSHOT_DISCOVERY_INTENT} for entry in tracked
+    ]
     changed_files.extend(
         {
             "path": entry["path"],
             "source": "untracked",
             "status": "untracked",
             "content_digest": entry["content_digest"],
+            "intent": SNAPSHOT_DISCOVERY_INTENT,
         }
         for entry in untracked
     )

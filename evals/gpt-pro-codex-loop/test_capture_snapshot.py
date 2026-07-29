@@ -7,6 +7,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 SCRIPT_DIRECTORY = (
@@ -17,12 +18,14 @@ SCRIPT_DIRECTORY = (
 )
 sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
+import capture_snapshot as snapshot_module  # noqa: E402
 from capture_snapshot import (  # noqa: E402
     SnapshotError,
     capture_snapshot,
     inspect_preflight,
     validate_preflight,
 )
+from validate_packet import canonical_digest, validate_report  # noqa: E402
 
 
 def run_git(repository: Path, *args: str) -> bytes:
@@ -35,6 +38,45 @@ def run_git(repository: Path, *args: str) -> bytes:
     if completed.returncode:
         raise AssertionError(completed.stderr.decode("utf-8", errors="replace"))
     return completed.stdout
+
+
+def valid_requirements() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "requirements_revision": 1,
+        "supersedes_digest": None,
+        "change_reason": "initial requirements",
+        "behavior_changed": False,
+        "user_approval_required": False,
+        "user_approval_received": False,
+        "scope_changed": False,
+        "public_contract_changed": False,
+        "prior_evidence_invalidated": False,
+        "review_round_reset": False,
+        "decision": "PLAN_READY",
+        "objective": "Capture a deterministic product snapshot.",
+        "requirements": [{"id": "REQ-1", "statement": "Snapshots are deterministic."}],
+        "in_scope": ["snapshot capture"],
+        "out_of_scope": ["deployment"],
+        "constraints": ["standard library"],
+        "acceptance_criteria": [
+            {
+                "id": "AC-1",
+                "criterion": "Snapshot reports validate.",
+                "required_evidence": "unit test output",
+            }
+        ],
+        "design_direction": ["fail closed"],
+        "risk_items": [
+            {
+                "id": "RISK-1",
+                "risk": "Repository drift",
+                "required_mitigation": "stable capture",
+            }
+        ],
+        "verification_strategy": ["run unit tests"],
+        "open_questions": [],
+    }
 
 
 class CaptureSnapshotTests(unittest.TestCase):
@@ -78,12 +120,40 @@ class CaptureSnapshotTests(unittest.TestCase):
         with self.assertRaises(SnapshotError):
             capture_snapshot(self.repo, self.baseline)
 
+    def test_staged_case_variant_metadata_follows_filesystem_case_rules(self) -> None:
+        metadata = self.repo / ".AI-PRO-LOOP" / "task" / "state.json"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("{}\n", encoding="utf-8")
+        aliases_metadata_directory = (self.repo / ".ai-pro-loop").exists()
+        run_git(self.repo, "add", str(metadata))
+
+        if aliases_metadata_directory:
+            with self.assertRaises(SnapshotError):
+                capture_snapshot(self.repo, self.baseline)
+        else:
+            snapshot = capture_snapshot(self.repo, self.baseline)
+            self.assertIn(".AI-PRO-LOOP/task/state.json", [item["path"] for item in snapshot["changed_files"]])
+
+    def test_untracked_case_variant_metadata_follows_filesystem_case_rules(self) -> None:
+        metadata = self.repo / ".AI-PRO-LOOP" / "task" / "state.json"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("{}\n", encoding="utf-8")
+        aliases_metadata_directory = (self.repo / ".ai-pro-loop").exists()
+
+        snapshot = capture_snapshot(self.repo, self.baseline)
+        changed_paths = [item["path"] for item in snapshot["changed_files"]]
+        if aliases_metadata_directory:
+            self.assertNotIn(".AI-PRO-LOOP/task/state.json", changed_paths)
+        else:
+            self.assertIn(".AI-PRO-LOOP/task/state.json", changed_paths)
+
     def test_renamed_files_have_normalized_manifest_entries(self) -> None:
         (self.repo / "old.txt").rename(self.repo / "renamed.txt")
         run_git(self.repo, "add", "-A")
         snapshot = capture_snapshot(self.repo, self.baseline)
         self.assertIn(
             {
+                "intent": "snapshot-discovered product change",
                 "path": "renamed.txt",
                 "previous_path": "old.txt",
                 "source": "tracked",
@@ -132,6 +202,7 @@ class CaptureSnapshotTests(unittest.TestCase):
             [
                 {
                     "content_digest": snapshot["untracked_files"][0]["content_digest"],
+                    "intent": "snapshot-discovered product change",
                     "path": "nested/new.txt",
                     "source": "untracked",
                     "status": "untracked",
@@ -144,6 +215,56 @@ class CaptureSnapshotTests(unittest.TestCase):
     def test_invalid_baseline_is_rejected(self) -> None:
         with self.assertRaises(SnapshotError):
             capture_snapshot(self.repo, "not-a-commit")
+
+    def test_snapshot_changed_files_are_valid_report_entries(self) -> None:
+        (self.repo / "app.py").write_text("print('changed')\n", encoding="utf-8")
+        snapshot = capture_snapshot(self.repo, self.baseline)
+        requirements = valid_requirements()
+        report = {
+            "baseline_head": snapshot["baseline_head"],
+            "requirements_revision": 1,
+            "requirements_digest": canonical_digest(requirements),
+            "review_round": 0,
+            "snapshot_digest": snapshot["snapshot_digest"],
+            "tracked_diff_digest": snapshot["tracked_diff_digest"],
+            "untracked_manifest_digest": snapshot["untracked_manifest_digest"],
+            "changed_files": snapshot["changed_files"],
+            "intent_summary": "Captured snapshot-discovered product changes.",
+            "acceptance_evidence": {"AC-1": ["snapshot test"]},
+            "test_commands": [
+                {
+                    "command": "python test_capture_snapshot.py -v",
+                    "outcome": "PASS",
+                    "output_summary": "snapshot tests pass",
+                }
+            ],
+            "diff_evidence": [],
+            "omissions": [],
+            "unresolved_risks_or_blockers": [],
+        }
+        self.assertEqual([], validate_report(report, requirements))
+
+    def test_snapshot_retries_when_tracked_state_drifts_mid_capture(self) -> None:
+        tracked_diff_calls = 0
+        original_run_git = snapshot_module.run_git
+
+        def drifting_run_git(repository: Path, *args: str) -> bytes:
+            nonlocal tracked_diff_calls
+            result = original_run_git(repository, *args)
+            if args[:3] == ("diff", "--binary", "--no-ext-diff"):
+                tracked_diff_calls += 1
+                if tracked_diff_calls == 1:
+                    (self.repo / "app.py").write_text(
+                        "print('drifted')\n", encoding="utf-8"
+                    )
+            return result
+
+        with patch.object(snapshot_module, "run_git", side_effect=drifting_run_git):
+            snapshot = capture_snapshot(self.repo, self.baseline)
+
+        stable_snapshot = capture_snapshot(self.repo, self.baseline)
+        self.assertGreaterEqual(tracked_diff_calls, 3)
+        self.assertEqual(stable_snapshot, snapshot)
 
 
 if __name__ == "__main__":
