@@ -254,6 +254,7 @@ class CaptureSnapshotTests(unittest.TestCase):
         snapshot = capture_snapshot(self.repo, self.baseline)
         requirements = valid_requirements()
         report = {
+            "schema_version": 1,
             "baseline_head": snapshot["baseline_head"],
             "requirements_revision": 1,
             "requirements_digest": canonical_digest(requirements),

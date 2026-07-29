@@ -19,6 +19,18 @@ FENCE_PATTERN = re.compile(
 
 SCHEMA_VERSION = 1
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
+TRANSPORT_HEADER_FIELDS = (
+    "schema_version",
+    "packet_type",
+    "run_id",
+    "turn_id",
+    "nonce",
+    "in_reply_to",
+    "prompt_digest",
+    "previous_packet_digest",
+)
+TRANSPORT_ENVELOPE_FIELDS = (*TRANSPORT_HEADER_FIELDS, "payload")
+TRANSPORT_PACKET_TYPES = frozenset({"requirements", "review"})
 REQUIREMENTS_DECISIONS = frozenset({"PLAN_READY", "NEED_USER_INPUT", "BLOCK"})
 REVIEW_DECISIONS = frozenset({"PASS", "CHANGES_REQUESTED", "BLOCK"})
 ACCEPTANCE_STATUSES = frozenset({"PASS", "FAIL", "UNVERIFIED"})
@@ -117,6 +129,7 @@ REQUIRED_REQUIREMENTS_FIELDS = (
     "open_questions",
 )
 REQUIRED_REPORT_FIELDS = (
+    "schema_version",
     "baseline_head",
     "requirements_revision",
     "requirements_digest",
@@ -143,6 +156,7 @@ REQUIRED_REVIEW_FIELDS = (
     "next_instruction",
 )
 REQUIRED_STATE_FIELDS = (
+    "schema_version",
     "phase",
     "review_round",
     "latest_decision",
@@ -175,6 +189,45 @@ REQUIRED_STATE_FIELDS = (
     "stop_sequence",
     "resolution_evidence",
     "resolution_stop_sequence",
+    "pending_requirements_envelope_digest",
+    "pending_review_envelope_digest",
+    "last_consumed_packet_digest",
+    "last_consumed_review_envelope_digest",
+    "active_report_digest",
+    "current_snapshot_digest",
+    "active_review_packet_digest",
+    "reviewed_snapshot_digest",
+)
+OPTIONAL_STATE_FIELDS = (
+    "unresolved_finding_ids",
+    "blocker_fingerprints",
+    "unresolved_findings",
+)
+FINAL_GATE_FIELDS = (
+    "schema_version",
+    "requirements_digest",
+    "review_packet_digest",
+    "reviewed_snapshot_digest",
+    "current_snapshot_digest",
+    "acceptance_gate_passed",
+    "local_checks_passed",
+    "scope_gate_passed",
+    "artifact_hygiene_passed",
+)
+REVIEW_TRANSITION_CONTEXT_FIELDS = (
+    "envelope",
+    "expected",
+    "consumed_digests",
+    "requirements",
+    "report",
+    "snapshot",
+)
+REQUIREMENTS_TRANSITION_CONTEXT_FIELDS = (
+    "envelope",
+    "expected",
+    "consumed_digests",
+    "requirements",
+    "approval_receipt",
 )
 STATE_TRANSITIONS = {
     "PREFLIGHT": frozenset({"REQUIREMENTS_PENDING"}),
@@ -207,15 +260,36 @@ MAX_FORMAT_ERRORS = 1
 
 
 class PacketValidationError(ValueError):
-    """Raised when a browser response is not exactly one JSON object fence."""
+    """Raised when untrusted Browser or file JSON fails strict decoding."""
 
 
-def extract_single_json_object(raw: str) -> dict[str, object]:
-    matches = list(FENCE_PATTERN.finditer(raw))
-    if len(matches) != 1 or raw.strip() != matches[0].group(0):
-        raise PacketValidationError("response must contain exactly one JSON fence")
+def _reject_constant(value: str) -> None:
+    raise PacketValidationError(f"non-standard JSON constant: {value}")
+
+
+def _reject_duplicate_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise PacketValidationError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def strict_json_loads(raw: str) -> object:
+    """Decode one untrusted protocol JSON object with fail-closed JSON rules."""
+    if raw.startswith("\ufeff"):
+        raise PacketValidationError("JSON must not start with a BOM")
     try:
-        value = json.loads(matches[0].group("body"))
+        value = json.loads(
+            raw,
+            parse_constant=_reject_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except PacketValidationError:
+        raise
     except json.JSONDecodeError as exc:
         raise PacketValidationError(f"invalid JSON: {exc.msg}") from exc
     if not isinstance(value, dict):
@@ -223,9 +297,27 @@ def extract_single_json_object(raw: str) -> dict[str, object]:
     return value
 
 
+def extract_single_json_object(raw: str) -> dict[str, object]:
+    if raw.startswith("\ufeff"):
+        raise PacketValidationError("response must not start with a BOM")
+    if raw.count("```") != 2:
+        raise PacketValidationError(
+            "response must contain one unnested JSON fence"
+        )
+    matches = list(FENCE_PATTERN.finditer(raw))
+    if len(matches) != 1 or raw.strip() != matches[0].group(0):
+        raise PacketValidationError("response must contain exactly one JSON fence")
+    value = strict_json_loads(matches[0].group("body"))
+    return value
+
+
 def canonical_digest(value: object) -> str:
     encoded = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
@@ -245,6 +337,36 @@ def _require_fields(packet: dict[str, object], fields: tuple[str, ...], errors: 
     for field in fields:
         if field not in packet:
             errors.append(f"{field}: missing required field")
+
+
+def _reject_unknown_fields(
+    packet: dict[str, object],
+    fields: tuple[str, ...],
+    errors: list[str],
+    *,
+    path: str = "",
+) -> None:
+    allowed = set(fields)
+    for field in packet:
+        if field not in allowed:
+            prefix = f"{path}." if path else ""
+            errors.append(f"{prefix}{field}: unknown field")
+
+
+def _require_schema_version(
+    packet: dict[str, object],
+    errors: list[str],
+    *,
+    path: str = "",
+) -> None:
+    value = packet.get("schema_version")
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value != SCHEMA_VERSION
+    ):
+        prefix = f"{path}." if path else ""
+        errors.append(f"{prefix}schema_version: must be integer {SCHEMA_VERSION}")
 
 
 def _is_nonempty_string(value: object) -> bool:
@@ -271,6 +393,105 @@ def _require_digest(value: object, path: str, errors: list[str], *, nullable: bo
         errors.append(f"{path}: must be a sha256 digest")
 
 
+def _canonical_digest_checked(
+    value: object,
+    path: str,
+    errors: list[str],
+) -> str | None:
+    try:
+        return canonical_digest(value)
+    except (TypeError, ValueError):
+        errors.append(f"{path}: must contain canonical finite JSON values")
+        return None
+
+
+def _validate_transport_envelope_shape(
+    envelope: object,
+) -> tuple[dict[str, object], list[str]]:
+    errors: list[str] = []
+    packet = _as_mapping(envelope, "envelope", errors)
+    _require_fields(packet, TRANSPORT_ENVELOPE_FIELDS, errors)
+    _reject_unknown_fields(packet, TRANSPORT_ENVELOPE_FIELDS, errors)
+    _require_schema_version(packet, errors)
+    if (
+        not isinstance(packet.get("packet_type"), str)
+        or packet.get("packet_type") not in TRANSPORT_PACKET_TYPES
+    ):
+        errors.append("packet_type: must be requirements or review")
+    for field in ("run_id", "turn_id", "nonce"):
+        _require_nonempty_string(packet, field, errors)
+    for field in ("in_reply_to", "prompt_digest"):
+        _require_digest(packet.get(field), field, errors)
+    _require_digest(
+        packet.get("previous_packet_digest"),
+        "previous_packet_digest",
+        errors,
+        nullable=True,
+    )
+    payload = _as_mapping(packet.get("payload"), "payload", errors)
+    packet_type = packet.get("packet_type")
+    if packet_type == "requirements":
+        errors.extend(
+            f"payload.{error}"
+            for error in _validate_requirements(
+                payload,
+                require_initial=False,
+            )
+        )
+    elif packet_type == "review":
+        _require_fields(payload, REQUIRED_REVIEW_FIELDS, errors)
+        _reject_unknown_fields(
+            payload,
+            REQUIRED_REVIEW_FIELDS,
+            errors,
+            path="payload",
+        )
+        if "schema_version" in payload:
+            _require_schema_version(payload, errors, path="payload")
+    return packet, _errors_sorted(errors)
+
+
+def validate_transport_envelope(
+    envelope,
+    expected,
+    consumed_digests,
+) -> list[str]:
+    """Validate an untrusted Pro response against one trusted send attempt.
+
+    ``expected`` and ``consumed_digests`` are trusted local controller state.
+    The Browser response is never allowed to select its own correlation values.
+    """
+    packet, errors = _validate_transport_envelope_shape(envelope)
+    trusted = _as_mapping(expected, "expected", errors)
+    for field in TRANSPORT_HEADER_FIELDS:
+        if field not in trusted:
+            errors.append(f"expected.{field}: missing required field")
+    _reject_unknown_fields(
+        trusted,
+        TRANSPORT_HEADER_FIELDS,
+        errors,
+        path="expected",
+    )
+    for field in TRANSPORT_HEADER_FIELDS:
+        if field in trusted and packet.get(field) != trusted.get(field):
+            errors.append(
+                f"{field}: does not match expected transport context"
+            )
+    if not isinstance(
+        consumed_digests,
+        (set, frozenset, list, tuple),
+    ) or any(
+        not isinstance(value, str) or not DIGEST_PATTERN.fullmatch(value)
+        for value in consumed_digests
+    ):
+        errors.append("consumed_digests: must be a collection of digest strings")
+    else:
+        envelope_digest = _canonical_digest_checked(packet, "envelope", errors)
+        if envelope_digest is not None and envelope_digest in consumed_digests:
+            errors.append("envelope_digest: response has already been consumed")
+    return _errors_sorted(errors)
+
+
 def _stable_ids(
     items: list[object],
     path: str,
@@ -286,6 +507,12 @@ def _stable_ids(
                 errors.append(f"{item_path}.{field}: missing required field")
             elif not _is_nonempty_string(item[field]):
                 errors.append(f"{item_path}.{field}: must be a non-empty string")
+        _reject_unknown_fields(
+            item,
+            required_fields,
+            errors,
+            path=item_path,
+        )
         identifier = item.get("id")
         if _is_nonempty_string(identifier):
             if identifier in ids:
@@ -309,8 +536,8 @@ def _validate_requirements(packet, previous=None, *, require_initial: bool):
     errors: list[str] = []
     current = _as_mapping(packet, "packet", errors)
     _require_fields(current, REQUIRED_REQUIREMENTS_FIELDS, errors)
-    if current.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"schema_version: must equal {SCHEMA_VERSION}")
+    _reject_unknown_fields(current, REQUIRED_REQUIREMENTS_FIELDS, errors)
+    _require_schema_version(current, errors)
     revision = current.get("requirements_revision")
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
         errors.append("requirements_revision: must be a positive integer")
@@ -346,7 +573,10 @@ def _validate_requirements(packet, previous=None, *, require_initial: bool):
         errors.append("prior_evidence_invalidated: material changes must invalidate prior evidence")
     if material_change and current.get("review_round_reset") is not True:
         errors.append("review_round_reset: material changes must reset review round")
-    if current.get("decision") not in REQUIREMENTS_DECISIONS:
+    if (
+        not isinstance(current.get("decision"), str)
+        or current.get("decision") not in REQUIREMENTS_DECISIONS
+    ):
         errors.append("decision: must be PLAN_READY, NEED_USER_INPUT, or BLOCK")
     _require_nonempty_string(current, "objective", errors)
 
@@ -376,7 +606,11 @@ def _validate_requirements(packet, previous=None, *, require_initial: bool):
             errors.append("previous.requirements_revision: must be a positive integer")
         elif revision != prior_revision + 1:
             errors.append("requirements_revision: must increment the previous revision by one")
-        if current.get("supersedes_digest") != canonical_digest(prior):
+        prior_digest = _canonical_digest_checked(prior, "previous", errors)
+        if (
+            prior_digest is not None
+            and current.get("supersedes_digest") != prior_digest
+        ):
             errors.append("supersedes_digest: must equal the previous requirements digest")
 
     return _errors_sorted(errors)
@@ -397,10 +631,20 @@ def validate_report(packet, requirements):
         for error in _validate_requirements(req, require_initial=False)
     )
     _require_fields(report, REQUIRED_REPORT_FIELDS, errors)
+    _reject_unknown_fields(report, REQUIRED_REPORT_FIELDS, errors)
+    _require_schema_version(report, errors)
     _require_nonempty_string(report, "baseline_head", errors)
     if report.get("requirements_revision") != req.get("requirements_revision"):
         errors.append("requirements_revision: does not match requirements revision")
-    if report.get("requirements_digest") != canonical_digest(req):
+    requirements_digest = _canonical_digest_checked(
+        req,
+        "requirements",
+        errors,
+    )
+    if (
+        requirements_digest is not None
+        and report.get("requirements_digest") != requirements_digest
+    ):
         errors.append("requirements_digest: does not match requirements digest")
     review_round = report.get("review_round")
     if not isinstance(review_round, int) or isinstance(review_round, bool) or review_round < 0:
@@ -439,6 +683,12 @@ def validate_report(packet, requirements):
                 errors.append(f"test_commands.{index}.{field}: missing required field")
             elif not _is_nonempty_string(item[field]):
                 errors.append(f"test_commands.{index}.{field}: must be a non-empty string")
+        _reject_unknown_fields(
+            item,
+            ("command", "outcome", "output_summary"),
+            errors,
+            path=f"test_commands.{index}",
+        )
     for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
         _require_list(report, field, errors)
     return _errors_sorted(errors)
@@ -454,12 +704,21 @@ def _result_statuses(results: object, errors: list[str]) -> dict[str, dict[str, 
         item = _as_mapping(value, path, errors)
         if "status" not in item:
             errors.append(f"{path}.status: missing required field")
-        elif item.get("status") not in ACCEPTANCE_STATUSES:
+        elif (
+            not isinstance(item.get("status"), str)
+            or item.get("status") not in ACCEPTANCE_STATUSES
+        ):
             errors.append(f"{path}.status: must be PASS, FAIL, or UNVERIFIED")
         if "evidence" not in item:
             errors.append(f"{path}.evidence: missing required field")
         elif not _is_nonempty_string(item.get("evidence")):
             errors.append(f"{path}.evidence: must be a non-empty string")
+        _reject_unknown_fields(
+            item,
+            ("status", "evidence"),
+            errors,
+            path=path,
+        )
         normalized[str(acceptance_id)] = item
     return normalized
 
@@ -489,13 +748,24 @@ def validate_review(packet, requirements, report):
         if not report_error.startswith("requirements."):
             errors.append(f"report.{report_error}")
     _require_fields(review, REQUIRED_REVIEW_FIELDS, errors)
-    if review.get("schema_version") != SCHEMA_VERSION:
-        errors.append(f"schema_version: must equal {SCHEMA_VERSION}")
-    if review.get("requirements_digest") != canonical_digest(req):
+    _reject_unknown_fields(review, REQUIRED_REVIEW_FIELDS, errors)
+    _require_schema_version(review, errors)
+    requirements_digest = _canonical_digest_checked(
+        req,
+        "requirements",
+        errors,
+    )
+    if (
+        requirements_digest is not None
+        and review.get("requirements_digest") != requirements_digest
+    ):
         errors.append("requirements_digest: does not match requirements digest")
     if review.get("reviewed_snapshot_digest") != implementation_report.get("snapshot_digest"):
         errors.append("reviewed_snapshot_digest: does not match report snapshot_digest")
-    if review.get("decision") not in REVIEW_DECISIONS:
+    if (
+        not isinstance(review.get("decision"), str)
+        or review.get("decision") not in REVIEW_DECISIONS
+    ):
         errors.append("decision: must be PASS, CHANGES_REQUESTED, or BLOCK")
     acceptance_ids = _acceptance_ids(req, errors)
     results = _result_statuses(review.get("acceptance_results"), errors)
@@ -522,15 +792,40 @@ def validate_review(packet, requirements, report):
                 errors.append(f"{path}.{field}: missing required field")
             elif not _is_nonempty_string(finding[field]):
                 errors.append(f"{path}.{field}: must be a non-empty string")
+        _reject_unknown_fields(
+            finding,
+            (
+                "id",
+                "root_cause_fingerprint",
+                "severity",
+                "category",
+                "required_action",
+                "evidence",
+                "required_change",
+            ),
+            errors,
+            path=path,
+        )
         finding_id = finding.get("id")
         if _is_nonempty_string(finding_id):
             if finding_id in seen_finding_ids:
                 errors.append(f"{path}.id: duplicate stable ID {finding_id}")
             seen_finding_ids.add(finding_id)
-        if finding.get("severity") not in FINDING_SEVERITIES:
+        if (
+            not isinstance(finding.get("severity"), str)
+            or finding.get("severity") not in FINDING_SEVERITIES
+        ):
             errors.append(f"{path}.severity: must be BLOCKER, HIGH, MEDIUM, or LOW")
+        fingerprint = finding.get("root_cause_fingerprint")
+        if (
+            not isinstance(fingerprint, str)
+            or not DIGEST_PATTERN.fullmatch(fingerprint)
+        ):
+            errors.append(
+                f"{path}.root_cause_fingerprint: must be a lowercase sha256 digest"
+            )
         action = finding.get("required_action")
-        if action not in REQUIRED_ACTIONS:
+        if not isinstance(action, str) or action not in REQUIRED_ACTIONS:
             errors.append(f"{path}.required_action: invalid required action")
         if action == "PROVIDE_EVIDENCE" and _finding_requests_code_change(finding.get("required_change")):
             errors.append(f"{path}.required_change: PROVIDE_EVIDENCE cannot request a code change")
@@ -543,12 +838,300 @@ def validate_review(packet, requirements, report):
     return _errors_sorted(errors)
 
 
+def validate_report_context(
+    report,
+    requirements,
+    state,
+    snapshot,
+) -> list[str]:
+    """Bind a local report to trusted active state and a captured snapshot.
+
+    ``report`` and ``snapshot`` are local artifacts, while ``state`` is trusted
+    controller state. This function does not make Browser payloads trusted.
+    """
+    errors = list(validate_report(report, requirements))
+    implementation_report = _as_mapping(report, "report", errors)
+    req = _as_mapping(requirements, "requirements", errors)
+    trusted_state = _as_mapping(state, "state", errors)
+    captured = _as_mapping(snapshot, "snapshot", errors)
+    if isinstance(state, dict):
+        _validate_state_fields(trusted_state, "state", errors)
+        phase = _phase(trusted_state, "state", errors)
+        if phase not in {"LOCAL_VERIFICATION", "REVIEW_PENDING"}:
+            errors.append(
+                "state.phase: report context requires LOCAL_VERIFICATION or REVIEW_PENDING"
+            )
+
+    if req.get("decision") != "PLAN_READY":
+        errors.append("requirements: report requires PLAN_READY requirements")
+    if (
+        req.get("user_approval_required") is True
+        and (
+            req.get("user_approval_received") is not True
+            or not isinstance(trusted_state.get("approval_sequence"), int)
+            or isinstance(trusted_state.get("approval_sequence"), bool)
+            or trusted_state.get("approval_sequence", 0) < 1
+        )
+    ):
+        errors.append("requirements: required user approval is not recorded")
+    if (
+        trusted_state.get("active_requirements_revision")
+        != req.get("requirements_revision")
+    ):
+        errors.append(
+            "requirements_revision: does not match active trusted requirements"
+        )
+    requirements_digest = _canonical_digest_checked(
+        req,
+        "requirements",
+        errors,
+    )
+    if (
+        requirements_digest is not None
+        and trusted_state.get("active_requirements_digest")
+        != requirements_digest
+    ):
+        errors.append(
+            "requirements_digest: does not match active trusted requirements"
+        )
+    if implementation_report.get("review_round") != trusted_state.get(
+        "review_round"
+    ):
+        errors.append("review_round: does not match active workflow state")
+
+    report_digest = _canonical_digest_checked(
+        implementation_report,
+        "report",
+        errors,
+    )
+    if (
+        report_digest is not None
+        and trusted_state.get("active_report_digest") != report_digest
+    ):
+        errors.append("active_report_digest: does not match implementation report")
+
+    _require_schema_version(captured, errors, path="snapshot")
+    for field in (
+        "baseline_head",
+        "snapshot_digest",
+        "tracked_diff_digest",
+        "untracked_manifest_digest",
+    ):
+        if captured.get(field) != implementation_report.get(field):
+            errors.append(
+                f"snapshot.{field}: does not match implementation report"
+            )
+    if trusted_state.get("current_snapshot_digest") != captured.get(
+        "snapshot_digest"
+    ):
+        errors.append(
+            "current_snapshot_digest: does not match captured snapshot"
+        )
+    return _errors_sorted(errors)
+
+
+def _review_required_actions(review: dict[str, object]) -> list[str]:
+    findings = review.get("findings")
+    if not isinstance(findings, list):
+        return []
+    return sorted(
+        {
+            action
+            for finding in findings
+            if isinstance(finding, dict)
+            for action in (finding.get("required_action"),)
+            if isinstance(action, str) and action in REQUIRED_ACTIONS
+        }
+    )
+
+
+def _review_finding_history(
+    review: dict[str, object],
+) -> tuple[list[str], list[str]]:
+    findings = review.get("findings")
+    if not isinstance(findings, list):
+        return [], []
+    identifiers: list[str] = []
+    fingerprints: list[str] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        identifier = finding.get("id")
+        fingerprint = finding.get("root_cause_fingerprint")
+        if isinstance(identifier, str):
+            identifiers.append(identifier)
+        if isinstance(fingerprint, str):
+            fingerprints.append(fingerprint)
+    return sorted(set(identifiers)), sorted(set(fingerprints))
+
+
+def validate_review_context(
+    envelope,
+    requirements,
+    report,
+    state,
+    snapshot,
+) -> list[str]:
+    """Bind one untrusted review envelope to its trusted local review state.
+
+    The controller must record ``pending_review_envelope_digest`` only after
+    ``validate_transport_envelope`` succeeds against the trusted send attempt
+    and the complete consumed-digest set.
+    """
+    packet, errors = _validate_transport_envelope_shape(envelope)
+    trusted_state = _as_mapping(state, "state", errors)
+    if isinstance(state, dict):
+        _validate_state_fields(trusted_state, "state", errors)
+        phase = _phase(trusted_state, "state", errors)
+        if phase != "REVIEW_PENDING":
+            errors.append("state.phase: review context requires REVIEW_PENDING")
+    payload = _as_mapping(packet.get("payload"), "payload", errors)
+    if packet.get("packet_type") != "review":
+        errors.append("packet_type: review context requires a review envelope")
+
+    errors.extend(
+        validate_report_context(report, requirements, trusted_state, snapshot)
+    )
+    errors.extend(validate_review(payload, requirements, report))
+
+    envelope_digest = _canonical_digest_checked(packet, "envelope", errors)
+    pending_digest = trusted_state.get("pending_review_envelope_digest")
+    if (
+        envelope_digest is None
+        or pending_digest is None
+        or pending_digest != envelope_digest
+    ):
+        errors.append(
+            "pending_review_envelope_digest: review envelope was not prevalidated"
+        )
+    if pending_digest is not None and (
+        pending_digest == trusted_state.get("last_consumed_packet_digest")
+        or pending_digest
+        == trusted_state.get("last_consumed_review_envelope_digest")
+    ):
+        errors.append(
+            "pending_review_envelope_digest: review envelope is not fresh"
+        )
+    if packet.get("previous_packet_digest") != trusted_state.get(
+        "last_consumed_packet_digest"
+    ):
+        errors.append(
+            "previous_packet_digest: does not match the trusted packet chain"
+        )
+    _require_digest(
+        trusted_state.get("last_consumed_packet_digest"),
+        "state.last_consumed_packet_digest",
+        errors,
+    )
+
+    review_digest = _canonical_digest_checked(payload, "review", errors)
+    if (
+        review_digest is not None
+        and trusted_state.get("active_review_packet_digest") != review_digest
+    ):
+        errors.append(
+            "active_review_packet_digest: does not match validated review payload"
+        )
+    if trusted_state.get("reviewed_snapshot_digest") != payload.get(
+        "reviewed_snapshot_digest"
+    ):
+        errors.append(
+            "reviewed_snapshot_digest: does not match trusted review state"
+        )
+    if trusted_state.get("latest_decision") != payload.get("decision"):
+        errors.append(
+            "latest_decision: does not match the validated review payload"
+        )
+    state_actions = trusted_state.get("required_actions")
+    if (
+        not isinstance(state_actions, list)
+        or any(not isinstance(action, str) for action in state_actions)
+        or sorted(set(state_actions)) != _review_required_actions(payload)
+    ):
+        errors.append(
+            "required_actions: do not match the validated review payload"
+        )
+    finding_ids, finding_fingerprints = _review_finding_history(payload)
+    if sorted(_finding_ids(trusted_state)) != finding_ids:
+        errors.append(
+            "unresolved_finding_ids: do not match the validated review payload"
+        )
+    if sorted(_fingerprints(trusted_state)) != finding_fingerprints:
+        errors.append(
+            "blocker_fingerprints: do not match the validated review payload"
+        )
+    return _errors_sorted(errors)
+
+
+def validate_final_gate(evidence, state) -> list[str]:
+    """Validate explicit completion evidence against trusted local state."""
+    errors: list[str] = []
+    gate = _as_mapping(evidence, "final_gate", errors)
+    trusted_state = _as_mapping(state, "state", errors)
+    if isinstance(state, dict):
+        _validate_state_fields(trusted_state, "state", errors)
+        _phase(trusted_state, "state", errors)
+    _require_fields(gate, FINAL_GATE_FIELDS, errors)
+    _reject_unknown_fields(gate, FINAL_GATE_FIELDS, errors)
+    _require_schema_version(gate, errors)
+    digest_bindings = (
+        ("requirements_digest", "active_requirements_digest"),
+        ("review_packet_digest", "active_review_packet_digest"),
+        ("reviewed_snapshot_digest", "reviewed_snapshot_digest"),
+        ("current_snapshot_digest", "current_snapshot_digest"),
+    )
+    for evidence_field, state_field in digest_bindings:
+        _require_digest(gate.get(evidence_field), evidence_field, errors)
+        if gate.get(evidence_field) != trusted_state.get(state_field):
+            errors.append(
+                f"{evidence_field}: does not match trusted {state_field}"
+            )
+    for field in (
+        "acceptance_gate_passed",
+        "local_checks_passed",
+        "scope_gate_passed",
+        "artifact_hygiene_passed",
+    ):
+        if gate.get(field) is not True:
+            errors.append(f"{field}: must be JSON boolean true")
+    if gate.get("reviewed_snapshot_digest") != gate.get(
+        "current_snapshot_digest"
+    ):
+        errors.append(
+            "current_snapshot_digest: must equal the reviewed snapshot digest"
+        )
+    if trusted_state.get("phase") != "FINAL_VERIFICATION":
+        errors.append("state.phase: final gate requires FINAL_VERIFICATION")
+    if trusted_state.get("latest_decision") != "PASS":
+        errors.append("state.latest_decision: final gate requires validated PASS")
+    if trusted_state.get("required_actions") != []:
+        errors.append("state.required_actions: final gate requires no pending actions")
+    _require_digest(
+        trusted_state.get("active_report_digest"),
+        "state.active_report_digest",
+        errors,
+    )
+    if trusted_state.get("pending_review_envelope_digest") is not None:
+        errors.append(
+            "state.pending_review_envelope_digest: final gate requires consumed review identity"
+        )
+    if (
+        trusted_state.get("last_consumed_review_envelope_digest") is None
+        or trusted_state.get("last_consumed_review_envelope_digest")
+        != trusted_state.get("last_consumed_packet_digest")
+    ):
+        errors.append(
+            "state.last_consumed_review_envelope_digest: final gate requires the active consumed review"
+        )
+    return _errors_sorted(errors)
+
+
 def _phase(value: object, name: str, errors: list[str]) -> str | None:
     if not isinstance(value, dict):
         errors.append(f"{name}: must be a state object")
         return None
     phase = value.get("phase")
-    if phase not in STATE_TRANSITIONS:
+    if not isinstance(phase, str) or phase not in STATE_TRANSITIONS:
         errors.append(f"{name}.phase: unknown workflow phase")
         return None
     return phase
@@ -587,7 +1170,11 @@ def _validate_conversation_binding(
         return False
     complete = True
     binding_state = state.get("conversation_binding_state")
-    if binding_state not in {"CONVERSATION_UNBOUND", "CONVERSATION_BOUND"}:
+    if (
+        not isinstance(binding_state, str)
+        or binding_state
+        not in {"CONVERSATION_UNBOUND", "CONVERSATION_BOUND"}
+    ):
         errors.append(
             f"{name}.conversation_binding_state: must be CONVERSATION_UNBOUND or CONVERSATION_BOUND"
         )
@@ -611,11 +1198,21 @@ def _validate_state_fields(
     for field in REQUIRED_STATE_FIELDS:
         if field not in state:
             errors.append(f"{name}.{field}: missing required field")
+    _reject_unknown_fields(
+        state,
+        (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS),
+        errors,
+        path=name,
+    )
+    _require_schema_version(state, errors, path=name)
     requirements_decision = state.get("latest_requirements_decision")
     if (
         "latest_requirements_decision" in state
         and requirements_decision is not None
-        and requirements_decision not in REQUIREMENTS_DECISIONS
+        and (
+            not isinstance(requirements_decision, str)
+            or requirements_decision not in REQUIREMENTS_DECISIONS
+        )
     ):
         errors.append(
             f"{name}.latest_requirements_decision: must be PLAN_READY, NEED_USER_INPUT, BLOCK, or null"
@@ -675,6 +1272,14 @@ def _validate_state_fields(
         "pending_requirements_digest",
         "pending_supersedes_digest",
         "pending_approved_requirements_digest",
+        "pending_requirements_envelope_digest",
+        "pending_review_envelope_digest",
+        "last_consumed_packet_digest",
+        "last_consumed_review_envelope_digest",
+        "active_report_digest",
+        "current_snapshot_digest",
+        "active_review_packet_digest",
+        "reviewed_snapshot_digest",
     ):
         if field in state:
             _require_digest(
@@ -683,6 +1288,73 @@ def _validate_state_fields(
                 errors,
                 nullable=True,
             )
+    blocker_fingerprints = state.get("blocker_fingerprints")
+    if "blocker_fingerprints" in state and (
+        not isinstance(blocker_fingerprints, list)
+        or any(
+            not isinstance(fingerprint, str)
+            or not DIGEST_PATTERN.fullmatch(fingerprint)
+            for fingerprint in blocker_fingerprints
+        )
+    ):
+        errors.append(
+            f"{name}.blocker_fingerprints: must be a list of lowercase sha256 digests"
+        )
+    unresolved_ids = state.get("unresolved_finding_ids")
+    if "unresolved_finding_ids" in state and (
+        not isinstance(unresolved_ids, list)
+        or any(not _is_nonempty_string(identifier) for identifier in unresolved_ids)
+    ):
+        errors.append(
+            f"{name}.unresolved_finding_ids: must be a list of strings"
+        )
+    active_review_digest = state.get("active_review_packet_digest")
+    reviewed_snapshot_digest = state.get("reviewed_snapshot_digest")
+    if (active_review_digest is None) != (reviewed_snapshot_digest is None):
+        errors.append(
+            f"{name}.active_review: review packet and reviewed snapshot digests must both be set or null"
+        )
+    if (
+        state.get("phase") != "REQUIREMENTS_PENDING"
+        and state.get("pending_requirements_envelope_digest") is not None
+    ):
+        errors.append(
+            f"{name}.pending_requirements_envelope_digest: is allowed only while requirements are pending"
+        )
+    if (
+        state.get("phase") != "REVIEW_PENDING"
+        and state.get("pending_review_envelope_digest") is not None
+    ):
+        errors.append(
+            f"{name}.pending_review_envelope_digest: is allowed only while review is pending"
+        )
+    legacy_findings = state.get("unresolved_findings")
+    if "unresolved_findings" in state:
+        if not isinstance(legacy_findings, list):
+            errors.append(f"{name}.unresolved_findings: must be a list")
+        else:
+            for index, value in enumerate(legacy_findings):
+                item = _as_mapping(
+                    value,
+                    f"{name}.unresolved_findings.{index}",
+                    errors,
+                )
+                identifier = item.get("id")
+                fingerprint = item.get(
+                    "fingerprint",
+                    item.get("root_cause_fingerprint"),
+                )
+                if not _is_nonempty_string(identifier):
+                    errors.append(
+                        f"{name}.unresolved_findings.{index}.id: must be a non-empty string"
+                    )
+                if (
+                    not isinstance(fingerprint, str)
+                    or not DIGEST_PATTERN.fullmatch(fingerprint)
+                ):
+                    errors.append(
+                        f"{name}.unresolved_findings.{index}.fingerprint: must be a lowercase sha256 digest"
+                    )
     active_revision = state.get("active_requirements_revision")
     active_digest = state.get("active_requirements_digest")
     if (
@@ -778,7 +1450,10 @@ def _validate_state_fields(
     if (
         "stop_origin_phase" in state
         and stop_origin_phase is not None
-        and stop_origin_phase not in STATE_TRANSITIONS
+        and (
+            not isinstance(stop_origin_phase, str)
+            or stop_origin_phase not in STATE_TRANSITIONS
+        )
     ):
         errors.append(
             f"{name}.stop_origin_phase: must be a workflow phase or null"
@@ -787,7 +1462,10 @@ def _validate_state_fields(
     if (
         "stop_origin_category" in state
         and stop_origin_category is not None
-        and stop_origin_category not in STOP_ORIGIN_CATEGORIES
+        and (
+            not isinstance(stop_origin_category, str)
+            or stop_origin_category not in STOP_ORIGIN_CATEGORIES
+        )
     ):
         errors.append(
             f"{name}.stop_origin_category: must be a valid stop category or null"
@@ -939,7 +1617,7 @@ def _expected_requirements_target(
         "NEED_USER_INPUT": "USER_DECISION_REQUIRED",
         "BLOCK": "BLOCKED",
     }
-    target = targets.get(decision)
+    target = targets.get(decision) if isinstance(decision, str) else None
     if target is None:
         errors.append(
             "latest_requirements_decision: a requirements transition requires PLAN_READY, NEED_USER_INPUT, or BLOCK"
@@ -985,7 +1663,7 @@ def _validate_stop_state_shape(
         state.get("stop_origin_category"),
         state.get("stop_reason"),
     )
-    if phase in STOP_PHASES:
+    if isinstance(phase, str) and phase in STOP_PHASES:
         if state.get("stop_origin_phase") is None:
             errors.append(f"{name}.stop_origin_phase: stop state requires an origin")
         if state.get("stop_origin_category") is None:
@@ -1061,9 +1739,13 @@ def _validate_stop_resume(
     errors: list[str],
 ) -> None:
     category = previous_state.get("stop_origin_category")
-    targets = STOP_RESUME_TARGETS.get(category)
-    expected_origin = STOP_CATEGORY_ORIGINS.get(category)
-    expected_stop_phase = STOP_CATEGORY_PHASES.get(category)
+    targets = STOP_RESUME_TARGETS.get(category) if isinstance(category, str) else None
+    expected_origin = (
+        STOP_CATEGORY_ORIGINS.get(category) if isinstance(category, str) else None
+    )
+    expected_stop_phase = (
+        STOP_CATEGORY_PHASES.get(category) if isinstance(category, str) else None
+    )
     if targets is None:
         errors.append("stop_origin_category: stop resume requires a valid category")
     else:
@@ -1103,12 +1785,29 @@ def _validate_stop_resume(
             "stop_provenance: resume must consume origin phase, category, and reason"
         )
     if (
-        category in {"REQUIREMENTS_NEED_USER_INPUT", "REQUIREMENTS_BLOCK"}
+        isinstance(category, str)
+        and category in {"REQUIREMENTS_NEED_USER_INPUT", "REQUIREMENTS_BLOCK"}
         and current_state.get("latest_requirements_decision") is not None
     ):
         errors.append(
             "latest_requirements_decision: resume must clear the prior requirements decision"
         )
+    if isinstance(category, str) and category in {
+        "REVIEW_USER_DECISION",
+        "REVIEW_BLOCK",
+    }:
+        if current_state.get("latest_decision") is not None:
+            errors.append(
+                "latest_decision: review-stop resume must clear the consumed decision"
+            )
+        if current_state.get("required_actions") != []:
+            errors.append(
+                "required_actions: review-stop resume must clear consumed actions"
+            )
+        if current_state.get("pending_review_envelope_digest") is not None:
+            errors.append(
+                "pending_review_envelope_digest: review-stop resume must clear pending review identity"
+            )
 
 
 def _validate_resolution_lifecycle(
@@ -1311,8 +2010,357 @@ def _validate_requirements_promotion(
     return promotion_attempt, reset_attempt
 
 
-def validate_transition(previous, current):
-    """Return all deterministic workflow-state transition validation errors."""
+def _validate_requirements_envelope_consumption(
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+    errors: list[str],
+) -> None:
+    pending = previous_state.get("pending_requirements_envelope_digest")
+    _require_digest(
+        pending,
+        "pending_requirements_envelope_digest",
+        errors,
+    )
+    if pending == previous_state.get("last_consumed_packet_digest"):
+        errors.append(
+            "pending_requirements_envelope_digest: requirements response must be fresh"
+        )
+    if current_state.get("last_consumed_packet_digest") != pending:
+        errors.append(
+            "last_consumed_packet_digest: must consume the validated requirements envelope"
+        )
+    if current_state.get("pending_requirements_envelope_digest") is not None:
+        errors.append(
+            "pending_requirements_envelope_digest: must clear after requirements consumption"
+        )
+
+
+def _validate_review_envelope_consumption(
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+    errors: list[str],
+) -> None:
+    pending = previous_state.get("pending_review_envelope_digest")
+    _require_digest(
+        pending,
+        "pending_review_envelope_digest",
+        errors,
+    )
+    _require_digest(
+        previous_state.get("last_consumed_packet_digest"),
+        "last_consumed_packet_digest",
+        errors,
+    )
+    if (
+        pending == previous_state.get("last_consumed_packet_digest")
+        or pending
+        == previous_state.get("last_consumed_review_envelope_digest")
+    ):
+        errors.append(
+            "pending_review_envelope_digest: review response must be fresh"
+        )
+    if current_state.get("last_consumed_packet_digest") != pending:
+        errors.append(
+            "last_consumed_packet_digest: must consume the validated review envelope"
+        )
+    if current_state.get("last_consumed_review_envelope_digest") != pending:
+        errors.append(
+            "last_consumed_review_envelope_digest: must promote the validated review envelope"
+        )
+    if current_state.get("pending_review_envelope_digest") is not None:
+        errors.append(
+            "pending_review_envelope_digest: must clear after review consumption"
+        )
+    for field in ("active_review_packet_digest", "reviewed_snapshot_digest"):
+        if previous_state.get(field) is None:
+            errors.append(
+                f"{field}: validated review context must bind this digest before consumption"
+            )
+        if current_state.get(field) != previous_state.get(field):
+            errors.append(
+                f"{field}: review consumption must preserve validated review context"
+            )
+    for field in ("active_report_digest", "current_snapshot_digest"):
+        if current_state.get(field) != previous_state.get(field):
+            errors.append(
+                f"{field}: review consumption must preserve report context"
+            )
+    if current_state.get("latest_decision") != previous_state.get(
+        "latest_decision"
+    ):
+        errors.append(
+            "latest_decision: review consumption must use the validated pending decision"
+        )
+    if current_state.get("required_actions") != previous_state.get(
+        "required_actions"
+    ):
+        errors.append(
+            "required_actions: review consumption must use validated pending actions"
+        )
+
+
+def _validate_review_transition_context(
+    context: object,
+    state: dict[str, object],
+    consumed_state: dict[str, object],
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(context, dict):
+        return [
+            "review_context: explicit composed context is required for review consumption"
+        ]
+    _require_fields(context, REVIEW_TRANSITION_CONTEXT_FIELDS, errors)
+    _reject_unknown_fields(
+        context,
+        REVIEW_TRANSITION_CONTEXT_FIELDS,
+        errors,
+        path="review_context",
+    )
+    if errors:
+        return _errors_sorted(errors)
+    transport_errors = validate_transport_envelope(
+        context["envelope"],
+        context["expected"],
+        context["consumed_digests"],
+    )
+    errors.extend(
+        f"review_context.transport.{error}" for error in transport_errors
+    )
+    review_state = dict(state)
+    for field in (
+        "latest_decision",
+        "required_actions",
+        "unresolved_finding_ids",
+        "blocker_fingerprints",
+        "unresolved_findings",
+    ):
+        if field in consumed_state:
+            review_state[field] = consumed_state[field]
+        else:
+            review_state.pop(field, None)
+    review_errors = validate_review_context(
+        context["envelope"],
+        context["requirements"],
+        context["report"],
+        review_state,
+        context["snapshot"],
+    )
+    errors.extend(f"review_context.{error}" for error in review_errors)
+    consumed = context.get("consumed_digests")
+    last_consumed = state.get("last_consumed_packet_digest")
+    if (
+        isinstance(consumed, (set, frozenset, list, tuple))
+        and isinstance(last_consumed, str)
+        and last_consumed not in consumed
+    ):
+        errors.append(
+            "review_context.consumed_digests: must contain the trusted packet-chain head"
+        )
+    return _errors_sorted(errors)
+
+
+def _validate_requirements_transition_context(
+    context: object,
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(context, dict):
+        return [
+            "requirements_context: explicit composed context is required for requirements consumption"
+        ]
+    _require_fields(context, REQUIREMENTS_TRANSITION_CONTEXT_FIELDS, errors)
+    _reject_unknown_fields(
+        context,
+        REQUIREMENTS_TRANSITION_CONTEXT_FIELDS,
+        errors,
+        path="requirements_context",
+    )
+    if errors:
+        return _errors_sorted(errors)
+
+    envelope = context["envelope"]
+    requirements = context["requirements"]
+    transport_errors = validate_transport_envelope(
+        envelope,
+        context["expected"],
+        context["consumed_digests"],
+    )
+    errors.extend(
+        f"requirements_context.transport.{error}"
+        for error in transport_errors
+    )
+    packet, envelope_errors = _validate_transport_envelope_shape(envelope)
+    errors.extend(
+        f"requirements_context.{error}" for error in envelope_errors
+    )
+    requirements_packet = _as_mapping(
+        requirements,
+        "requirements_context.requirements",
+        errors,
+    )
+    errors.extend(
+        f"requirements_context.requirements.{error}"
+        for error in _validate_requirements(
+            requirements_packet,
+            require_initial=False,
+        )
+    )
+    if packet.get("packet_type") != "requirements":
+        errors.append(
+            "requirements_context.packet_type: requirements consumption requires a requirements envelope"
+        )
+    if packet.get("payload") != requirements_packet:
+        errors.append(
+            "requirements_context.payload: does not match the requirements packet"
+        )
+
+    envelope_digest = _canonical_digest_checked(
+        packet,
+        "requirements_context.envelope",
+        errors,
+    )
+    if (
+        envelope_digest is not None
+        and previous_state.get("pending_requirements_envelope_digest")
+        != envelope_digest
+    ):
+        errors.append(
+            "requirements_context.pending_requirements_envelope_digest: envelope was not prevalidated"
+        )
+    if packet.get("previous_packet_digest") != previous_state.get(
+        "last_consumed_packet_digest"
+    ):
+        errors.append(
+            "requirements_context.previous_packet_digest: does not match the trusted packet chain"
+        )
+    consumed = context.get("consumed_digests")
+    last_consumed = previous_state.get("last_consumed_packet_digest")
+    if (
+        isinstance(consumed, (set, frozenset, list, tuple))
+        and isinstance(last_consumed, str)
+        and last_consumed not in consumed
+    ):
+        errors.append(
+            "requirements_context.consumed_digests: must contain the trusted packet-chain head"
+        )
+
+    requirements_digest = _canonical_digest_checked(
+        requirements_packet,
+        "requirements_context.requirements",
+        errors,
+    )
+    pending_revision = previous_state.get("pending_requirements_revision")
+    pending_digest = previous_state.get("pending_requirements_digest")
+    has_pending_revision = (
+        pending_revision is not None or pending_digest is not None
+    )
+    if has_pending_revision:
+        if requirements_packet.get("requirements_revision") != pending_revision:
+            errors.append(
+                "requirements_context.requirements_revision: does not match the pending trusted revision"
+            )
+        if (
+            requirements_digest is not None
+            and requirements_digest != pending_digest
+        ):
+            errors.append(
+                "requirements_context.requirements_digest: does not match the pending trusted requirements"
+            )
+        if requirements_packet.get(
+            "supersedes_digest"
+        ) != previous_state.get("pending_supersedes_digest"):
+            errors.append(
+                "requirements_context.supersedes_digest: does not match pending requirements provenance"
+            )
+        for field in MATERIAL_REVISION_FLAGS:
+            if requirements_packet.get(field) != previous_state.get(field):
+                errors.append(
+                    f"requirements_context.{field}: does not match pending requirements provenance"
+                )
+    else:
+        if (
+            requirements_packet.get("requirements_revision")
+            != previous_state.get("active_requirements_revision")
+        ):
+            errors.append(
+                "requirements_context.requirements_revision: does not match the active trusted revision"
+            )
+        if (
+            requirements_digest is not None
+            and requirements_digest
+            != previous_state.get("active_requirements_digest")
+        ):
+            errors.append(
+                "requirements_context.requirements_digest: does not match the active trusted requirements"
+            )
+
+    if current_state.get(
+        "latest_requirements_decision"
+    ) != requirements_packet.get("decision"):
+        errors.append(
+            "requirements_context.decision: does not match the consumed requirements decision"
+        )
+    if current_state.get("phase") == "REQUIREMENTS_FROZEN":
+        if (
+            current_state.get("active_requirements_revision")
+            != requirements_packet.get("requirements_revision")
+        ):
+            errors.append(
+                "requirements_context.active_requirements_revision: frozen state does not promote the validated requirements"
+            )
+        if (
+            requirements_digest is not None
+            and current_state.get("active_requirements_digest")
+            != requirements_digest
+        ):
+            errors.append(
+                "requirements_context.active_requirements_digest: frozen state does not promote the validated requirements"
+            )
+
+    approval_receipt = context.get("approval_receipt")
+    if requirements_packet.get("user_approval_required") is True:
+        if not _is_nonempty_string(approval_receipt):
+            errors.append(
+                "requirements_context.approval_receipt: required user approval receipt is missing"
+            )
+        if requirements_packet.get("user_approval_received") is not True:
+            errors.append(
+                "requirements_context.user_approval_received: required approval is not recorded in the requirements packet"
+            )
+        if (
+            approval_receipt
+            != previous_state.get("pending_user_approval_evidence")
+        ):
+            errors.append(
+                "requirements_context.approval_receipt: does not match trusted pending approval evidence"
+            )
+        if (
+            requirements_digest is not None
+            and previous_state.get(
+                "pending_approved_requirements_digest"
+            )
+            != requirements_digest
+        ):
+            errors.append(
+                "requirements_context.pending_approved_requirements_digest: does not approve the validated requirements"
+            )
+    elif approval_receipt is not None:
+        errors.append(
+            "requirements_context.approval_receipt: must be null when approval is not required"
+        )
+    return _errors_sorted(errors)
+
+
+def validate_transition(
+    previous,
+    current,
+    *,
+    requirements_context=None,
+    review_context=None,
+    final_gate_evidence=None,
+):
+    """Validate trusted local state movement and explicit packet receipts."""
     errors: list[str] = []
     previous_phase = _phase(previous, "previous", errors)
     current_phase = _phase(current, "current", errors)
@@ -1416,6 +2464,24 @@ def validate_transition(previous, current):
             or same_phase_browser_reconnect
             or initial_binding_transition
         )
+        if same_phase_format_correction:
+            for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):
+                if (
+                    field != "format_error_count"
+                    and current_state.get(field) != previous_state.get(field)
+                ):
+                    errors.append(
+                        f"{field}: format correction must preserve domain state"
+                    )
+        if same_phase_browser_reconnect:
+            for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):
+                if (
+                    field != "browser_reconnect_count"
+                    and current_state.get(field) != previous_state.get(field)
+                ):
+                    errors.append(
+                        f"{field}: browser reconnect must preserve domain state"
+                    )
         if (
             previous_phase == "REQUIREMENTS_PENDING"
             and current_phase == "REQUIREMENTS_PENDING"
@@ -1513,6 +2579,18 @@ def validate_transition(previous, current):
             and current_phase != previous_phase
         )
         if consumes_requirements:
+            errors.extend(
+                _validate_requirements_transition_context(
+                    requirements_context,
+                    previous_state,
+                    current_state,
+                )
+            )
+            _validate_requirements_envelope_consumption(
+                previous_state,
+                current_state,
+                errors,
+            )
             expected_requirements_target = _expected_requirements_target(
                 current_state, errors
             )
@@ -1591,7 +2669,20 @@ def validate_transition(previous, current):
                 "approval_sequence: must preserve consumed approval history"
             )
         consumes_review = previous_phase == "REVIEW_PENDING" and current_phase != previous_phase
+        review_context_valid = False
         if consumes_review:
+            review_context_errors = _validate_review_transition_context(
+                review_context,
+                previous_state,
+                current_state,
+            )
+            errors.extend(review_context_errors)
+            review_context_valid = not review_context_errors
+            _validate_review_envelope_consumption(
+                previous_state,
+                current_state,
+                errors,
+            )
             history_results = [
                 _validate_state_string_list(state, name, field, errors)
                 for name, state in (
@@ -1601,14 +2692,17 @@ def validate_transition(previous, current):
                 for field in ("unresolved_finding_ids", "blocker_fingerprints")
             ]
             history_valid = all(history_results)
-            decision = current_state.get("latest_decision")
-            if decision not in REVIEW_DECISIONS:
+            decision = previous_state.get("latest_decision")
+            if (
+                not isinstance(decision, str)
+                or decision not in REVIEW_DECISIONS
+            ):
                 errors.append(
                     "latest_decision: a valid review transition requires PASS, CHANGES_REQUESTED, or BLOCK"
                 )
                 expected_target = None
             else:
-                expected_target = _expected_review_target(current_state, errors)
+                expected_target = _expected_review_target(previous_state, errors)
             if expected_target and current_phase != expected_target:
                 errors.append(
                     f"phase: review routing requires transition to {expected_target}, not {current_phase}"
@@ -1616,12 +2710,14 @@ def validate_transition(previous, current):
             if previous_round_valid and current_round_valid and current_round != previous_round + 1:
                 errors.append("review_round: valid review consumption must increment exactly once")
             valid_review_consumption = (
-                decision in REVIEW_DECISIONS
+                isinstance(decision, str)
+                and decision in REVIEW_DECISIONS
                 and expected_target == current_phase
                 and previous_round_valid
                 and current_round_valid
                 and current_round == previous_round + 1
                 and history_valid
+                and review_context_valid
             )
         elif previous_round_valid and current_round_valid:
             if current_round != previous_round and not reset_attempt:
@@ -1632,6 +2728,33 @@ def validate_transition(previous, current):
             "latest_decision"
         ):
             errors.append("latest_decision: maintenance transitions cannot consume a review")
+        if previous_phase == "FINAL_VERIFICATION" and current_phase == "COMPLETE":
+            for field in (
+                "latest_decision",
+                "required_actions",
+                "last_consumed_packet_digest",
+                "last_consumed_review_envelope_digest",
+                "active_report_digest",
+                "current_snapshot_digest",
+                "active_review_packet_digest",
+                "reviewed_snapshot_digest",
+            ):
+                if current_state.get(field) != previous_state.get(field):
+                    errors.append(
+                        f"{field}: COMPLETE must preserve final-gate bindings"
+                    )
+            if final_gate_evidence is None:
+                errors.append(
+                    "final_gate: explicit validated evidence is required for COMPLETE"
+                )
+            else:
+                errors.extend(
+                    validate_final_gate(final_gate_evidence, previous_state)
+                )
+        elif final_gate_evidence is not None:
+            errors.append(
+                "final_gate: evidence is allowed only for FINAL_VERIFICATION to COMPLETE"
+            )
 
     if valid_review_consumption and previous_round >= 1 and (
         _finding_ids(previous_state) & _finding_ids(current_state)
@@ -1644,7 +2767,7 @@ def validate_transition(previous, current):
 
 
 def _load_json(path: str) -> Any:
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return strict_json_loads(Path(path).read_text(encoding="utf-8"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1682,7 +2805,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             value = {"previous": _load_json(args.previous), "current": _load_json(args.current)}
             errors = validate_transition(value["previous"], value["current"])
-    except (OSError, json.JSONDecodeError, PacketValidationError) as exc:
+    except (OSError, PacketValidationError, TypeError, ValueError) as exc:
         print(json.dumps({"valid": False, "errors": [str(exc)]}, ensure_ascii=False))
         return 1
     if errors:

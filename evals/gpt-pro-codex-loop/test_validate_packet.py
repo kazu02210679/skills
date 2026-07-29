@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import json
+import math
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -19,6 +20,7 @@ SCRIPT_DIRECTORY = (
 )
 sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
+import validate_packet as packet_validator  # noqa: E402
 from validate_packet import (  # noqa: E402
     PacketValidationError,
     canonical_digest,
@@ -29,6 +31,12 @@ from validate_packet import (  # noqa: E402
     validate_review,
     validate_transition,
 )
+
+
+REQ_ENVELOPE_DIGEST = "sha256:" + "1" * 64
+REQ_ENVELOPE_DIGEST_2 = "sha256:" + "6" * 64
+REVIEW_ENVELOPE_DIGEST = "sha256:" + "2" * 64
+REVIEW_PACKET_DIGEST = "sha256:" + "3" * 64
 
 
 def valid_requirements(**overrides: object) -> dict[str, object]:
@@ -74,6 +82,7 @@ def valid_requirements(**overrides: object) -> dict[str, object]:
 
 def valid_report(requirements: dict[str, object], **overrides: object) -> dict[str, object]:
     packet: dict[str, object] = {
+        "schema_version": 1,
         "baseline_head": "a" * 40,
         "requirements_revision": requirements["requirements_revision"],
         "requirements_digest": canonical_digest(requirements),
@@ -116,6 +125,58 @@ def valid_review(
     return packet
 
 
+def valid_snapshot(
+    report: dict[str, object], **overrides: object
+) -> dict[str, object]:
+    snapshot: dict[str, object] = {
+        "schema_version": 1,
+        "baseline_head": report["baseline_head"],
+        "snapshot_digest": report["snapshot_digest"],
+        "tracked_diff_digest": report["tracked_diff_digest"],
+        "untracked_manifest_digest": report["untracked_manifest_digest"],
+    }
+    snapshot.update(overrides)
+    return snapshot
+
+
+def valid_envelope(
+    packet_type: str,
+    payload: dict[str, object],
+    **overrides: object,
+) -> dict[str, object]:
+    envelope: dict[str, object] = {
+        "schema_version": 1,
+        "packet_type": packet_type,
+        "run_id": "gpc-loop-20260729-test",
+        "turn_id": f"{packet_type}-01",
+        "nonce": f"{packet_type}-attempt-01",
+        "in_reply_to": "sha256:" + "4" * 64,
+        "prompt_digest": "sha256:" + "5" * 64,
+        "previous_packet_digest": (
+            None if packet_type == "requirements" else REQ_ENVELOPE_DIGEST
+        ),
+        "payload": payload,
+    }
+    envelope.update(overrides)
+    return envelope
+
+
+def expected_envelope(envelope: dict[str, object]) -> dict[str, object]:
+    return {
+        key: envelope[key]
+        for key in (
+            "schema_version",
+            "packet_type",
+            "run_id",
+            "turn_id",
+            "nonce",
+            "in_reply_to",
+            "prompt_digest",
+            "previous_packet_digest",
+        )
+    }
+
+
 _UNSET_STATE_VALUE = object()
 
 
@@ -155,6 +216,15 @@ def valid_state(
     stop_sequence: object = 0,
     resolution_evidence: object = None,
     resolution_stop_sequence: object = None,
+    schema_version: object = 1,
+    pending_requirements_envelope_digest: object = _UNSET_STATE_VALUE,
+    pending_review_envelope_digest: object = _UNSET_STATE_VALUE,
+    last_consumed_packet_digest: object = _UNSET_STATE_VALUE,
+    last_consumed_review_envelope_digest: object = _UNSET_STATE_VALUE,
+    active_report_digest: object = None,
+    current_snapshot_digest: object = None,
+    active_review_packet_digest: object = _UNSET_STATE_VALUE,
+    reviewed_snapshot_digest: object = _UNSET_STATE_VALUE,
 ) -> dict[str, object]:
     if active_requirements_revision is _UNSET_STATE_VALUE:
         active_requirements_revision = None if phase == "PREFLIGHT" else 1
@@ -162,14 +232,66 @@ def valid_state(
         active_requirements_digest = (
             None if phase == "PREFLIGHT" else "sha256:" + "a" * 64
         )
+    review_consumed = (
+        phase != "REVIEW_PENDING"
+        and (
+            latest_decision in {"PASS", "CHANGES_REQUESTED", "BLOCK"}
+            or phase in {"FINAL_VERIFICATION", "COMPLETE"}
+            or stop_origin_phase == "REVIEW_PENDING"
+            or (
+                resolution_evidence is not None
+                and phase in {"IMPLEMENTING", "LOCAL_VERIFICATION"}
+            )
+        )
+    )
+    if pending_requirements_envelope_digest is _UNSET_STATE_VALUE:
+        pending_requirements_envelope_digest = (
+            REQ_ENVELOPE_DIGEST if phase == "REQUIREMENTS_PENDING" else None
+        )
+    if pending_review_envelope_digest is _UNSET_STATE_VALUE:
+        pending_review_envelope_digest = (
+            REVIEW_ENVELOPE_DIGEST if phase == "REVIEW_PENDING" else None
+        )
+    if last_consumed_packet_digest is _UNSET_STATE_VALUE:
+        if phase == "PREFLIGHT":
+            last_consumed_packet_digest = None
+        elif review_consumed:
+            last_consumed_packet_digest = REVIEW_ENVELOPE_DIGEST
+        elif phase == "REQUIREMENTS_PENDING" and resolution_evidence is None:
+            last_consumed_packet_digest = None
+        else:
+            last_consumed_packet_digest = REQ_ENVELOPE_DIGEST
+    if last_consumed_review_envelope_digest is _UNSET_STATE_VALUE:
+        last_consumed_review_envelope_digest = (
+            REVIEW_ENVELOPE_DIGEST if review_consumed else None
+        )
+    if active_review_packet_digest is _UNSET_STATE_VALUE:
+        active_review_packet_digest = (
+            REVIEW_PACKET_DIGEST
+            if phase == "REVIEW_PENDING" or review_consumed
+            else None
+        )
+    if reviewed_snapshot_digest is _UNSET_STATE_VALUE:
+        reviewed_snapshot_digest = (
+            "sha256:" + "b" * 64
+            if active_review_packet_digest is not None
+            else None
+        )
+    normalized_fingerprints = [
+        fingerprint
+        if fingerprint.startswith("sha256:") and len(fingerprint) == 71
+        else canonical_digest({"test_root_cause": fingerprint})
+        for fingerprint in (blocker_fingerprints or [])
+    ]
     return {
+        "schema_version": schema_version,
         "phase": phase,
         "review_round": review_round,
         "latest_decision": latest_decision,
         "latest_requirements_decision": latest_requirements_decision,
         "required_actions": required_actions or [],
         "unresolved_finding_ids": unresolved_finding_ids or [],
-        "blocker_fingerprints": blocker_fingerprints or [],
+        "blocker_fingerprints": normalized_fingerprints,
         "format_error_count": format_error_count,
         "browser_reconnect_count": browser_reconnect_count,
         "conversation_binding_state": conversation_binding_state,
@@ -197,7 +319,286 @@ def valid_state(
         "stop_sequence": stop_sequence,
         "resolution_evidence": resolution_evidence,
         "resolution_stop_sequence": resolution_stop_sequence,
+        "pending_requirements_envelope_digest": pending_requirements_envelope_digest,
+        "pending_review_envelope_digest": pending_review_envelope_digest,
+        "last_consumed_packet_digest": last_consumed_packet_digest,
+        "last_consumed_review_envelope_digest": last_consumed_review_envelope_digest,
+        "active_report_digest": active_report_digest,
+        "current_snapshot_digest": current_snapshot_digest,
+        "active_review_packet_digest": active_review_packet_digest,
+        "reviewed_snapshot_digest": reviewed_snapshot_digest,
     }
+
+
+def bind_review_transition_context(
+    previous: dict[str, object],
+    current: dict[str, object],
+) -> dict[str, object]:
+    """Attach a coherent validated-review context to test transition states."""
+    requirements = valid_requirements()
+    requirements_digest = canonical_digest(requirements)
+    report = valid_report(
+        requirements,
+        review_round=previous["review_round"],
+    )
+    snapshot = valid_snapshot(report)
+    decision = current.get("latest_decision")
+    actions = current.get("required_actions")
+    existing_ids = current.get("unresolved_finding_ids")
+    existing_fingerprints = current.get("blocker_fingerprints")
+    legacy_findings = current.get("unresolved_findings")
+    if "unresolved_finding_ids" not in current and isinstance(
+        legacy_findings,
+        list,
+    ):
+        existing_ids = [
+            finding.get("id")
+            for finding in legacy_findings
+            if isinstance(finding, dict)
+            and isinstance(finding.get("id"), str)
+        ]
+    if "blocker_fingerprints" not in current and isinstance(
+        legacy_findings,
+        list,
+    ):
+        existing_fingerprints = [
+            finding.get(
+                "fingerprint",
+                finding.get("root_cause_fingerprint"),
+            )
+            for finding in legacy_findings
+            if isinstance(finding, dict)
+            and isinstance(
+                finding.get(
+                    "fingerprint",
+                    finding.get("root_cause_fingerprint"),
+                ),
+                str,
+            )
+        ]
+    action_values = actions if isinstance(actions, list) else []
+    id_values = existing_ids if isinstance(existing_ids, list) else []
+    fingerprint_values = (
+        existing_fingerprints
+        if isinstance(existing_fingerprints, list)
+        else []
+    )
+    finding_count = max(
+        len(action_values),
+        len(id_values),
+        len(fingerprint_values),
+    )
+    findings = [
+        {
+            "id": (
+                id_values[index - 1]
+                if index <= len(id_values)
+                else f"F-CONTEXT-{index}"
+            ),
+            "root_cause_fingerprint": (
+                fingerprint_values[index - 1]
+                if index <= len(fingerprint_values)
+                else canonical_digest(
+                    {
+                        "acceptance_id": "AC-1",
+                        "category": "context",
+                        "required_action": (
+                            action_values[index - 1]
+                            if index <= len(action_values)
+                            else "PROVIDE_EVIDENCE"
+                        ),
+                        "root_cause_key": f"context-{index}",
+                    }
+                )
+            ),
+            "severity": "HIGH",
+            "category": "context",
+            "required_action": (
+                action_values[index - 1]
+                if index <= len(action_values)
+                else "PROVIDE_EVIDENCE"
+            ),
+            "evidence": "Transition context fixture.",
+        }
+        for index in range(1, finding_count + 1)
+    ]
+    review = valid_review(
+        requirements,
+        report,
+        decision=decision,
+        findings=findings,
+    )
+    chain_head = previous.get("last_consumed_packet_digest")
+    envelope = valid_envelope(
+        "review",
+        review,
+        previous_packet_digest=chain_head,
+    )
+    envelope_digest = canonical_digest(envelope)
+    prior_active_digest = previous.get("active_requirements_digest")
+    prior_review_digest = previous.get("last_consumed_review_envelope_digest")
+    finding_ids = sorted(
+        finding["id"] for finding in findings
+    )
+    finding_fingerprints = sorted(
+        finding["root_cause_fingerprint"] for finding in findings
+    )
+
+    previous.update(
+        active_requirements_revision=requirements["requirements_revision"],
+        active_requirements_digest=requirements_digest,
+        pending_review_envelope_digest=envelope_digest,
+        active_report_digest=canonical_digest(report),
+        current_snapshot_digest=snapshot["snapshot_digest"],
+        active_review_packet_digest=canonical_digest(review),
+        reviewed_snapshot_digest=review["reviewed_snapshot_digest"],
+    )
+    current.update(
+        active_requirements_revision=requirements["requirements_revision"],
+        active_requirements_digest=requirements_digest,
+        pending_review_envelope_digest=None,
+        last_consumed_packet_digest=envelope_digest,
+        last_consumed_review_envelope_digest=envelope_digest,
+        active_report_digest=previous["active_report_digest"],
+        current_snapshot_digest=previous["current_snapshot_digest"],
+        active_review_packet_digest=previous["active_review_packet_digest"],
+        reviewed_snapshot_digest=previous["reviewed_snapshot_digest"],
+    )
+    if "unresolved_finding_ids" in current:
+        current["unresolved_finding_ids"] = finding_ids
+    if "blocker_fingerprints" in current:
+        current["blocker_fingerprints"] = finding_fingerprints
+    if current.get("pending_supersedes_digest") == prior_active_digest:
+        current["pending_supersedes_digest"] = requirements_digest
+    consumed_digests = {
+        digest
+        for digest in (chain_head, prior_review_digest)
+        if isinstance(digest, str)
+    }
+    return {
+        "envelope": envelope,
+        "expected": expected_envelope(envelope),
+        "consumed_digests": consumed_digests,
+        "requirements": requirements,
+        "report": report,
+        "snapshot": snapshot,
+    }
+
+
+def validate_bound_review_transition(
+    previous: dict[str, object],
+    current: dict[str, object],
+) -> list[str]:
+    context = bind_review_transition_context(previous, current)
+    return validate_transition(
+        previous,
+        current,
+        review_context=context,
+    )
+
+
+def bind_requirements_transition_context(
+    previous: dict[str, object],
+    current: dict[str, object],
+) -> dict[str, object]:
+    """Attach a coherent validated-requirements context to test states."""
+    pending_revision = previous.get("pending_requirements_revision")
+    has_pending_revision = isinstance(pending_revision, int) and not isinstance(
+        pending_revision,
+        bool,
+    )
+    revision = (
+        pending_revision
+        if has_pending_revision
+        else previous.get("active_requirements_revision")
+    )
+    if not isinstance(revision, int) or isinstance(revision, bool):
+        revision = 1
+    supersedes_digest = (
+        previous.get("active_requirements_digest")
+        if has_pending_revision
+        else None
+    )
+    requirements = valid_requirements(
+        requirements_revision=revision,
+        supersedes_digest=supersedes_digest,
+        change_reason=(
+            "validated requirements revision"
+            if has_pending_revision
+            else "initial validated requirements"
+        ),
+        behavior_changed=previous.get("behavior_changed"),
+        user_approval_required=previous.get("user_approval_required"),
+        user_approval_received=previous.get("user_approval_received"),
+        scope_changed=previous.get("scope_changed"),
+        public_contract_changed=previous.get("public_contract_changed"),
+        prior_evidence_invalidated=previous.get(
+            "prior_evidence_invalidated"
+        ),
+        review_round_reset=previous.get("review_round_reset"),
+        decision=current.get("latest_requirements_decision"),
+    )
+    requirements_digest = canonical_digest(requirements)
+    chain_head = previous.get("last_consumed_packet_digest")
+    envelope = valid_envelope(
+        "requirements",
+        requirements,
+        previous_packet_digest=chain_head,
+    )
+    envelope_digest = canonical_digest(envelope)
+    previous["pending_requirements_envelope_digest"] = envelope_digest
+    current.update(
+        pending_requirements_envelope_digest=None,
+        last_consumed_packet_digest=envelope_digest,
+    )
+    if has_pending_revision:
+        previous.update(
+            pending_requirements_digest=requirements_digest,
+            pending_supersedes_digest=supersedes_digest,
+        )
+        if previous.get("user_approval_required") is True:
+            previous[
+                "pending_approved_requirements_digest"
+            ] = requirements_digest
+        if current.get("phase") == "REQUIREMENTS_FROZEN":
+            current.update(
+                active_requirements_revision=revision,
+                active_requirements_digest=requirements_digest,
+            )
+    else:
+        previous.update(
+            active_requirements_revision=revision,
+            active_requirements_digest=requirements_digest,
+        )
+        current.update(
+            active_requirements_revision=revision,
+            active_requirements_digest=requirements_digest,
+        )
+    return {
+        "envelope": envelope,
+        "expected": expected_envelope(envelope),
+        "consumed_digests": (
+            {chain_head} if isinstance(chain_head, str) else set()
+        ),
+        "requirements": requirements,
+        "approval_receipt": (
+            previous.get("pending_user_approval_evidence")
+            if previous.get("user_approval_required") is True
+            else None
+        ),
+    }
+
+
+def validate_bound_requirements_transition(
+    previous: dict[str, object],
+    current: dict[str, object],
+) -> list[str]:
+    context = bind_requirements_transition_context(previous, current)
+    return validate_transition(
+        previous,
+        current,
+        requirements_context=context,
+    )
 
 
 class PacketTransportTests(unittest.TestCase):
@@ -213,8 +614,196 @@ class PacketTransportTests(unittest.TestCase):
     def test_canonical_digest_is_stable_across_key_order(self) -> None:
         self.assertEqual(canonical_digest({"a": 1, "b": 2}), canonical_digest({"b": 2, "a": 1}))
 
+    def test_strict_json_rejects_duplicate_keys_at_every_depth(self) -> None:
+        for raw in (
+            '{"schema_version":1,"schema_version":1}',
+            '{"schema_version":1,"payload":{"id":"first","id":"second"}}',
+        ):
+            with self.subTest(raw=raw), self.assertRaisesRegex(
+                PacketValidationError, "duplicate JSON key"
+            ):
+                packet_validator.strict_json_loads(raw)
+
+    def test_strict_json_rejects_nonstandard_numeric_constants(self) -> None:
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant), self.assertRaisesRegex(
+                PacketValidationError, "non-standard JSON constant"
+            ):
+                packet_validator.strict_json_loads(
+                    f'{{"schema_version":1,"value":{constant}}}'
+                )
+        with self.assertRaises(ValueError):
+            canonical_digest({"value": math.nan})
+
+    def test_transport_rejects_bom_nested_and_multiple_fences(self) -> None:
+        invalid_responses = (
+            '\ufeff```json\n{"schema_version":1}\n```',
+            '```json\n{"note":"```json\\n{}\\n```"}\n```',
+            "```json\n{}\n```\n```json\n{}\n```",
+        )
+        for raw in invalid_responses:
+            with self.subTest(raw=raw), self.assertRaises(PacketValidationError):
+                extract_single_json_object(raw)
+
+    def test_file_loading_uses_the_strict_decoder(self) -> None:
+        requirements = json.dumps(valid_requirements(), separators=(",", ":"))
+        duplicate = requirements.replace(
+            '"objective":"Validate the protocol."',
+            '"objective":"Validate the protocol.","objective":"shadowed"',
+        )
+        with TemporaryDirectory() as directory:
+            packet_path = Path(directory) / "requirements.json"
+            packet_path.write_text(duplicate, encoding="utf-8")
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                result = main(["requirements", str(packet_path)])
+        self.assertEqual(result, 1)
+        self.assertIn("duplicate JSON key: objective", stdout.getvalue())
+
+    def test_wrong_container_enum_values_fail_closed_without_type_errors(self) -> None:
+        envelope = valid_envelope("requirements", valid_requirements())
+        expected = expected_envelope(envelope)
+        envelope["packet_type"] = []
+        self.assertIn(
+            "packet_type: must be requirements or review",
+            packet_validator.validate_transport_envelope(
+                envelope,
+                expected,
+                set(),
+            ),
+        )
+        self.assertIn(
+            "decision: must be PLAN_READY, NEED_USER_INPUT, or BLOCK",
+            validate_requirements(valid_requirements(decision=[])),
+        )
+        malformed_state = valid_state(
+            "IMPLEMENTING",
+            0,
+            conversation_binding_state=[],
+        )
+        self.assertIn(
+            "previous.conversation_binding_state: must be CONVERSATION_UNBOUND or CONVERSATION_BOUND",
+            validate_transition(
+                malformed_state,
+                valid_state("LOCAL_VERIFICATION", 0),
+            ),
+        )
+
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        review = valid_review(
+            requirements,
+            report,
+            decision="CHANGES_REQUESTED",
+            acceptance_results={
+                "AC-1": {"status": [], "evidence": "invalid enum container"}
+            },
+            findings=[
+                {
+                    "id": "F-1",
+                    "root_cause_fingerprint": "sha256:" + "f" * 64,
+                    "severity": [],
+                    "category": "correctness",
+                    "required_action": [],
+                    "evidence": "Invalid enum containers.",
+                }
+            ],
+        )
+        errors = validate_review(review, requirements, report)
+        self.assertIn(
+            "acceptance_results.AC-1.status: must be PASS, FAIL, or UNVERIFIED",
+            errors,
+        )
+        self.assertIn(
+            "findings.0.required_action: invalid required action",
+            errors,
+        )
+
+
+class TransportEnvelopeTests(unittest.TestCase):
+    def test_transport_envelope_matches_every_expected_header(self) -> None:
+        envelope = valid_envelope("requirements", valid_requirements())
+        expected = expected_envelope(envelope)
+        self.assertEqual(
+            packet_validator.validate_transport_envelope(envelope, expected, set()),
+            [],
+        )
+        replacements = {
+            "run_id": "gpc-loop-stale",
+            "turn_id": "requirements-stale",
+            "nonce": "stale-attempt",
+            "in_reply_to": "sha256:" + "6" * 64,
+            "prompt_digest": "sha256:" + "7" * 64,
+            "previous_packet_digest": "sha256:" + "8" * 64,
+        }
+        for field, value in replacements.items():
+            with self.subTest(field=field):
+                stale = dict(envelope)
+                stale[field] = value
+                self.assertIn(
+                    f"{field}: does not match expected transport context",
+                    packet_validator.validate_transport_envelope(
+                        stale, expected, set()
+                    ),
+                )
+
+    def test_transport_envelope_is_exact_closed_and_not_reusable(self) -> None:
+        envelope = valid_envelope("review", {"schema_version": 1})
+        expected = expected_envelope(envelope)
+        envelope_digest = canonical_digest(envelope)
+        self.assertIn(
+            "envelope_digest: response has already been consumed",
+            packet_validator.validate_transport_envelope(
+                envelope, expected, {envelope_digest}
+            ),
+        )
+        unexpected = dict(envelope)
+        unexpected["routing_hint"] = "trust me"
+        self.assertIn(
+            "routing_hint: unknown field",
+            packet_validator.validate_transport_envelope(
+                unexpected, expected, set()
+            ),
+        )
+
+    def test_transport_envelope_rejects_boolean_version_and_header_duplication(self) -> None:
+        envelope = valid_envelope("requirements", valid_requirements())
+        expected = expected_envelope(envelope)
+        envelope["schema_version"] = True
+        self.assertIn(
+            "schema_version: must be integer 1",
+            packet_validator.validate_transport_envelope(
+                envelope, expected, set()
+            ),
+        )
+        duplicated = valid_envelope(
+            "requirements",
+            valid_requirements(run_id="payload-must-not-carry-transport"),
+        )
+        self.assertIn(
+            "payload.run_id: unknown field",
+            packet_validator.validate_transport_envelope(
+                duplicated, expected_envelope(duplicated), set()
+            ),
+        )
+
 
 class RequirementsPacketTests(unittest.TestCase):
+    def test_closed_packets_reject_boolean_versions_and_unknown_fields(self) -> None:
+        boolean_version = valid_requirements(schema_version=True)
+        self.assertIn(
+            "schema_version: must be integer 1",
+            validate_requirements(boolean_version),
+        )
+        unknown = valid_requirements(transport_nonce="not-a-domain-field")
+        self.assertIn("transport_nonce: unknown field", validate_requirements(unknown))
+        nested_unknown = valid_requirements()
+        nested_unknown["requirements"][0]["routing_hint"] = "untrusted"
+        self.assertIn(
+            "requirements.0.routing_hint: unknown field",
+            validate_requirements(nested_unknown),
+        )
+
     def test_initial_requirements_must_be_revision_one_without_a_supersedes_digest(self) -> None:
         self.assertIn(
             "requirements_revision: initial requirements revision must be 1",
@@ -252,6 +841,31 @@ class RequirementsPacketTests(unittest.TestCase):
         self.assertIn(
             "supersedes_digest: must equal the previous requirements digest",
             validate_requirements(revised, previous=valid_requirements()),
+        )
+
+    def test_nonfinite_dependencies_return_validation_errors(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        review = valid_review(requirements, report)
+        requirements["objective"] = math.nan
+        self.assertIn(
+            "requirements: must contain canonical finite JSON values",
+            validate_report(report, requirements),
+        )
+        self.assertIn(
+            "requirements: must contain canonical finite JSON values",
+            validate_review(review, requirements, report),
+        )
+
+        previous = valid_requirements()
+        previous["objective"] = math.inf
+        revised = valid_requirements(
+            requirements_revision=2,
+            supersedes_digest="sha256:" + "a" * 64,
+        )
+        self.assertIn(
+            "previous: must contain canonical finite JSON values",
+            validate_requirements(revised, previous=previous),
         )
 
     def test_material_scope_change_requires_approval_and_revision_reset(self) -> None:
@@ -300,6 +914,24 @@ class RequirementsPacketTests(unittest.TestCase):
 
 
 class ReportPacketTests(unittest.TestCase):
+    def test_report_is_versioned_and_closed(self) -> None:
+        requirements = valid_requirements()
+        boolean_version = valid_report(requirements, schema_version=True)
+        self.assertIn(
+            "schema_version: must be integer 1",
+            validate_report(boolean_version, requirements),
+        )
+        unknown = valid_report(requirements, routing_hint="untrusted")
+        self.assertIn(
+            "routing_hint: unknown field", validate_report(unknown, requirements)
+        )
+        nested_unknown = valid_report(requirements)
+        nested_unknown["test_commands"][0]["routing_hint"] = "untrusted"
+        self.assertIn(
+            "test_commands.0.routing_hint: unknown field",
+            validate_report(nested_unknown, requirements),
+        )
+
     def test_report_requires_evidence_for_every_acceptance_id(self) -> None:
         requirements = valid_requirements()
         report = valid_report(requirements, acceptance_evidence={})
@@ -343,6 +975,39 @@ class ReportPacketTests(unittest.TestCase):
 
 
 class ReviewPacketTests(unittest.TestCase):
+    def test_review_is_closed_and_requires_a_lowercase_canonical_fingerprint(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        finding = {
+            "id": "F-1",
+            "root_cause_fingerprint": "sha256:" + "A" * 64,
+            "severity": "HIGH",
+            "category": "correctness",
+            "required_action": "CODE_CHANGE",
+            "evidence": "The behavior is incorrect.",
+        }
+        review = valid_review(
+            requirements,
+            report,
+            decision="CHANGES_REQUESTED",
+            findings=[finding],
+        )
+        self.assertIn(
+            "findings.0.root_cause_fingerprint: must be a lowercase sha256 digest",
+            validate_review(review, requirements, report),
+        )
+        review["routing_hint"] = "untrusted"
+        self.assertIn(
+            "routing_hint: unknown field",
+            validate_review(review, requirements, report),
+        )
+        nested_unknown = valid_review(requirements, report)
+        nested_unknown["acceptance_results"]["AC-1"]["routing_hint"] = "untrusted"
+        self.assertIn(
+            "acceptance_results.AC-1.routing_hint: unknown field",
+            validate_review(nested_unknown, requirements, report),
+        )
+
     def test_pass_cannot_include_failed_or_unverified_acceptance(self) -> None:
         requirements = valid_requirements()
         report = valid_report(requirements)
@@ -461,9 +1126,399 @@ class ReviewPacketTests(unittest.TestCase):
         )
 
 
+class ContextValidationTests(unittest.TestCase):
+    def _valid_report_context(
+        self,
+    ) -> tuple[
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+    ]:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        snapshot = valid_snapshot(report)
+        state = valid_state(
+            "REVIEW_PENDING",
+            1,
+            active_requirements_revision=1,
+            active_requirements_digest=canonical_digest(requirements),
+            active_report_digest=canonical_digest(report),
+            current_snapshot_digest=snapshot["snapshot_digest"],
+        )
+        return report, requirements, state, snapshot
+
+    def test_report_context_requires_active_approved_requirements(self) -> None:
+        report, requirements, state, snapshot = self._valid_report_context()
+        self.assertEqual(
+            packet_validator.validate_report_context(
+                report, requirements, state, snapshot
+            ),
+            [],
+        )
+
+        inactive = dict(state)
+        inactive["active_requirements_digest"] = "sha256:" + "9" * 64
+        self.assertIn(
+            "requirements_digest: does not match active trusted requirements",
+            packet_validator.validate_report_context(
+                report, requirements, inactive, snapshot
+            ),
+        )
+
+        unapproved_requirements = valid_requirements(
+            user_approval_required=True,
+            user_approval_received=False,
+        )
+        unapproved_report = valid_report(unapproved_requirements)
+        unapproved_snapshot = valid_snapshot(unapproved_report)
+        unapproved_state = dict(state)
+        unapproved_state.update(
+            active_requirements_digest=canonical_digest(unapproved_requirements),
+            active_report_digest=canonical_digest(unapproved_report),
+            current_snapshot_digest=unapproved_snapshot["snapshot_digest"],
+        )
+        self.assertIn(
+            "requirements: required user approval is not recorded",
+            packet_validator.validate_report_context(
+                unapproved_report,
+                unapproved_requirements,
+                unapproved_state,
+                unapproved_snapshot,
+            ),
+        )
+
+    def test_report_context_binds_round_snapshot_and_components(self) -> None:
+        report, requirements, state, snapshot = self._valid_report_context()
+        wrong_round = dict(state)
+        wrong_round["review_round"] = 0
+        self.assertIn(
+            "review_round: does not match active workflow state",
+            packet_validator.validate_report_context(
+                report, requirements, wrong_round, snapshot
+            ),
+        )
+        for field in (
+            "baseline_head",
+            "snapshot_digest",
+            "tracked_diff_digest",
+            "untracked_manifest_digest",
+        ):
+            with self.subTest(field=field):
+                mismatched = dict(snapshot)
+                mismatched[field] = (
+                    "f" * 40
+                    if field == "baseline_head"
+                    else "sha256:" + "f" * 64
+                )
+                self.assertIn(
+                    f"snapshot.{field}: does not match implementation report",
+                    packet_validator.validate_report_context(
+                        report, requirements, state, mismatched
+                    ),
+                )
+
+    def test_review_context_requires_a_fresh_prevalidated_envelope(self) -> None:
+        report, requirements, state, snapshot = self._valid_report_context()
+        review = valid_review(requirements, report)
+        envelope = valid_envelope("review", review)
+        envelope_digest = canonical_digest(envelope)
+        state.update(
+            pending_review_envelope_digest=envelope_digest,
+            last_consumed_packet_digest=REQ_ENVELOPE_DIGEST,
+            active_review_packet_digest=canonical_digest(review),
+            reviewed_snapshot_digest=review["reviewed_snapshot_digest"],
+            latest_decision="PASS",
+            required_actions=[],
+        )
+        self.assertEqual(
+            packet_validator.validate_review_context(
+                envelope, requirements, report, state, snapshot
+            ),
+            [],
+        )
+
+        not_validated = dict(state)
+        not_validated["pending_review_envelope_digest"] = None
+        self.assertIn(
+            "pending_review_envelope_digest: review envelope was not prevalidated",
+            packet_validator.validate_review_context(
+                envelope, requirements, report, not_validated, snapshot
+            ),
+        )
+        consumed = dict(state)
+        consumed["last_consumed_packet_digest"] = envelope_digest
+        self.assertIn(
+            "pending_review_envelope_digest: review envelope is not fresh",
+            packet_validator.validate_review_context(
+                envelope, requirements, report, consumed, snapshot
+            ),
+        )
+
+    def test_review_context_binds_finding_history_to_validated_payload(self) -> None:
+        report, requirements, state, snapshot = self._valid_report_context()
+        fingerprint = canonical_digest({"test_root_cause": "context-bound"})
+        review = valid_review(
+            requirements,
+            report,
+            decision="CHANGES_REQUESTED",
+            findings=[
+                {
+                    "id": "F-CONTEXT",
+                    "root_cause_fingerprint": fingerprint,
+                    "severity": "HIGH",
+                    "category": "correctness",
+                    "required_action": "CODE_CHANGE",
+                    "evidence": "The validated finding remains unresolved.",
+                }
+            ],
+        )
+        envelope = valid_envelope("review", review)
+        state.update(
+            pending_review_envelope_digest=canonical_digest(envelope),
+            last_consumed_packet_digest=REQ_ENVELOPE_DIGEST,
+            active_review_packet_digest=canonical_digest(review),
+            reviewed_snapshot_digest=review["reviewed_snapshot_digest"],
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+            unresolved_finding_ids=["F-CONTEXT"],
+            blocker_fingerprints=[fingerprint],
+        )
+        self.assertEqual(
+            packet_validator.validate_review_context(
+                envelope,
+                requirements,
+                report,
+                state,
+                snapshot,
+            ),
+            [],
+        )
+        for field, forged, expected in (
+            (
+                "unresolved_finding_ids",
+                [],
+                "unresolved_finding_ids: do not match the validated review payload",
+            ),
+            (
+                "blocker_fingerprints",
+                [],
+                "blocker_fingerprints: do not match the validated review payload",
+            ),
+        ):
+            with self.subTest(field=field):
+                tampered = dict(state)
+                tampered[field] = forged
+                self.assertIn(
+                    expected,
+                    packet_validator.validate_review_context(
+                        envelope,
+                        requirements,
+                        report,
+                        tampered,
+                        snapshot,
+                    ),
+                )
+
 class TransitionTests(unittest.TestCase):
+    def test_state_is_versioned_and_closed(self) -> None:
+        previous = valid_state("IMPLEMENTING", 0, schema_version=True)
+        current = valid_state("LOCAL_VERIFICATION", 0)
+        self.assertIn(
+            "previous.schema_version: must be integer 1",
+            validate_transition(previous, current),
+        )
+        previous["routing_hint"] = "untrusted"
+        self.assertIn(
+            "previous.routing_hint: unknown field",
+            validate_transition(previous, current),
+        )
+
+    def test_format_correction_cannot_mutate_domain_state(self) -> None:
+        previous = valid_state(
+            "REVIEW_PENDING",
+            1,
+            active_report_digest="sha256:" + "a" * 64,
+            current_snapshot_digest="sha256:" + "b" * 64,
+        )
+        for field, value in (
+            ("required_actions", ["CODE_CHANGE"]),
+            ("active_report_digest", "sha256:" + "c" * 64),
+            ("current_snapshot_digest", "sha256:" + "d" * 64),
+        ):
+            with self.subTest(field=field):
+                current = dict(previous)
+                current["format_error_count"] = 1
+                current[field] = value
+                self.assertIn(
+                    f"{field}: format correction must preserve domain state",
+                    validate_transition(previous, current),
+                )
+
+    def test_review_stop_resume_clears_consumed_routing_data(self) -> None:
+        stopped = valid_state(
+            "USER_DECISION_REQUIRED",
+            1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["USER_DECISION"],
+            pending_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
+            last_consumed_packet_digest=REVIEW_ENVELOPE_DIGEST,
+            last_consumed_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
+            stop_origin_phase="REVIEW_PENDING",
+            stop_origin_category="REVIEW_USER_DECISION",
+            stop_reason="The review requires a user decision.",
+            stop_sequence=1,
+        )
+        resumed = valid_state(
+            "IMPLEMENTING",
+            1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["USER_DECISION"],
+            pending_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
+            last_consumed_packet_digest=REVIEW_ENVELOPE_DIGEST,
+            last_consumed_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
+            stop_sequence=1,
+            resolution_evidence="The user resolved the decision.",
+            resolution_stop_sequence=1,
+        )
+        errors = validate_transition(stopped, resumed)
+        self.assertIn(
+            "latest_decision: review-stop resume must clear the consumed decision",
+            errors,
+        )
+        self.assertIn(
+            "required_actions: review-stop resume must clear consumed actions",
+            errors,
+        )
+        self.assertIn(
+            "pending_review_envelope_digest: review-stop resume must clear pending review identity",
+            errors,
+        )
+
+    def test_review_consumption_requires_and_promotes_fresh_envelope_identity(self) -> None:
+        previous = valid_state(
+            "REVIEW_PENDING",
+            1,
+            latest_decision="PASS",
+            pending_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
+            last_consumed_packet_digest=REQ_ENVELOPE_DIGEST,
+            active_review_packet_digest=REVIEW_PACKET_DIGEST,
+            reviewed_snapshot_digest="sha256:" + "b" * 64,
+        )
+        current = valid_state(
+            "FINAL_VERIFICATION",
+            2,
+            latest_decision="PASS",
+            last_consumed_packet_digest=REVIEW_ENVELOPE_DIGEST,
+            last_consumed_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
+            active_review_packet_digest=REVIEW_PACKET_DIGEST,
+            reviewed_snapshot_digest="sha256:" + "b" * 64,
+        )
+        self.assertIn(
+            "review_context: explicit composed context is required for review consumption",
+            validate_transition(previous, current),
+        )
+        context = bind_review_transition_context(previous, current)
+        self.assertEqual(
+            validate_transition(
+                previous,
+                current,
+                review_context=context,
+            ),
+            [],
+        )
+        forged_history = dict(current)
+        forged_history["unresolved_finding_ids"] = ["F-FORGED"]
+        self.assertIn(
+            "review_context.unresolved_finding_ids: do not match the validated review payload",
+            validate_transition(
+                previous,
+                forged_history,
+                review_context=context,
+            ),
+        )
+        replayed = dict(previous)
+        replayed["last_consumed_packet_digest"] = previous[
+            "pending_review_envelope_digest"
+        ]
+        self.assertIn(
+            "pending_review_envelope_digest: review response must be fresh",
+            validate_transition(
+                replayed,
+                current,
+                review_context=context,
+            ),
+        )
+
+    def test_complete_requires_explicit_bound_final_gate_evidence(self) -> None:
+        state_fields = {
+            "active_requirements_digest": "sha256:" + "a" * 64,
+            "active_report_digest": "sha256:" + "e" * 64,
+            "active_review_packet_digest": REVIEW_PACKET_DIGEST,
+            "reviewed_snapshot_digest": "sha256:" + "b" * 64,
+            "current_snapshot_digest": "sha256:" + "b" * 64,
+            "last_consumed_packet_digest": REVIEW_ENVELOPE_DIGEST,
+            "last_consumed_review_envelope_digest": REVIEW_ENVELOPE_DIGEST,
+        }
+        previous = valid_state(
+            "FINAL_VERIFICATION",
+            2,
+            latest_decision="PASS",
+            **state_fields,
+        )
+        current = valid_state(
+            "COMPLETE",
+            2,
+            latest_decision="PASS",
+            **state_fields,
+        )
+        self.assertIn(
+            "final_gate: explicit validated evidence is required for COMPLETE",
+            validate_transition(previous, current),
+        )
+        evidence = {
+            "schema_version": 1,
+            "requirements_digest": state_fields["active_requirements_digest"],
+            "review_packet_digest": state_fields["active_review_packet_digest"],
+            "reviewed_snapshot_digest": state_fields["reviewed_snapshot_digest"],
+            "current_snapshot_digest": state_fields["current_snapshot_digest"],
+            "acceptance_gate_passed": True,
+            "local_checks_passed": True,
+            "scope_gate_passed": True,
+            "artifact_hygiene_passed": True,
+        }
+        self.assertEqual(
+            packet_validator.validate_final_gate(evidence, previous),
+            [],
+        )
+        self.assertEqual(
+            validate_transition(
+                previous,
+                current,
+                final_gate_evidence=evidence,
+            ),
+            [],
+        )
+        tampered_complete = dict(current)
+        tampered_complete["active_review_packet_digest"] = (
+            "sha256:" + "f" * 64
+        )
+        self.assertIn(
+            "active_review_packet_digest: COMPLETE must preserve final-gate bindings",
+            validate_transition(
+                previous,
+                tampered_complete,
+                final_gate_evidence=evidence,
+            ),
+        )
+
     def test_approved_material_revision_promotes_and_consumes_provenance(self) -> None:
-        review_pending = valid_state("REVIEW_PENDING", 1)
+        review_pending = valid_state(
+            "REVIEW_PENDING",
+            1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["REQUIREMENTS_REVISION"],
+        )
         pending = valid_state(
             "REQUIREMENTS_PENDING",
             2,
@@ -481,7 +1536,10 @@ class TransitionTests(unittest.TestCase):
             prior_evidence_invalidated=True,
             review_round_reset=True,
         )
-        self.assertEqual(validate_transition(review_pending, pending), [])
+        self.assertEqual(
+            validate_bound_review_transition(review_pending, pending),
+            [],
+        )
 
         frozen = valid_state(
             "REQUIREMENTS_FROZEN",
@@ -492,8 +1550,34 @@ class TransitionTests(unittest.TestCase):
             active_requirements_revision=2,
             active_requirements_digest="sha256:" + "b" * 64,
             approval_sequence=1,
+            last_consumed_packet_digest=REQ_ENVELOPE_DIGEST,
         )
-        self.assertEqual(validate_transition(pending, frozen), [])
+        self.assertIn(
+            "requirements_context: explicit composed context is required for requirements consumption",
+            validate_transition(pending, frozen),
+        )
+        requirements_context = bind_requirements_transition_context(
+            pending,
+            frozen,
+        )
+        self.assertEqual(
+            validate_transition(
+                pending,
+                frozen,
+                requirements_context=requirements_context,
+            ),
+            [],
+        )
+        forged_approval = dict(requirements_context)
+        forged_approval["approval_receipt"] = "Approval for another packet."
+        self.assertIn(
+            "requirements_context.approval_receipt: does not match trusted pending approval evidence",
+            validate_transition(
+                pending,
+                frozen,
+                requirements_context=forged_approval,
+            ),
+        )
 
     def test_nonmaterial_revision_promotes_without_resetting_review_round(self) -> None:
         pending = valid_state(
@@ -513,7 +1597,10 @@ class TransitionTests(unittest.TestCase):
             active_requirements_revision=2,
             active_requirements_digest="sha256:" + "b" * 64,
         )
-        self.assertEqual(validate_transition(pending, frozen), [])
+        self.assertEqual(
+            validate_bound_requirements_transition(pending, frozen),
+            [],
+        )
 
     def test_material_reset_rejects_self_asserted_or_unapproved_authority(self) -> None:
         no_pending_provenance = valid_state(
@@ -910,10 +1997,22 @@ class TransitionTests(unittest.TestCase):
                     stop_reason="Requirements need explicit user resolution.",
                     stop_sequence=1,
                 )
-                self.assertEqual(validate_transition(previous, stopped), [])
+                self.assertEqual(
+                    validate_bound_requirements_transition(
+                        previous,
+                        stopped,
+                    ),
+                    [],
+                )
                 resumed = valid_state(
                     "REQUIREMENTS_PENDING",
                     2,
+                    active_requirements_revision=stopped[
+                        "active_requirements_revision"
+                    ],
+                    active_requirements_digest=stopped[
+                        "active_requirements_digest"
+                    ],
                     stop_sequence=1,
                     resolution_evidence="The user supplied the required decision.",
                     resolution_stop_sequence=1,
@@ -970,7 +2069,12 @@ class TransitionTests(unittest.TestCase):
     def test_review_and_final_verification_stops_record_route_provenance(self) -> None:
         cases = (
             (
-                valid_state("REVIEW_PENDING", 1),
+                valid_state(
+                    "REVIEW_PENDING",
+                    1,
+                    latest_decision="CHANGES_REQUESTED",
+                    required_actions=["USER_DECISION"],
+                ),
                 valid_state(
                     "USER_DECISION_REQUIRED",
                     2,
@@ -983,7 +2087,11 @@ class TransitionTests(unittest.TestCase):
                 ),
             ),
             (
-                valid_state("REVIEW_PENDING", 1),
+                valid_state(
+                    "REVIEW_PENDING",
+                    1,
+                    latest_decision="BLOCK",
+                ),
                 valid_state(
                     "USER_DECISION_REQUIRED",
                     2,
@@ -1009,7 +2117,12 @@ class TransitionTests(unittest.TestCase):
         )
         for previous, stopped in cases:
             with self.subTest(category=stopped["stop_origin_category"]):
-                self.assertEqual(validate_transition(previous, stopped), [])
+                errors = (
+                    validate_bound_review_transition(previous, stopped)
+                    if previous["phase"] == "REVIEW_PENDING"
+                    else validate_transition(previous, stopped)
+                )
+                self.assertEqual(errors, [])
 
     def test_stop_resume_target_is_bound_to_origin_not_stale_decision_labels(self) -> None:
         review_stop = valid_state(
@@ -1173,6 +2286,7 @@ class TransitionTests(unittest.TestCase):
         first_resume = valid_state(
             "REQUIREMENTS_PENDING",
             1,
+            pending_requirements_envelope_digest=REQ_ENVELOPE_DIGEST_2,
             stop_sequence=1,
             resolution_evidence="The user resolved the choice.",
             resolution_stop_sequence=1,
@@ -1185,10 +2299,26 @@ class TransitionTests(unittest.TestCase):
             stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
             stop_reason="A later product choice remains open.",
             stop_sequence=2,
+            last_consumed_packet_digest=REQ_ENVELOPE_DIGEST_2,
         )
-        self.assertEqual(validate_transition(pending, first_stop), [])
+        self.assertEqual(
+            validate_bound_requirements_transition(pending, first_stop),
+            [],
+        )
+        first_resume["last_consumed_packet_digest"] = first_stop[
+            "last_consumed_packet_digest"
+        ]
+        first_resume["active_requirements_revision"] = first_stop[
+            "active_requirements_revision"
+        ]
+        first_resume["active_requirements_digest"] = first_stop[
+            "active_requirements_digest"
+        ]
         self.assertEqual(validate_transition(first_stop, first_resume), [])
-        self.assertEqual(validate_transition(first_resume, second_stop), [])
+        self.assertEqual(
+            validate_bound_requirements_transition(first_resume, second_stop),
+            [],
+        )
 
         replayed_resolution = valid_state(
             "REQUIREMENTS_PENDING",
@@ -1247,6 +2377,7 @@ class TransitionTests(unittest.TestCase):
         self.assertIn("current: must be a state object", shorthand_errors)
 
         required_fields = (
+            "schema_version",
             "review_round",
             "latest_decision",
             "latest_requirements_decision",
@@ -1275,6 +2406,14 @@ class TransitionTests(unittest.TestCase):
             "stop_sequence",
             "resolution_evidence",
             "resolution_stop_sequence",
+            "pending_requirements_envelope_digest",
+            "pending_review_envelope_digest",
+            "last_consumed_packet_digest",
+            "last_consumed_review_envelope_digest",
+            "active_report_digest",
+            "current_snapshot_digest",
+            "active_review_packet_digest",
+            "reviewed_snapshot_digest",
         )
         for field in required_fields:
             with self.subTest(field=field):
@@ -1306,7 +2445,6 @@ class TransitionTests(unittest.TestCase):
         )
 
     def test_review_routing_uses_required_latest_decision(self) -> None:
-        previous = valid_state("REVIEW_PENDING", 0)
         cases = (
             ("PASS", [], "FINAL_VERIFICATION", {}),
             ("CHANGES_REQUESTED", ["CODE_CHANGE"], "IMPLEMENTING", {}),
@@ -1324,6 +2462,12 @@ class TransitionTests(unittest.TestCase):
         )
         for decision, actions, phase, stop_provenance in cases:
             with self.subTest(decision=decision):
+                previous = valid_state(
+                    "REVIEW_PENDING",
+                    0,
+                    latest_decision=decision,
+                    required_actions=actions,
+                )
                 current = valid_state(
                     phase,
                     1,
@@ -1331,7 +2475,11 @@ class TransitionTests(unittest.TestCase):
                     required_actions=actions,
                     **stop_provenance,
                 )
-                self.assertEqual(validate_transition(previous, current), [])
+                self.assertEqual(
+                    validate_bound_review_transition(previous, current),
+                    [],
+                )
+        previous = valid_state("REVIEW_PENDING", 0)
         missing_decision = valid_state("FINAL_VERIFICATION", 1)
         self.assertIn(
             "latest_decision: a valid review transition requires PASS, CHANGES_REQUESTED, or BLOCK",
@@ -1340,13 +2488,18 @@ class TransitionTests(unittest.TestCase):
         wrong_route = valid_state(
             "IMPLEMENTING", 1, latest_decision="PASS", required_actions=[]
         )
+        pass_pending = valid_state(
+            "REVIEW_PENDING",
+            0,
+            latest_decision="PASS",
+        )
         self.assertIn(
             "phase: review routing requires transition to FINAL_VERIFICATION, not IMPLEMENTING",
-            validate_transition(previous, wrong_route),
+            validate_transition(pass_pending, wrong_route),
         )
 
     def test_valid_review_consumption_increments_round_exactly_once(self) -> None:
-        previous = valid_state("REVIEW_PENDING", 1)
+        previous = valid_state("REVIEW_PENDING", 1, latest_decision="PASS")
         for invalid_round in (1, 3):
             with self.subTest(review_round=invalid_round):
                 current = valid_state(
@@ -1360,7 +2513,7 @@ class TransitionTests(unittest.TestCase):
                 )
 
     def test_valid_review_consumption_requires_explicit_blocker_history(self) -> None:
-        previous = valid_state("REVIEW_PENDING", 1)
+        previous = valid_state("REVIEW_PENDING", 1, latest_decision="PASS")
         current = valid_state(
             "FINAL_VERIFICATION", 2, latest_decision="PASS"
         )
@@ -1416,6 +2569,8 @@ class TransitionTests(unittest.TestCase):
         previous = valid_state(
             "REVIEW_PENDING",
             0,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
             unresolved_finding_ids=["F-1"],
             blocker_fingerprints=["cause-1"],
         )
@@ -1427,12 +2582,17 @@ class TransitionTests(unittest.TestCase):
             unresolved_finding_ids=["F-1"],
             blocker_fingerprints=["cause-1"],
         )
-        self.assertEqual(validate_transition(previous, current), [])
+        self.assertEqual(
+            validate_bound_review_transition(previous, current),
+            [],
+        )
 
     def test_second_consecutive_blocker_finding_id_requires_stopping(self) -> None:
         previous = valid_state(
             "REVIEW_PENDING",
             1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
             unresolved_finding_ids=["F-1"],
             blocker_fingerprints=["cause-1"],
         )
@@ -1446,13 +2606,15 @@ class TransitionTests(unittest.TestCase):
         )
         self.assertIn(
             "unresolved_findings: blocker persisted across two consecutive valid review rounds",
-            validate_transition(previous, current),
+            validate_bound_review_transition(previous, current),
         )
 
     def test_second_consecutive_blocker_fingerprint_requires_stopping(self) -> None:
         previous = valid_state(
             "REVIEW_PENDING",
             1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
             unresolved_finding_ids=["F-1"],
             blocker_fingerprints=["same-cause"],
         )
@@ -1466,13 +2628,15 @@ class TransitionTests(unittest.TestCase):
         )
         self.assertIn(
             "unresolved_findings: blocker persisted across two consecutive valid review rounds",
-            validate_transition(previous, current),
+            validate_bound_review_transition(previous, current),
         )
 
     def test_nonconsecutive_blocker_occurrence_resets_continuity(self) -> None:
         previous = valid_state(
             "REVIEW_PENDING",
             2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
             unresolved_finding_ids=["F-2"],
             blocker_fingerprints=["cause-2"],
         )
@@ -1484,13 +2648,26 @@ class TransitionTests(unittest.TestCase):
             unresolved_finding_ids=["F-1"],
             blocker_fingerprints=["cause-1"],
         )
-        self.assertEqual(validate_transition(previous, current), [])
+        self.assertEqual(
+            validate_bound_review_transition(previous, current),
+            [],
+        )
 
     def test_explicit_empty_authoritative_history_clears_stale_legacy_history(self) -> None:
         stale_legacy = [
-            {"id": "F-OLD", "root_cause_fingerprint": "stale-cause"}
+            {
+                "id": "F-OLD",
+                "root_cause_fingerprint": canonical_digest(
+                    {"test_root_cause": "stale-cause"}
+                ),
+            }
         ]
-        previous = valid_state("REVIEW_PENDING", 1)
+        previous = valid_state(
+            "REVIEW_PENDING",
+            1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+        )
         previous["unresolved_findings"] = stale_legacy
         current = valid_state(
             "IMPLEMENTING",
@@ -1499,11 +2676,26 @@ class TransitionTests(unittest.TestCase):
             required_actions=["CODE_CHANGE"],
         )
         current["unresolved_findings"] = stale_legacy
-        self.assertEqual(validate_transition(previous, current), [])
+        self.assertEqual(
+            validate_bound_review_transition(previous, current),
+            [],
+        )
 
     def test_absent_authoritative_history_uses_legacy_history(self) -> None:
-        legacy = [{"id": "F-1", "root_cause_fingerprint": "same-cause"}]
-        previous = valid_state("REVIEW_PENDING", 1)
+        legacy = [
+            {
+                "id": "F-1",
+                "root_cause_fingerprint": canonical_digest(
+                    {"test_root_cause": "same-cause"}
+                ),
+            }
+        ]
+        previous = valid_state(
+            "REVIEW_PENDING",
+            1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+        )
         current = valid_state(
             "IMPLEMENTING",
             2,
@@ -1516,7 +2708,7 @@ class TransitionTests(unittest.TestCase):
             state["unresolved_findings"] = legacy
         self.assertIn(
             "unresolved_findings: blocker persisted across two consecutive valid review rounds",
-            validate_transition(previous, current),
+            validate_bound_review_transition(previous, current),
         )
 
 
