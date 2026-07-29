@@ -588,6 +588,39 @@ class TransitionTests(unittest.TestCase):
         )
         self.assertEqual(validate_transition(previous, current), [])
 
+    def test_explicit_empty_authoritative_history_clears_stale_legacy_history(self) -> None:
+        stale_legacy = [
+            {"id": "F-OLD", "root_cause_fingerprint": "stale-cause"}
+        ]
+        previous = valid_state("REVIEW_PENDING", 1)
+        previous["unresolved_findings"] = stale_legacy
+        current = valid_state(
+            "IMPLEMENTING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+        )
+        current["unresolved_findings"] = stale_legacy
+        self.assertEqual(validate_transition(previous, current), [])
+
+    def test_absent_authoritative_history_uses_legacy_history(self) -> None:
+        legacy = [{"id": "F-1", "root_cause_fingerprint": "same-cause"}]
+        previous = valid_state("REVIEW_PENDING", 1)
+        current = valid_state(
+            "IMPLEMENTING",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+        )
+        for state in (previous, current):
+            del state["unresolved_finding_ids"]
+            del state["blocker_fingerprints"]
+            state["unresolved_findings"] = legacy
+        self.assertIn(
+            "unresolved_findings: blocker persisted across two consecutive valid review rounds",
+            validate_transition(previous, current),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

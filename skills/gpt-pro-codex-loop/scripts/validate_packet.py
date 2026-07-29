@@ -471,19 +471,38 @@ def _state_string_set(state: dict[str, object], field: str) -> set[str]:
 def _validate_state_string_list(
     state: dict[str, object], name: str, field: str, errors: list[str]
 ) -> bool:
-    values = state.get(field)
-    if not isinstance(values, list) or any(
-        not _is_nonempty_string(value) for value in values
-    ):
+    if field in state:
+        values = state[field]
+        valid = isinstance(values, list) and all(
+            _is_nonempty_string(value) for value in values
+        )
+    else:
+        findings = state.get("unresolved_findings")
+        if field == "unresolved_finding_ids":
+            legacy_values = [
+                item.get("id") for item in findings if isinstance(item, dict)
+            ] if isinstance(findings, list) else None
+        else:
+            legacy_values = [
+                item.get("fingerprint", item.get("root_cause_fingerprint"))
+                for item in findings
+                if isinstance(item, dict)
+            ] if isinstance(findings, list) else None
+        valid = (
+            isinstance(findings, list)
+            and legacy_values is not None
+            and len(legacy_values) == len(findings)
+            and all(_is_nonempty_string(value) for value in legacy_values)
+        )
+    if not valid:
         errors.append(f"{name}.{field}: must be a list of strings")
         return False
     return True
 
 
 def _finding_ids(state: dict[str, object]) -> set[str]:
-    identifiers = _state_string_set(state, "unresolved_finding_ids")
-    if identifiers:
-        return identifiers
+    if "unresolved_finding_ids" in state:
+        return _state_string_set(state, "unresolved_finding_ids")
     findings = state.get("unresolved_findings")
     if not isinstance(findings, list):
         return set()
@@ -497,9 +516,8 @@ def _finding_ids(state: dict[str, object]) -> set[str]:
 
 
 def _fingerprints(state: dict[str, object]) -> set[str]:
-    fingerprints = _state_string_set(state, "blocker_fingerprints")
-    if fingerprints:
-        return fingerprints
+    if "blocker_fingerprints" in state:
+        return _state_string_set(state, "blocker_fingerprints")
     findings = state.get("unresolved_findings")
     if not isinstance(findings, list):
         return set()
