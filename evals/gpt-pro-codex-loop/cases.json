@@ -1,7 +1,7 @@
 [
   {
     "id": "requirements-owner",
-    "prompt": "Use ChatGPT Pro to define requirements, then implement this change in Codex.",
+    "prompt": "Use ChatGPT Pro in the Browser to define and freeze requirements, then have Codex implement them and return to the same Pro conversation for iterative review until both semantic and local gates pass.",
     "expect": {
       "pro_owns_requirements": true,
       "codex_owns_local_implementation": true,
@@ -44,6 +44,20 @@
   {
     "id": "ordinary-implementation-non-trigger",
     "prompt": "Fix the typo and run the existing unit test.",
+    "expect": {
+      "invoke_gpt_pro_loop": false
+    }
+  },
+  {
+    "id": "requirements-only-non-trigger",
+    "prompt": "Ask ChatGPT Pro to clarify these requirements, but do not implement or run an iterative review loop.",
+    "expect": {
+      "invoke_gpt_pro_loop": false
+    }
+  },
+  {
+    "id": "standalone-review-non-trigger",
+    "prompt": "Use ChatGPT Pro for one standalone semantic review of this finished diff.",
     "expect": {
       "invoke_gpt_pro_loop": false
     }

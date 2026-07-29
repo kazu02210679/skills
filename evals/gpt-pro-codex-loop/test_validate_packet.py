@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import json
 import math
+import re
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -193,6 +194,8 @@ def valid_state(
     browser_reconnect_count: int = 0,
     conversation_binding_state: str = "CONVERSATION_BOUND",
     bound_conversation_url: object = "https://chatgpt.com/c/test-conversation",
+    model_policy: object = "PRO_CLASS",
+    requested_model_label: object = None,
     visible_model_label: object = "Pro",
     active_requirements_revision: object = _UNSET_STATE_VALUE,
     active_requirements_digest: object = _UNSET_STATE_VALUE,
@@ -296,6 +299,8 @@ def valid_state(
         "browser_reconnect_count": browser_reconnect_count,
         "conversation_binding_state": conversation_binding_state,
         "bound_conversation_url": bound_conversation_url,
+        "model_policy": model_policy,
+        "requested_model_label": requested_model_label,
         "visible_model_label": visible_model_label,
         "active_requirements_revision": active_requirements_revision,
         "active_requirements_digest": active_requirements_digest,
@@ -388,40 +393,32 @@ def bind_review_transition_context(
         len(id_values),
         len(fingerprint_values),
     )
-    findings = [
-        {
+    findings = []
+    for index in range(1, finding_count + 1):
+        action = (
+            action_values[index - 1]
+            if index <= len(action_values)
+            else "PROVIDE_EVIDENCE"
+        )
+        root_cause_key = (
+            fingerprint_values[index - 1]
+            if index <= len(fingerprint_values)
+            else f"context-{index}"
+        )
+        finding = {
             "id": (
                 id_values[index - 1]
                 if index <= len(id_values)
                 else f"F-CONTEXT-{index}"
             ),
-            "root_cause_fingerprint": (
-                fingerprint_values[index - 1]
-                if index <= len(fingerprint_values)
-                else canonical_digest(
-                    {
-                        "acceptance_id": "AC-1",
-                        "category": "context",
-                        "required_action": (
-                            action_values[index - 1]
-                            if index <= len(action_values)
-                            else "PROVIDE_EVIDENCE"
-                        ),
-                        "root_cause_key": f"context-{index}",
-                    }
-                )
-            ),
+            "acceptance_id": "AC-1",
+            "root_cause_key": root_cause_key,
             "severity": "HIGH",
             "category": "context",
-            "required_action": (
-                action_values[index - 1]
-                if index <= len(action_values)
-                else "PROVIDE_EVIDENCE"
-            ),
+            "required_action": action,
             "evidence": "Transition context fixture.",
         }
-        for index in range(1, finding_count + 1)
-    ]
+        findings.append(finding)
     review = valid_review(
         requirements,
         report,
@@ -441,8 +438,54 @@ def bind_review_transition_context(
         finding["id"] for finding in findings
     )
     finding_fingerprints = sorted(
-        finding["root_cause_fingerprint"] for finding in findings
+        fingerprint
+        for finding in findings
+        for fingerprint in (
+            packet_validator.derive_root_cause_fingerprint(finding),
+            packet_validator.derive_root_cause_route_fingerprint(finding),
+        )
     )
+    previous_fingerprint_values = previous.get("blocker_fingerprints")
+    if isinstance(previous_fingerprint_values, list):
+        previous["blocker_fingerprints"] = [
+            packet_validator.derive_root_cause_fingerprint(
+                {
+                    "acceptance_id": "AC-1",
+                    "category": "context",
+                    "required_action": (
+                        action_values[index]
+                        if index < len(action_values)
+                        else "PROVIDE_EVIDENCE"
+                    ),
+                    "root_cause_key": value,
+                }
+            )
+            for index, value in enumerate(previous_fingerprint_values)
+        ]
+    previous_legacy = previous.get("unresolved_findings")
+    if isinstance(previous_legacy, list):
+        for index, item in enumerate(previous_legacy):
+            if not isinstance(item, dict):
+                continue
+            value = item.get(
+                "fingerprint",
+                item.get("root_cause_fingerprint"),
+            )
+            if isinstance(value, str):
+                item["root_cause_fingerprint"] = (
+                    packet_validator.derive_root_cause_fingerprint(
+                        {
+                            "acceptance_id": "AC-1",
+                            "category": "context",
+                            "required_action": (
+                                action_values[index]
+                                if index < len(action_values)
+                                else "PROVIDE_EVIDENCE"
+                            ),
+                            "root_cause_key": value,
+                        }
+                    )
+                )
 
     previous.update(
         active_requirements_revision=requirements["requirements_revision"],
@@ -602,6 +645,93 @@ def validate_bound_requirements_transition(
 
 
 class PacketTransportTests(unittest.TestCase):
+    def test_every_documented_packet_json_example_validates(self) -> None:
+        contract = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "gpt-pro-codex-loop"
+            / "references"
+            / "packet-contract.md"
+        ).read_text(encoding="utf-8")
+        examples = [
+            packet_validator.strict_json_loads(body)
+            for body in re.findall(r"```json\n(.*?)\n```", contract, re.DOTALL)
+        ]
+        self.assertEqual(5, len(examples))
+        (
+            requirements_envelope,
+            documented_report,
+            review_envelope,
+            staged_review_state,
+            final_gate,
+        ) = examples
+        requirements = requirements_envelope["payload"]
+        self.assertEqual(
+            [],
+            packet_validator.validate_transport_envelope(
+                requirements_envelope,
+                expected_envelope(requirements_envelope),
+                set(),
+            ),
+        )
+        self.assertEqual(
+            "sha256:93b668942c44346dda2d59fa8b77b83093f035de6f2f0d6dcdff536ec6232944",
+            canonical_digest(requirements),
+        )
+        report = documented_report
+        self.assertEqual([], validate_report(report, requirements))
+        self.assertEqual(
+            [],
+            packet_validator.validate_transport_envelope(
+                review_envelope,
+                expected_envelope(review_envelope),
+                set(),
+            ),
+        )
+        self.assertEqual(
+            [],
+            validate_review(
+                review_envelope["payload"],
+                requirements,
+                report,
+            ),
+        )
+        snapshot = valid_snapshot(report)
+        snapshot["baseline_head"] = report["baseline_head"]
+        snapshot["tracked_diff_digest"] = report["tracked_diff_digest"]
+        snapshot["untracked_manifest_digest"] = report[
+            "untracked_manifest_digest"
+        ]
+        snapshot["snapshot_digest"] = report["snapshot_digest"]
+        self.assertEqual(
+            [],
+            packet_validator.validate_review_context(
+                review_envelope,
+                requirements,
+                report,
+                staged_review_state,
+                snapshot,
+            ),
+        )
+        state = valid_state(
+            "FINAL_VERIFICATION",
+            1,
+            latest_decision="PASS",
+            active_requirements_digest=canonical_digest(requirements),
+            active_requirements_revision=1,
+            pending_review_envelope_digest=None,
+            last_consumed_packet_digest="sha256:" + "5" * 64,
+            last_consumed_review_envelope_digest="sha256:" + "5" * 64,
+            active_report_digest=canonical_digest(report),
+            current_snapshot_digest="sha256:" + "a" * 64,
+            active_review_packet_digest="sha256:" + "6" * 64,
+            reviewed_snapshot_digest="sha256:" + "a" * 64,
+        )
+        self.assertEqual(
+            [],
+            packet_validator.validate_final_gate(final_gate, state),
+        )
+
     def test_extract_requires_exactly_one_json_fence(self) -> None:
         self.assertEqual(
             extract_single_json_object('```json\n{"schema_version": 1}\n```'),
@@ -701,7 +831,8 @@ class PacketTransportTests(unittest.TestCase):
             findings=[
                 {
                     "id": "F-1",
-                    "root_cause_fingerprint": "sha256:" + "f" * 64,
+                    "acceptance_id": "AC-1",
+                    "root_cause_key": "invalid-enum-containers",
                     "severity": [],
                     "category": "correctness",
                     "required_action": [],
@@ -721,6 +852,50 @@ class PacketTransportTests(unittest.TestCase):
 
 
 class TransportEnvelopeTests(unittest.TestCase):
+    def test_format_correction_requires_identical_recovered_payload(self) -> None:
+        original = valid_requirements()
+        corrected = valid_envelope("requirements", original)
+        self.assertEqual(
+            [],
+            packet_validator.validate_format_correction(original, corrected),
+        )
+        corrected["payload"] = valid_requirements(
+            objective="A semantically changed objective."
+        )
+        self.assertIn(
+            "payload: format correction must preserve the recovered payload exactly",
+            packet_validator.validate_format_correction(original, corrected),
+        )
+
+    def test_envelope_cli_uses_expected_attempt_and_consumed_receipts(self) -> None:
+        envelope = valid_envelope("requirements", valid_requirements())
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            envelope_path = root / "envelope.json"
+            expected_path = root / "expected.json"
+            consumed_path = root / "consumed.json"
+            envelope_path.write_text(json.dumps(envelope), encoding="utf-8")
+            expected_path.write_text(
+                json.dumps(expected_envelope(envelope)),
+                encoding="utf-8",
+            )
+            consumed_path.write_text(
+                json.dumps({"consumed_digests": []}),
+                encoding="utf-8",
+            )
+            with redirect_stdout(StringIO()):
+                result = main(
+                    [
+                        "envelope",
+                        str(envelope_path),
+                        "--expected",
+                        str(expected_path),
+                        "--consumed",
+                        str(consumed_path),
+                    ]
+                )
+        self.assertEqual(0, result)
+
     def test_transport_envelope_matches_every_expected_header(self) -> None:
         envelope = valid_envelope("requirements", valid_requirements())
         expected = expected_envelope(envelope)
@@ -975,12 +1150,14 @@ class ReportPacketTests(unittest.TestCase):
 
 
 class ReviewPacketTests(unittest.TestCase):
-    def test_review_is_closed_and_requires_a_lowercase_canonical_fingerprint(self) -> None:
+    def test_review_is_closed_and_rejects_a_model_selected_fingerprint(self) -> None:
         requirements = valid_requirements()
         report = valid_report(requirements)
         finding = {
             "id": "F-1",
             "root_cause_fingerprint": "sha256:" + "A" * 64,
+            "acceptance_id": "AC-1",
+            "root_cause_key": "incorrect-behavior",
             "severity": "HIGH",
             "category": "correctness",
             "required_action": "CODE_CHANGE",
@@ -993,7 +1170,7 @@ class ReviewPacketTests(unittest.TestCase):
             findings=[finding],
         )
         self.assertIn(
-            "findings.0.root_cause_fingerprint: must be a lowercase sha256 digest",
+            "findings.0.root_cause_fingerprint: unknown field",
             validate_review(review, requirements, report),
         )
         review["routing_hint"] = "untrusted"
@@ -1006,6 +1183,67 @@ class ReviewPacketTests(unittest.TestCase):
         self.assertIn(
             "acceptance_results.AC-1.routing_hint: unknown field",
             validate_review(nested_unknown, requirements, report),
+        )
+
+    def test_review_derives_root_cause_fingerprint_from_stable_source_fields(
+        self,
+    ) -> None:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        source = {
+            "acceptance_id": "AC-1",
+            "category": "INSUFFICIENT_EVIDENCE",
+            "required_action": "PROVIDE_EVIDENCE",
+            "root_cause_key": "missing-focused-test-output",
+        }
+        expected = canonical_digest(source)
+        finding = {
+            "id": "F-1",
+            **source,
+            "severity": "HIGH",
+            "evidence": "The report omits the focused test output.",
+        }
+        review = valid_review(
+            requirements,
+            report,
+            decision="CHANGES_REQUESTED",
+            findings=[finding],
+        )
+
+        self.assertEqual(
+            expected,
+            packet_validator.derive_root_cause_fingerprint(finding),
+        )
+        self.assertEqual([], validate_review(review, requirements, report))
+
+        review["findings"] = [dict(finding, root_cause_fingerprint=expected)]
+        self.assertIn(
+            "findings.0.root_cause_fingerprint: unknown field",
+            validate_review(review, requirements, report),
+        )
+
+    def test_root_cause_key_rename_cannot_evade_route_continuity(self) -> None:
+        base = {
+            "id": "F-1",
+            "acceptance_id": "AC-1",
+            "root_cause_key": "first-name",
+            "severity": "HIGH",
+            "category": "correctness",
+            "required_action": "CODE_CHANGE",
+            "evidence": "The same routed defect remains.",
+        }
+        renamed = dict(
+            base,
+            id="F-RENAMED",
+            root_cause_key="second-name",
+        )
+        self.assertNotEqual(
+            packet_validator.derive_root_cause_fingerprint(base),
+            packet_validator.derive_root_cause_fingerprint(renamed),
+        )
+        self.assertEqual(
+            packet_validator.derive_root_cause_route_fingerprint(base),
+            packet_validator.derive_root_cause_route_fingerprint(renamed),
         )
 
     def test_pass_cannot_include_failed_or_unverified_acceptance(self) -> None:
@@ -1044,7 +1282,8 @@ class ReviewPacketTests(unittest.TestCase):
             findings=[
                 {
                     "id": "F-1",
-                    "root_cause_fingerprint": "sha256:" + "f" * 64,
+                    "acceptance_id": "AC-1",
+                    "root_cause_key": "failing-test",
                     "severity": "HIGH",
                     "category": "correctness",
                     "evidence": "The test fails.",
@@ -1066,7 +1305,8 @@ class ReviewPacketTests(unittest.TestCase):
             findings=[
                 {
                     "id": "F-1",
-                    "root_cause_fingerprint": "sha256:" + "f" * 64,
+                    "acceptance_id": "AC-1",
+                    "root_cause_key": "omitted-output",
                     "severity": "LOW",
                     "category": "evidence",
                     "required_action": "PROVIDE_EVIDENCE",
@@ -1112,7 +1352,8 @@ class ReviewPacketTests(unittest.TestCase):
             findings=[
                 {
                     "id": "F-1",
-                    "root_cause_fingerprint": "sha256:" + "f" * 64,
+                    "acceptance_id": "AC-1",
+                    "root_cause_key": "missing-more-output",
                     "severity": "LOW",
                     "category": "evidence",
                     "required_action": "PROVIDE_EVIDENCE",
@@ -1257,7 +1498,14 @@ class ContextValidationTests(unittest.TestCase):
 
     def test_review_context_binds_finding_history_to_validated_payload(self) -> None:
         report, requirements, state, snapshot = self._valid_report_context()
-        fingerprint = canonical_digest({"test_root_cause": "context-bound"})
+        fingerprint = canonical_digest(
+            {
+                "acceptance_id": "AC-1",
+                "category": "correctness",
+                "required_action": "CODE_CHANGE",
+                "root_cause_key": "context-bound",
+            }
+        )
         review = valid_review(
             requirements,
             report,
@@ -1265,7 +1513,8 @@ class ContextValidationTests(unittest.TestCase):
             findings=[
                 {
                     "id": "F-CONTEXT",
-                    "root_cause_fingerprint": fingerprint,
+                    "acceptance_id": "AC-1",
+                    "root_cause_key": "context-bound",
                     "severity": "HIGH",
                     "category": "correctness",
                     "required_action": "CODE_CHANGE",
@@ -1282,7 +1531,12 @@ class ContextValidationTests(unittest.TestCase):
             latest_decision="CHANGES_REQUESTED",
             required_actions=["CODE_CHANGE"],
             unresolved_finding_ids=["F-CONTEXT"],
-            blocker_fingerprints=[fingerprint],
+            blocker_fingerprints=[
+                fingerprint,
+                packet_validator.derive_root_cause_route_fingerprint(
+                    review["findings"][0]
+                ),
+            ],
         )
         self.assertEqual(
             packet_validator.validate_review_context(
@@ -2350,13 +2604,16 @@ class TransitionTests(unittest.TestCase):
             with self.subTest(field=field):
                 mismatched = valid_state("LOCAL_VERIFICATION", 0)
                 mismatched[field] = value
-                self.assertIn(
-                    f"{field}: must match the bound conversation state",
-                    validate_transition(
-                        valid_state("IMPLEMENTING", 0),
-                        mismatched,
-                    ),
+                errors = validate_transition(
+                    valid_state("IMPLEMENTING", 0),
+                    mismatched,
                 )
+                expected = (
+                    f"{field}: must match the bound conversation state"
+                    if field == "bound_conversation_url"
+                    else "current.visible_model_label: must equal the controlled Pro-class label Pro"
+                )
+                self.assertIn(expected, errors)
 
         missing_identity = valid_state("LOCAL_VERIFICATION", 0)
         del missing_identity["bound_conversation_url"]
@@ -2366,6 +2623,37 @@ class TransitionTests(unittest.TestCase):
                 valid_state("IMPLEMENTING", 0),
                 missing_identity,
             ),
+        )
+
+    def test_model_policy_rejects_silent_downgrade_or_wrong_exact_label(self) -> None:
+        previous = valid_state("PREFLIGHT", 0)
+        wrong_class = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            visible_model_label="Standard",
+        )
+        self.assertIn(
+            "current.visible_model_label: must equal the controlled Pro-class label Pro",
+            validate_transition(previous, wrong_class),
+        )
+
+        exact_previous = valid_state(
+            "PREFLIGHT",
+            0,
+            model_policy="EXACT_LABEL",
+            requested_model_label="GPT-X Pro",
+            visible_model_label="GPT-X Pro",
+        )
+        wrong_exact = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            model_policy="EXACT_LABEL",
+            requested_model_label="GPT-X Pro",
+            visible_model_label="GPT-Y Pro",
+        )
+        self.assertIn(
+            "current.visible_model_label: must exactly match requested_model_label",
+            validate_transition(exact_previous, wrong_exact),
         )
 
     def test_transition_requires_complete_structured_state_packets(self) -> None:
@@ -2653,61 +2941,27 @@ class TransitionTests(unittest.TestCase):
             [],
         )
 
-    def test_explicit_empty_authoritative_history_clears_stale_legacy_history(self) -> None:
-        stale_legacy = [
+    def test_legacy_model_selected_finding_history_is_rejected(self) -> None:
+        previous = valid_state(
+            "REVIEW_PENDING",
+            1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["CODE_CHANGE"],
+        )
+        previous["unresolved_findings"] = [
             {
                 "id": "F-OLD",
-                "root_cause_fingerprint": canonical_digest(
-                    {"test_root_cause": "stale-cause"}
-                ),
+                "root_cause_fingerprint": "sha256:" + "f" * 64,
             }
         ]
-        previous = valid_state(
-            "REVIEW_PENDING",
-            1,
-            latest_decision="CHANGES_REQUESTED",
-            required_actions=["CODE_CHANGE"],
-        )
-        previous["unresolved_findings"] = stale_legacy
         current = valid_state(
             "IMPLEMENTING",
             2,
             latest_decision="CHANGES_REQUESTED",
             required_actions=["CODE_CHANGE"],
         )
-        current["unresolved_findings"] = stale_legacy
-        self.assertEqual(
-            validate_bound_review_transition(previous, current),
-            [],
-        )
-
-    def test_absent_authoritative_history_uses_legacy_history(self) -> None:
-        legacy = [
-            {
-                "id": "F-1",
-                "root_cause_fingerprint": canonical_digest(
-                    {"test_root_cause": "same-cause"}
-                ),
-            }
-        ]
-        previous = valid_state(
-            "REVIEW_PENDING",
-            1,
-            latest_decision="CHANGES_REQUESTED",
-            required_actions=["CODE_CHANGE"],
-        )
-        current = valid_state(
-            "IMPLEMENTING",
-            2,
-            latest_decision="CHANGES_REQUESTED",
-            required_actions=["CODE_CHANGE"],
-        )
-        for state in (previous, current):
-            del state["unresolved_finding_ids"]
-            del state["blocker_fingerprints"]
-            state["unresolved_findings"] = legacy
         self.assertIn(
-            "unresolved_findings: blocker persisted across two consecutive valid review rounds",
+            "previous.unresolved_findings: unknown field",
             validate_bound_review_transition(previous, current),
         )
 

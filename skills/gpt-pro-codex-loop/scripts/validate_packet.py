@@ -162,10 +162,14 @@ REQUIRED_STATE_FIELDS = (
     "latest_decision",
     "latest_requirements_decision",
     "required_actions",
+    "unresolved_finding_ids",
+    "blocker_fingerprints",
     "format_error_count",
     "browser_reconnect_count",
     "conversation_binding_state",
     "bound_conversation_url",
+    "model_policy",
+    "requested_model_label",
     "visible_model_label",
     "active_requirements_revision",
     "active_requirements_digest",
@@ -198,11 +202,7 @@ REQUIRED_STATE_FIELDS = (
     "active_review_packet_digest",
     "reviewed_snapshot_digest",
 )
-OPTIONAL_STATE_FIELDS = (
-    "unresolved_finding_ids",
-    "blocker_fingerprints",
-    "unresolved_findings",
-)
+OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
 FINAL_GATE_FIELDS = (
     "schema_version",
     "requirements_digest",
@@ -492,6 +492,35 @@ def validate_transport_envelope(
     return _errors_sorted(errors)
 
 
+def validate_format_correction(
+    original_payload,
+    corrected_envelope,
+) -> list[str]:
+    """Require a safely recovered original payload to remain byte-semantically equal."""
+    errors: list[str] = []
+    original = _as_mapping(original_payload, "original_payload", errors)
+    corrected, shape_errors = _validate_transport_envelope_shape(
+        corrected_envelope
+    )
+    errors.extend(shape_errors)
+    payload = _as_mapping(corrected.get("payload"), "payload", errors)
+    original_digest = _canonical_digest_checked(
+        original,
+        "original_payload",
+        errors,
+    )
+    corrected_digest = _canonical_digest_checked(payload, "payload", errors)
+    if (
+        original_digest is not None
+        and corrected_digest is not None
+        and original_digest != corrected_digest
+    ):
+        errors.append(
+            "payload: format correction must preserve the recovered payload exactly"
+        )
+    return _errors_sorted(errors)
+
+
 def _stable_ids(
     items: list[object],
     path: str,
@@ -734,6 +763,29 @@ def _finding_requests_code_change(required_change: object) -> bool:
     return False
 
 
+def derive_root_cause_fingerprint(finding: dict[str, object]) -> str:
+    """Derive the controller-owned root-cause fingerprint from Pro source fields."""
+    return canonical_digest(
+        {
+            "acceptance_id": finding.get("acceptance_id"),
+            "category": finding.get("category"),
+            "required_action": finding.get("required_action"),
+            "root_cause_key": finding.get("root_cause_key"),
+        }
+    )
+
+
+def derive_root_cause_route_fingerprint(finding: dict[str, object]) -> str:
+    """Derive a rename-resistant continuity key for one acceptance route."""
+    return canonical_digest(
+        {
+            "acceptance_id": finding.get("acceptance_id"),
+            "category": finding.get("category"),
+            "required_action": finding.get("required_action"),
+        }
+    )
+
+
 def validate_review(packet, requirements, report):
     """Return all deterministic review-packet validation errors."""
     errors: list[str] = []
@@ -787,7 +839,15 @@ def validate_review(packet, requirements, report):
     for index, finding_value in enumerate(findings):
         path = f"findings.{index}"
         finding = _as_mapping(finding_value, path, errors)
-        for field in ("id", "root_cause_fingerprint", "severity", "category", "required_action", "evidence"):
+        for field in (
+            "id",
+            "acceptance_id",
+            "root_cause_key",
+            "severity",
+            "category",
+            "required_action",
+            "evidence",
+        ):
             if field not in finding:
                 errors.append(f"{path}.{field}: missing required field")
             elif not _is_nonempty_string(finding[field]):
@@ -796,7 +856,8 @@ def validate_review(packet, requirements, report):
             finding,
             (
                 "id",
-                "root_cause_fingerprint",
+                "acceptance_id",
+                "root_cause_key",
                 "severity",
                 "category",
                 "required_action",
@@ -816,14 +877,12 @@ def validate_review(packet, requirements, report):
             or finding.get("severity") not in FINDING_SEVERITIES
         ):
             errors.append(f"{path}.severity: must be BLOCKER, HIGH, MEDIUM, or LOW")
-        fingerprint = finding.get("root_cause_fingerprint")
+        acceptance_id = finding.get("acceptance_id")
         if (
-            not isinstance(fingerprint, str)
-            or not DIGEST_PATTERN.fullmatch(fingerprint)
+            isinstance(acceptance_id, str)
+            and acceptance_id not in acceptance_ids
         ):
-            errors.append(
-                f"{path}.root_cause_fingerprint: must be a lowercase sha256 digest"
-            )
+            errors.append(f"{path}.acceptance_id: unknown acceptance ID")
         action = finding.get("required_action")
         if not isinstance(action, str) or action not in REQUIRED_ACTIONS:
             errors.append(f"{path}.required_action: invalid required action")
@@ -957,11 +1016,18 @@ def _review_finding_history(
         if not isinstance(finding, dict):
             continue
         identifier = finding.get("id")
-        fingerprint = finding.get("root_cause_fingerprint")
+        try:
+            fingerprint = derive_root_cause_fingerprint(finding)
+            route_fingerprint = derive_root_cause_route_fingerprint(finding)
+        except (TypeError, ValueError):
+            fingerprint = None
+            route_fingerprint = None
         if isinstance(identifier, str):
             identifiers.append(identifier)
         if isinstance(fingerprint, str):
             fingerprints.append(fingerprint)
+        if isinstance(route_fingerprint, str):
+            fingerprints.append(route_fingerprint)
     return sorted(set(identifiers)), sorted(set(fingerprints))
 
 
@@ -1164,6 +1230,8 @@ def _validate_conversation_binding(
     fields = (
         "conversation_binding_state",
         "bound_conversation_url",
+        "model_policy",
+        "requested_model_label",
         "visible_model_label",
     )
     if any(field not in state for field in fields):
@@ -1189,6 +1257,39 @@ def _validate_conversation_binding(
             if not _is_nonempty_string(state.get(field)):
                 errors.append(f"{name}.{field}: must be a non-empty string after binding")
                 complete = False
+    model_policy = state.get("model_policy")
+    requested_label = state.get("requested_model_label")
+    visible_label = state.get("visible_model_label")
+    if model_policy not in {"PRO_CLASS", "EXACT_LABEL"}:
+        errors.append(f"{name}.model_policy: must be PRO_CLASS or EXACT_LABEL")
+        complete = False
+    elif model_policy == "PRO_CLASS":
+        if requested_label is not None:
+            errors.append(
+                f"{name}.requested_model_label: must be null for PRO_CLASS"
+            )
+            complete = False
+        if (
+            binding_state == "CONVERSATION_BOUND"
+            and visible_label != "Pro"
+        ):
+            errors.append(
+                f"{name}.visible_model_label: must equal the controlled Pro-class label Pro"
+            )
+            complete = False
+    elif not _is_nonempty_string(requested_label):
+        errors.append(
+            f"{name}.requested_model_label: must be a non-empty string for EXACT_LABEL"
+        )
+        complete = False
+    elif (
+        binding_state == "CONVERSATION_BOUND"
+        and visible_label != requested_label
+    ):
+        errors.append(
+            f"{name}.visible_model_label: must exactly match requested_model_label"
+        )
+        complete = False
     return complete
 
 
@@ -1328,33 +1429,6 @@ def _validate_state_fields(
         errors.append(
             f"{name}.pending_review_envelope_digest: is allowed only while review is pending"
         )
-    legacy_findings = state.get("unresolved_findings")
-    if "unresolved_findings" in state:
-        if not isinstance(legacy_findings, list):
-            errors.append(f"{name}.unresolved_findings: must be a list")
-        else:
-            for index, value in enumerate(legacy_findings):
-                item = _as_mapping(
-                    value,
-                    f"{name}.unresolved_findings.{index}",
-                    errors,
-                )
-                identifier = item.get("id")
-                fingerprint = item.get(
-                    "fingerprint",
-                    item.get("root_cause_fingerprint"),
-                )
-                if not _is_nonempty_string(identifier):
-                    errors.append(
-                        f"{name}.unresolved_findings.{index}.id: must be a non-empty string"
-                    )
-                if (
-                    not isinstance(fingerprint, str)
-                    or not DIGEST_PATTERN.fullmatch(fingerprint)
-                ):
-                    errors.append(
-                        f"{name}.unresolved_findings.{index}.fingerprint: must be a lowercase sha256 digest"
-                    )
     active_revision = state.get("active_requirements_revision")
     active_digest = state.get("active_requirements_digest")
     if (
@@ -1518,29 +1592,10 @@ def _state_string_set(state: dict[str, object], field: str) -> set[str]:
 def _validate_state_string_list(
     state: dict[str, object], name: str, field: str, errors: list[str]
 ) -> bool:
-    if field in state:
-        values = state[field]
-        valid = isinstance(values, list) and all(
-            _is_nonempty_string(value) for value in values
-        )
-    else:
-        findings = state.get("unresolved_findings")
-        if field == "unresolved_finding_ids":
-            legacy_values = [
-                item.get("id") for item in findings if isinstance(item, dict)
-            ] if isinstance(findings, list) else None
-        else:
-            legacy_values = [
-                item.get("fingerprint", item.get("root_cause_fingerprint"))
-                for item in findings
-                if isinstance(item, dict)
-            ] if isinstance(findings, list) else None
-        valid = (
-            isinstance(findings, list)
-            and legacy_values is not None
-            and len(legacy_values) == len(findings)
-            and all(_is_nonempty_string(value) for value in legacy_values)
-        )
+    values = state.get(field)
+    valid = isinstance(values, list) and all(
+        _is_nonempty_string(value) for value in values
+    )
     if not valid:
         errors.append(f"{name}.{field}: must be a list of strings")
         return False
@@ -1548,33 +1603,11 @@ def _validate_state_string_list(
 
 
 def _finding_ids(state: dict[str, object]) -> set[str]:
-    if "unresolved_finding_ids" in state:
-        return _state_string_set(state, "unresolved_finding_ids")
-    findings = state.get("unresolved_findings")
-    if not isinstance(findings, list):
-        return set()
-    return {
-        identifier
-        for item in findings
-        if isinstance(item, dict)
-        for identifier in (item.get("id"),)
-        if _is_nonempty_string(identifier)
-    }
+    return _state_string_set(state, "unresolved_finding_ids")
 
 
 def _fingerprints(state: dict[str, object]) -> set[str]:
-    if "blocker_fingerprints" in state:
-        return _state_string_set(state, "blocker_fingerprints")
-    findings = state.get("unresolved_findings")
-    if not isinstance(findings, list):
-        return set()
-    return {
-        fingerprint
-        for item in findings
-        if isinstance(item, dict)
-        for fingerprint in (item.get("fingerprint", item.get("root_cause_fingerprint")),)
-        if _is_nonempty_string(fingerprint)
-    }
+    return _state_string_set(state, "blocker_fingerprints")
 
 
 def _expected_review_target(state: dict[str, object], errors: list[str]) -> str | None:
@@ -2785,9 +2818,33 @@ def main(argv: list[str] | None = None) -> int:
     review_parser.add_argument("packet")
     review_parser.add_argument("--requirements", required=True)
     review_parser.add_argument("--report", required=True)
+    envelope_parser = subparsers.add_parser("envelope")
+    envelope_parser.add_argument("packet")
+    envelope_parser.add_argument("--expected", required=True)
+    envelope_parser.add_argument("--consumed", required=True)
+    correction_parser = subparsers.add_parser("format-correction")
+    correction_parser.add_argument("packet")
+    correction_parser.add_argument("--original-payload", required=True)
+    report_context_parser = subparsers.add_parser("report-context")
+    report_context_parser.add_argument("packet")
+    report_context_parser.add_argument("--requirements", required=True)
+    report_context_parser.add_argument("--state", required=True)
+    report_context_parser.add_argument("--snapshot", required=True)
+    review_context_parser = subparsers.add_parser("review-context")
+    review_context_parser.add_argument("packet")
+    review_context_parser.add_argument("--requirements", required=True)
+    review_context_parser.add_argument("--report", required=True)
+    review_context_parser.add_argument("--state", required=True)
+    review_context_parser.add_argument("--snapshot", required=True)
+    final_gate_parser = subparsers.add_parser("final-gate")
+    final_gate_parser.add_argument("evidence")
+    final_gate_parser.add_argument("--state", required=True)
     transition_parser = subparsers.add_parser("transition")
     transition_parser.add_argument("previous")
     transition_parser.add_argument("current")
+    transition_parser.add_argument("--requirements-context")
+    transition_parser.add_argument("--review-context")
+    transition_parser.add_argument("--final-gate")
     args = parser.parse_args(argv)
     try:
         if args.command == "extract":
@@ -2802,9 +2859,65 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "review":
             value = _load_json(args.packet)
             errors = validate_review(value, _load_json(args.requirements), _load_json(args.report))
+        elif args.command == "envelope":
+            value = _load_json(args.packet)
+            consumed = _load_json(args.consumed)
+            if not isinstance(consumed, dict) or set(consumed) != {"consumed_digests"}:
+                raise PacketValidationError(
+                    "consumed file must be an object with only consumed_digests"
+                )
+            errors = validate_transport_envelope(
+                value,
+                _load_json(args.expected),
+                consumed["consumed_digests"],
+            )
+        elif args.command == "format-correction":
+            value = _load_json(args.packet)
+            errors = validate_format_correction(
+                _load_json(args.original_payload),
+                value,
+            )
+        elif args.command == "report-context":
+            value = _load_json(args.packet)
+            errors = validate_report_context(
+                value,
+                _load_json(args.requirements),
+                _load_json(args.state),
+                _load_json(args.snapshot),
+            )
+        elif args.command == "review-context":
+            value = _load_json(args.packet)
+            errors = validate_review_context(
+                value,
+                _load_json(args.requirements),
+                _load_json(args.report),
+                _load_json(args.state),
+                _load_json(args.snapshot),
+            )
+        elif args.command == "final-gate":
+            value = _load_json(args.evidence)
+            errors = validate_final_gate(value, _load_json(args.state))
         else:
             value = {"previous": _load_json(args.previous), "current": _load_json(args.current)}
-            errors = validate_transition(value["previous"], value["current"])
+            errors = validate_transition(
+                value["previous"],
+                value["current"],
+                requirements_context=(
+                    _load_json(args.requirements_context)
+                    if args.requirements_context
+                    else None
+                ),
+                review_context=(
+                    _load_json(args.review_context)
+                    if args.review_context
+                    else None
+                ),
+                final_gate_evidence=(
+                    _load_json(args.final_gate)
+                    if args.final_gate
+                    else None
+                ),
+            )
     except (OSError, PacketValidationError, TypeError, ValueError) as exc:
         print(json.dumps({"valid": False, "errors": [str(exc)]}, ensure_ascii=False))
         return 1

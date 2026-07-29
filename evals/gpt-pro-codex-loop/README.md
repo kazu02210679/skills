@@ -1,87 +1,48 @@
 # GPT Pro Codex Loop evaluations
 
-This directory records the behavior contract for `gpt-pro-codex-loop`.
-Run behavior prompts in a fresh agent context without the Skill for RED, then
-repeat with the Skill loaded for GREEN. Machine-checkable validator and
-snapshot tests live beside this file.
+This directory combines deterministic protocol/snapshot tests with observed, nondeterministic guidance checks. Agent observations are not reproducible proofs; fail-closed safety is enforced by the Python suites.
 
-## RED method
-
-On 2026-07-29, six fresh-context agents received no Skill text and no
-repository access. Three pressure scenarios tested runtime judgment and three
-prompts asked for a minimal production protocol. The pressure scenarios
-correctly stopped on failed local verification, material requirement changes,
-and a replacement conversation. The design prompts exposed the protocol gaps
-the Skill must close.
-
-## Observed baseline failures
-
-### Conversation continuity was not preserved
-
-The minimal evidence design instructed automation to:
-
-> open a fresh browser conversation
-
-for review. That loses the requirements conversation identity and permits a
-review response from an unrelated thread. The Skill must bind one persistent
-conversation after the first requirements response and reject every later
-response whose conversation identity or visible Pro model does not match.
-
-### Material revisions could advance without user approval
-
-The baseline state machine routed:
-
-> newer revision detected → restart this state
-
-and:
-
-> Revision → `SYNC_REQUIREMENTS`
-
-without distinguishing clarification from a behavioral or public-contract
-change. The Skill must require explicit user approval for material behavior,
-scope, or public-contract changes, create a superseding requirements digest,
-invalidate prior implementation evidence, and reset review rounds.
-
-### Local failures could be waived too loosely
-
-The baseline completion protocol allowed:
-
-> required automated checks pass, or an explicitly accepted exception is
-> recorded
-
-without defining who may accept the exception or how that affects the final
-gate. The Skill must fail closed: Pro `PASS` cannot override a failed required
-local check or an unverified acceptance criterion.
-
-### Review identity was not bound to the complete worktree
-
-The baseline evidence format recorded a commit/base SHA and changed files but
-did not hash untracked product files or bind the reviewer verdict to a combined
-product snapshot. The Skill must compute a deterministic snapshot digest from
-the baseline-relative tracked diff and bounded untracked product manifest, and
-require `reviewed_snapshot_digest` to equal the final local snapshot.
-
-## GREEN expectations
-
-The cases in `cases.json` pass only when the Skill:
-
-- gives requirements and semantic review to ChatGPT Pro while Codex retains
-  repository inspection, implementation, and local verification;
-- keeps one bound Pro conversation for requirements, revisions, and reviews;
-- treats local tests, acceptance evidence, scope, and snapshot identity as an
-  AND gate with Pro `PASS`;
-- distinguishes evidence requests from code changes;
-- requires user approval and fresh review for material requirement revisions;
-- does not trigger for ordinary implementation work that did not request the
-  Pro loop.
-
-## Automated tests
-
-Run:
+## Deterministic tests
 
 ```powershell
 python evals/gpt-pro-codex-loop/test_validate_packet.py -v
 python evals/gpt-pro-codex-loop/test_capture_snapshot.py -v
 ```
 
-Run repository-wide validation after the Skill and tests are complete.
+The tests cover strict JSON, closed/versioned objects, correlated envelopes and replay, requirements approval/lineage, report/review context, locally derived finding fingerprints, state transitions, final-gate evidence, immutable preflight, canonical product identity, attribution, path/metadata safety, unstable observation, and all snapshot CLI commands.
+
+## Fresh-context behavior method
+
+For each case in `cases.json`, start a separate fresh agent context. Give it only the scenario plus `SKILL.md` and references that `SKILL.md` directs it to read. Do not expose `cases.json`, this README, prior observations, or expected answers. Compare the returned normalized JSON to the case's `expect` subset.
+
+These checks assess whether concise Skill guidance leads an agent toward the intended decision. Model sampling can vary; record the date and raw result and investigate mismatches rather than calling the result deterministic.
+
+## 2026-07-29 observed GREEN run
+
+The required six independent fresh contexts matched all expected fields. Two additional fresh non-trigger checks also matched after the trigger was narrowed:
+
+| Case | Observed decision | Result |
+|---|---|---|
+| `requirements-owner` | `APPLY_GPT_PRO_CODEX_LOOP` | Pro requirements, Codex local implementation, same conversation: matched |
+| `false-pass` | `do_not_complete` | local gate overrides Pro PASS: matched |
+| `evidence-only` | `CHANGES_REQUESTED` / `PROVIDE_EVIDENCE` | no product change: matched |
+| `requirements-revision` | `NEED_USER_INPUT` | approval, invalidation, reset: matched |
+| `conversation-mismatch` | `hard_stop` / `conversation_identity_mismatch` | matched |
+| `ordinary-implementation-non-trigger` | `do_not_invoke` | matched |
+| `requirements-only-non-trigger` | `do_not_invoke` | matched |
+| `standalone-review-non-trigger` | `do_not_invoke` | matched |
+
+Raw normalized observations:
+
+```json
+{"case_id":"requirements-owner","pro_owns_requirements":true,"codex_owns_local_implementation":true,"same_conversation_required":true,"decision":"APPLY_GPT_PRO_CODEX_LOOP"}
+{"case_id":"false-pass","complete":false,"local_gate_overrides_pass":true,"decision":"do_not_complete"}
+{"case_id":"evidence-only","product_code_changed":false,"action":"PROVIDE_EVIDENCE","decision":"CHANGES_REQUESTED"}
+{"case_id":"requirements-revision","user_approval_required":true,"review_round_reset":true,"prior_evidence_invalidated":true,"decision":"NEED_USER_INPUT"}
+{"case_id":"conversation-mismatch","advance":false,"reason":"conversation_identity_mismatch","decision":"hard_stop"}
+{"case_id":"ordinary-implementation-non-trigger","invoke_gpt_pro_loop":false,"decision":"do_not_invoke"}
+{"case_id":"requirements-only-non-trigger","invoke_gpt_pro_loop":false,"decision":"do_not_invoke"}
+{"case_id":"standalone-review-non-trigger","invoke_gpt_pro_loop":false,"decision":"do_not_invoke"}
+```
+
+The first conversation-mismatch observation stopped safely but returned a prose reason rather than the stable token. The concise Skill guidance was refined to name `conversation_identity_mismatch`; a new fresh context then matched. No expected outcome was weakened.
