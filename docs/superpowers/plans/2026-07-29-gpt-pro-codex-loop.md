@@ -247,7 +247,7 @@ git commit -m "Add failing GPT Pro loop behavior evaluations"
 - Consumes: UTF-8 raw browser responses and JSON packet files.
 - Produces: `extract_single_json_object(raw: str) -> dict[str, object]`, `canonical_digest(value: object) -> str`, validation errors, and a nonzero CLI exit for invalid packets or transitions.
 
-- [ ] **Step 1: Initialize the Skill with the required generator**
+- [x] **Step 1: Initialize the Skill with the required generator**
 
 Run from the repository root:
 
@@ -257,7 +257,7 @@ python 'C:\Users\楫屋寿弥\.codex\skills\.system\skill-creator\scripts\init_s
 
 Keep only the generated required structure. Do not add example or asset files.
 
-- [ ] **Step 2: Write failing transport and requirements tests**
+- [x] **Step 2: Write failing transport and requirements tests**
 
 Add tests equivalent to:
 
@@ -284,7 +284,7 @@ def test_behavior_change_requires_user_approval(self) -> None:
     )
 ```
 
-- [ ] **Step 3: Write failing report, review, and transition tests**
+- [x] **Step 3: Write failing report, review, and transition tests**
 
 Cover:
 
@@ -306,7 +306,7 @@ python evals/gpt-pro-codex-loop/test_validate_packet.py -v
 
 Expected: FAIL because `validate_packet.py` has no implementation.
 
-- [ ] **Step 4: Implement the minimal validator**
+- [x] **Step 4: Implement the minimal validator**
 
 Implement these public definitions:
 
@@ -352,7 +352,7 @@ The CLI accepts `extract`, `requirements`, `report`, `review`, and `transition`
 subcommands. It prints normalized JSON or validation errors and exits `0` only
 for valid input.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 ```powershell
 python evals/gpt-pro-codex-loop/test_validate_packet.py -v
@@ -360,7 +360,7 @@ python evals/gpt-pro-codex-loop/test_validate_packet.py -v
 
 Expected: all packet and transition tests PASS.
 
-- [ ] **Step 6: Commit packet validation**
+- [x] **Step 6: Commit packet validation**
 
 ```powershell
 git add skills/gpt-pro-codex-loop evals/gpt-pro-codex-loop/test_validate_packet.py

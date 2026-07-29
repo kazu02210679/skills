@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT Pro Codex Loop"
+  short_description: "Run requirements and review loops with ChatGPT Pro"
+  default_prompt: "Use $gpt-pro-codex-loop to have ChatGPT Pro define requirements and review a Codex implementation until it is locally verified."
