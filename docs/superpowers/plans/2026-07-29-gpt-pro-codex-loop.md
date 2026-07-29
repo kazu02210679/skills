@@ -150,7 +150,7 @@ git commit -m "Verify GPT Pro browser loop capability"
 - Consumes: the approved design and no `gpt-pro-codex-loop` Skill instructions.
 - Produces: reproducible baseline failures and machine-readable behavior cases used for GREEN verification.
 
-- [ ] **Step 1: Add the behavior cases**
+- [x] **Step 1: Add the behavior cases**
 
 Create `cases.json` with these case IDs and required observations:
 
@@ -208,7 +208,7 @@ Create `cases.json` with these case IDs and required observations:
 ]
 ```
 
-- [ ] **Step 2: Run fresh-context baseline scenarios without the Skill**
+- [x] **Step 2: Run fresh-context baseline scenarios without the Skill**
 
 Use isolated subagents with only each prompt and the approved design goal, not
 the future Skill text. Record exact decisions and rationalizations. The RED
@@ -219,13 +219,13 @@ gate passes when at least one baseline agent:
 - continues with an unbound or mismatched conversation; or
 - changes a frozen behavioral requirement without user approval.
 
-- [ ] **Step 3: Document the observed baseline failures**
+- [x] **Step 3: Document the observed baseline failures**
 
 Write `README.md` with the invocation method, raw baseline excerpts, failure
 classification, and the exact Skill rule each failure requires. Do not invent
 a failure that was not observed.
 
-- [ ] **Step 4: Commit the RED evaluation**
+- [x] **Step 4: Commit the RED evaluation**
 
 ```powershell
 git add evals/gpt-pro-codex-loop
