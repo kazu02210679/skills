@@ -32,6 +32,17 @@ Run scripts relative to the installed Skill directory rather than a plugin
 root. The task-plan contract defines the portable run, resume, scope, commit,
 and status behavior.
 
+## `gpt-pro-codex-loop`
+
+Codex Desktop executes the Browser loop for `gpt-pro-codex-loop`. It binds one
+signed-in ChatGPT Pro conversation, implements and verifies the requested
+change locally, and returns evidence to that same conversation for iterative
+semantic review.
+
+Claude Code may inspect or maintain this Skill only. It cannot execute the
+Browser-backed runtime loop, and it must not imitate ChatGPT Pro locally or
+silently substitute a different transport.
+
 ## Host-specific metadata
 
 `agents/openai.yaml` provides Codex UI metadata. Claude Code does not consume

@@ -68,6 +68,7 @@ class HostCompatibilityTests(unittest.TestCase):
                 "codex-orchestration",
                 "complexity-aware-execution",
                 "create-project-map",
+                "gpt-pro-codex-loop",
                 "handoff",
                 "open-pull-request",
                 "review-implementation-html",
@@ -80,6 +81,17 @@ class HostCompatibilityTests(unittest.TestCase):
         self.assertIn(
             "[`phuryn/pm-skills`](https://github.com/phuryn/pm-skills)",
             root_readme,
+        )
+
+    def test_gpt_pro_codex_loop_is_codex_desktop_only_at_runtime(self) -> None:
+        compatibility = (
+            REPOSITORY_ROOT / "docs" / "host-compatibility.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("`gpt-pro-codex-loop`", compatibility)
+        self.assertIn("Codex Desktop executes the Browser loop", compatibility)
+        self.assertIn(
+            "Claude Code may inspect or maintain this Skill only",
+            compatibility,
         )
 
     def test_task_plan_contract_permits_untracked_active_plan(self) -> None:

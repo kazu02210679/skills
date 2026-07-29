@@ -252,7 +252,8 @@ git commit -m "Add failing GPT Pro loop behavior evaluations"
 Run from the repository root:
 
 ```powershell
-python 'C:\Users\楫屋寿弥\.codex\skills\.system\skill-creator\scripts\init_skill.py' gpt-pro-codex-loop --path skills --resources scripts,references --interface 'display_name=GPT Pro Codex Loop' --interface 'short_description=Run requirements and review loops with ChatGPT Pro' --interface 'default_prompt=Use $gpt-pro-codex-loop to have ChatGPT Pro define requirements and review a Codex implementation until it is locally verified.'
+$SkillCreatorScripts = Join-Path $env:USERPROFILE '.codex\skills\.system\skill-creator\scripts'
+python (Join-Path $SkillCreatorScripts 'init_skill.py') gpt-pro-codex-loop --path skills --resources scripts,references --interface 'display_name=GPT Pro Codex Loop' --interface 'short_description=Run requirements and review loops with ChatGPT Pro' --interface 'default_prompt=Use $gpt-pro-codex-loop to have ChatGPT Pro define requirements and review a Codex implementation until it is locally verified.'
 ```
 
 Keep only the generated required structure. Do not add example or asset files.
@@ -562,7 +563,8 @@ proceeding.
 - [ ] **Step 6: Validate the Skill folder**
 
 ```powershell
-python 'C:\Users\楫屋寿弥\.codex\skills\.system\skill-creator\scripts\quick_validate.py' skills/gpt-pro-codex-loop
+$SkillCreatorScripts = Join-Path $env:USERPROFILE '.codex\skills\.system\skill-creator\scripts'
+python (Join-Path $SkillCreatorScripts 'quick_validate.py') skills/gpt-pro-codex-loop
 python scripts/validate-skills.py
 ```
 
@@ -652,7 +654,8 @@ git commit -m "Catalog GPT Pro Codex loop skill"
 ```powershell
 python evals/gpt-pro-codex-loop/test_validate_packet.py -v
 python evals/gpt-pro-codex-loop/test_capture_snapshot.py -v
-python 'C:\Users\楫屋寿弥\.codex\skills\.system\skill-creator\scripts\quick_validate.py' skills/gpt-pro-codex-loop
+$SkillCreatorScripts = Join-Path $env:USERPROFILE '.codex\skills\.system\skill-creator\scripts'
+python (Join-Path $SkillCreatorScripts 'quick_validate.py') skills/gpt-pro-codex-loop
 python scripts/generate-skill-catalog.py --check
 python scripts/validate-skills.py
 ```
