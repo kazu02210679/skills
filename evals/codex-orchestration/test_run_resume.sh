@@ -43,7 +43,8 @@ has "identifies trunk as the default branch" "$out" "default branch ('trunk')"
 
 R="$TMPROOT/run1unknown"
 mkdir -p "$R/src"
-git -C "$R" init -q -b release
+git -C "$R" init -q
+git -C "$R" symbolic-ref HEAD refs/heads/release
 git -C "$R" config user.email t@t
 git -C "$R" config user.name t
 git -C "$R" config init.defaultBranch missing-default
@@ -148,7 +149,7 @@ out=$(CODEX_MODEL="$SPECIAL_MODEL" FAKE_CODEX_TOUCH="src/a.py" \
   "$S/codex_run.sh" "$P/T1.md" "$R" 2>&1); rc=$?
 check "run with JSON-special metadata succeeds" "$rc" "0"
 RD="$(rundir_of "$R")"
-json_model="$(python -c 'import json,sys; sys.stdout.buffer.write(json.load(open(sys.argv[1], encoding="utf-8"))["model"].encode("utf-8"))' \
+json_model="$("$TEST_PYTHON" -c 'import json,sys; sys.stdout.buffer.write(json.load(open(sys.argv[1], encoding="utf-8"))["model"].encode("utf-8"))' \
   "$RD/attempt-1/meta.json" 2>/dev/null)"; json_rc=$?
 check "run metadata is valid JSON" "$json_rc" "0"
 check "run metadata preserves quotes, slashes, and newlines" "$json_model" "$SPECIAL_MODEL"
@@ -465,7 +466,7 @@ SPECIAL_MODEL=$'resume"quote\\slash\nnext'
 out=$(CODEX_MODEL="$SPECIAL_MODEL" FAKE_CODEX_TOUCH="src/a.py" \
   "$S/codex_resume.sh" "$P/T1.hint-1.md" "$R" "$RD" 2>&1); rc=$?
 check "resume with JSON-special metadata succeeds" "$rc" "0"
-json_model="$(python -c 'import json,sys; sys.stdout.buffer.write(json.load(open(sys.argv[1], encoding="utf-8"))["model"].encode("utf-8"))' \
+json_model="$("$TEST_PYTHON" -c 'import json,sys; sys.stdout.buffer.write(json.load(open(sys.argv[1], encoding="utf-8"))["model"].encode("utf-8"))' \
   "$RD/attempt-2/meta.json" 2>/dev/null)"; json_rc=$?
 check "resume metadata is valid JSON" "$json_rc" "0"
 check "resume metadata preserves quotes, slashes, and newlines" "$json_model" "$SPECIAL_MODEL"
@@ -727,13 +728,19 @@ sorted_with() {
     . "$S/codex_lib.sh"
     codex_dirty_product "$R" HEAD ) | tr '\n' '|'
 }
-fast="$(sorted_with 1)"; slow="$(sorted_with 0)"
-check "the fast and fallback orders match" "$fast" "$slow"
-[ -n "$fast" ] && ok "the listing is non-empty" || bad "the listing is non-empty"
+slow="$(sorted_with 0)"
+[ -n "$slow" ] && ok "the fallback listing is non-empty" || bad "the fallback listing is non-empty"
 
 fp_with() { ( export CODEX_SORT0="$1"; . "$S/codex_lib.sh"; codex_meta_fingerprint "$P" ); }
 mkdir -p "$P/sub"; for name in b a 'z z' 'A'; do printf 'x\n' >"$P/sub/$name"; done
-check "plan fingerprints match on both sort paths" "$(fp_with 1)" "$(fp_with 0)"
+if command -v sort >/dev/null 2>&1 &&
+   [ "$(printf 'b\0a\0' | LC_ALL=C sort -z 2>/dev/null | tr '\0' ',')" = "a,b," ]; then
+  fast="$(sorted_with 1)"
+  check "the fast and fallback orders match" "$fast" "$slow"
+  check "plan fingerprints match on both sort paths" "$(fp_with 1)" "$(fp_with 0)"
+else
+  ok "sort -z comparison skipped: sort -z is unavailable"
+fi
 
 echo "== resume: scope baseline stays the task's start =="
 R="$(new_repo res5)"; P="$(new_plan "$R" auth)"
