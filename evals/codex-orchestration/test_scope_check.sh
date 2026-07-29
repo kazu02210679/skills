@@ -78,7 +78,8 @@ check "empty base in a repo with commits is refused" "$rc" "2"
 has "explains why" "$out" "ignore every edit"
 git -C "$R" checkout -- .
 
-E="$TMPROOT/empty"; mkdir -p "$E/src"; git -C "$E" init -q -b main
+E="$TMPROOT/empty"; mkdir -p "$E/src"; git -C "$E" init -q
+git -C "$E" symbolic-ref HEAD refs/heads/main
 echo z >"$E/src/n.py"; echo z >"$E/oops.txt"
 out=$("$S/codex_scope_check.sh" "$AL" "$E" "" 2>&1); rc=$?
 check "no-commits repo checks untracked only" "$rc" "1"

@@ -21,7 +21,9 @@ Use a task plan for sizeable work. Follow this order:
 2. Split the work into independently reviewable `T<N>` tasks.
 3. Write a stable `plan-id`, and give every task an explicit product-file
    allowlist and test command. The run preflight refuses a plan task missing
-   any of them rather than spending a Codex run first.
+   its plan identity, allowlist, or allowlist patterns before spending a Codex
+   run. A missing test command produces a warning; the commit gate later
+   refuses it unless `CODEX_ALLOW_NO_TESTS=1` was set deliberately.
 4. Run `codex_status.sh` to identify the next uncommitted task.
 5. Run `codex_run.sh`, then independently inspect its evidence and the diff.
 6. Use `codex_resume.sh` only for a targeted, bounded retry.

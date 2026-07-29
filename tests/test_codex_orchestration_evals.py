@@ -59,3 +59,6 @@ class CodexOrchestrationShellEvaluations(unittest.TestCase):
 
     def test_commit_status(self) -> None:
         self.run_eval("test_commit_status.sh")
+
+    def test_contract_portability(self) -> None:
+        self.run_eval("test_contract_portability.sh")

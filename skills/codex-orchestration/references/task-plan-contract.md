@@ -85,6 +85,10 @@ The exact run may also contain a frozen-contract manifest, a `commit.log`, a
 Git-anchored manifest as immutable. A later attempt always creates a new
 `attempt-N` directory; it never overwrites earlier evidence. Resume the exact
 recorded `thread_id` when supported, or use the explicit fresh fallback.
+Before reserving an attempt or starting Codex, resume verifies that the
+recorded live allowlist source still exists at the same pathname and matches
+the frozen allowlist bytes. A missing or changed source returns `4`; restore
+the recorded source to retry from the same run evidence.
 
 ## Commands and prerequisites
 

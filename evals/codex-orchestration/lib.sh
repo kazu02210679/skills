@@ -12,6 +12,7 @@ trap 'rm -rf "$TMPROOT"' EXIT
 export PATH="/usr/bin:/bin:$TESTS_DIR/fixtures:$PATH"
 chmod +x "$TESTS_DIR/fixtures/codex" 2>/dev/null || true
 chmod +x "$TESTS_DIR/fixtures/hash-content-only" 2>/dev/null || true
+TEST_PYTHON="$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"; }
@@ -30,7 +31,10 @@ finish() {
 new_repo() {
   local d="$TMPROOT/$1"
   rm -rf "$d"; mkdir -p "$d/src" "$d/docs"
-  git -C "$d" init -q -b main
+  # `git init -b` requires Git 2.28, while the Bash 5.0 compatibility
+  # environment ships Git 2.25. Point the unborn branch explicitly instead.
+  git -C "$d" init -q
+  git -C "$d" symbolic-ref HEAD refs/heads/main
   git -C "$d" config user.email t@t
   git -C "$d" config user.name t
   git -C "$d" config init.defaultBranch main

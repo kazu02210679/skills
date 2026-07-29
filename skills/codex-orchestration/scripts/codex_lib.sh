@@ -76,7 +76,7 @@ codex_load_allowlist() {
 # only to force one deliberately; the tests use it to exercise each. Forcing a
 # path the platform cannot honour fails the listing closed rather than
 # returning an unordered one.
-CODEX_SORT0=""
+CODEX_SORT0="${CODEX_SORT0:-}"
 codex_sort0_available() {
   if [ -z "$CODEX_SORT0" ]; then
     CODEX_SORT0=0
@@ -356,6 +356,27 @@ codex_hash_file() {
   "${CODEX_HASH[@]}" <"$1" | cut -d' ' -f1
 }
 
+# codex_normalize_git_path <workdir> <git_path>
+# Resolve a path emitted by Git into the pathname syntax understood by this
+# Bash. Git for Windows may print `C:/...` even though its Bash tools require
+# `/c/...`; use cygpath when it is available. Other absolute forms are already
+# native to their shell, and a relative Git path is relative to the worktree.
+codex_normalize_git_path() {
+  local wd="$1" gitpath="$2"
+  case "$gitpath" in
+    [A-Za-z]:/*)
+      if command -v cygpath >/dev/null 2>&1; then
+        gitpath="$(cygpath -u "$gitpath")" || return 1
+        [ -n "$gitpath" ] || return 1
+      fi
+      ;;
+  esac
+  case "$gitpath" in
+    /*|[A-Za-z]:/*) printf '%s\n' "$gitpath" ;;
+    *) (cd -- "$wd/$gitpath" && pwd) ;;
+  esac
+}
+
 # codex_contract_anchor <workdir> <rundir>
 # Trusted copy of a run contract, kept under Git metadata rather than the
 # workspace-writable .codex-runs directory.
@@ -376,10 +397,7 @@ codex_hash_file() {
 codex_contract_anchor() {
   local wd="$1" rundir="$2" gitdir key rundir_abs
   gitdir="$(git -C "$wd" rev-parse --git-common-dir 2>/dev/null)" || return 1
-  case "$gitdir" in
-    /*|[A-Za-z]:/*) ;;
-    *) gitdir="$(cd -- "$wd/$gitdir" && pwd)" || return 1 ;;
-  esac
+  gitdir="$(codex_normalize_git_path "$wd" "$gitdir")" || return 1
   rundir_abs="$(cd -- "$(dirname -- "$rundir")" && pwd)/$(basename -- "$rundir")" || return 1
   key="$(printf '%s' "$rundir_abs" | "${CODEX_HASH[@]}" | cut -d' ' -f1)" || return 1
   printf '%s/codex-orchestration-contracts/%s.sha256\n' "$gitdir" "$key"

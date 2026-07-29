@@ -128,9 +128,35 @@ if [ -f "$RUNDIR/allowlist" ]; then ALLOWLIST="$RUNDIR/allowlist"; fi
 # A resume always judges against the frozen copy. An exported CODEX_ALLOWLIST
 # left over from the run that created this rundir names the same contract and
 # must not be treated as an attempt to swap it — only a genuinely different
-# path is refused.
+# path is refused. The recorded source must also still exist with the frozen
+# bytes before a resume may reserve an attempt or launch Codex.
 RECORDED_ALLOWLIST_SOURCE=""
 [ -f "$RUNDIR/allowlist_source" ] && RECORDED_ALLOWLIST_SOURCE="$(cat "$RUNDIR/allowlist_source")"
+if [ -n "$ALLOWLIST" ]; then
+  [ -n "$RECORDED_ALLOWLIST_SOURCE" ] || {
+    printf 'codex_resume: FAIL - the frozen allowlist has no recorded source.\n' >&2
+    exit 4
+  }
+  [ -f "$RECORDED_ALLOWLIST_SOURCE" ] || {
+    printf 'codex_resume: FAIL - the recorded allowlist source is missing: %s\n' \
+      "$RECORDED_ALLOWLIST_SOURCE" >&2
+    exit 4
+  }
+  FROZEN_ALLOWLIST_DIGEST="$(codex_hash_file "$ALLOWLIST")" || {
+    printf 'codex_resume: FAIL - could not hash the frozen allowlist.\n' >&2
+    exit 4
+  }
+  LIVE_ALLOWLIST_DIGEST="$(codex_hash_file "$RECORDED_ALLOWLIST_SOURCE")" || {
+    printf 'codex_resume: FAIL - could not hash the recorded allowlist source: %s\n' \
+      "$RECORDED_ALLOWLIST_SOURCE" >&2
+    exit 4
+  }
+  [ "$LIVE_ALLOWLIST_DIGEST" = "$FROZEN_ALLOWLIST_DIGEST" ] || {
+    printf 'codex_resume: FAIL - the recorded allowlist source changed since this run was frozen: %s\n' \
+      "$RECORDED_ALLOWLIST_SOURCE" >&2
+    exit 4
+  }
+fi
 if [ -n "${CODEX_ALLOWLIST:-}" ]; then
   SUPPLIED_ALLOWLIST="$CODEX_ALLOWLIST"
   if [ -e "$SUPPLIED_ALLOWLIST" ]; then
