@@ -70,6 +70,8 @@ the existing public API cannot implement the approved design.
 
 - Create: `skills/gpt-pro-codex-loop/scripts/gpc_loop_controller.py`
 - Create: `evals/gpt-pro-codex-loop/test_gpc_loop.py`
+- Modify: `skills/gpt-pro-codex-loop/scripts/validate_packet.py`
+- Modify: `evals/gpt-pro-codex-loop/test_validate_packet.py`
 
 **Interfaces:**
 
@@ -164,8 +166,10 @@ class ControllerCase(unittest.TestCase):
             check=True,
             capture_output=True,
         )
-        self.request = self.repository / "request.txt"
-        self.context = self.repository / "context.txt"
+        input_directory = Path(self.temporary.name) / "controller-inputs"
+        input_directory.mkdir()
+        self.request = input_directory / "request.txt"
+        self.context = input_directory / "context.txt"
         self.request.write_text("Add deterministic behavior.\n", encoding="utf-8")
         self.context.write_text("The repository uses Python.\n", encoding="utf-8")
 
@@ -258,7 +262,89 @@ python -m unittest discover -s evals/gpt-pro-codex-loop -p "test_gpc_loop.py" -v
 
 Expected: import failure for `gpc_loop_controller`.
 
-- [ ] **Step 3: Implement controller errors, safe paths, strict I/O, and lock**
+- [ ] **Step 3: Add the initial unbound-requirements validator RED tests**
+
+Add focused tests to `test_validate_packet.py` proving:
+
+```python
+def test_initial_requirements_pending_may_remain_unbound(self) -> None:
+    previous = valid_state("PREFLIGHT", 0)
+    current = valid_state(
+        "REQUIREMENTS_PENDING",
+        0,
+        active_requirements_revision=None,
+        active_requirements_digest=None,
+        pending_requirements_envelope_digest=None,
+    )
+    self.assertEqual(validate_transition(previous, current), [])
+
+def test_unbound_requirements_are_rejected_outside_initial_pending(self) -> None:
+    for phase in ("REQUIREMENTS_FROZEN", "IMPLEMENTING", "LOCAL_VERIFICATION"):
+        with self.subTest(phase=phase):
+            state = valid_state(
+                phase,
+                0,
+                active_requirements_revision=None,
+                active_requirements_digest=None,
+            )
+            self.assertTrue(
+                any(
+                    "active_requirements" in error
+                    for error in validate_transition(state, state)
+                )
+            )
+
+def test_first_requirements_packet_binds_the_unbound_initial_state(self) -> None:
+    previous = valid_state(
+        "REQUIREMENTS_PENDING",
+        0,
+        active_requirements_revision=None,
+        active_requirements_digest=None,
+        pending_requirements_envelope_digest=None,
+    )
+    current = valid_state("REQUIREMENTS_FROZEN", 0)
+    self.assertEqual(
+        validate_bound_requirements_transition(previous, current),
+        [],
+    )
+```
+
+Update the test-only `bind_requirements_transition_context` helper so this
+initial-unbound case leaves the previous state unbound and binds the generated
+revision and canonical digest only in the frozen current state. The generated
+packet must be revision `1` with null `supersedes_digest`. Do not invent a
+provisional requirements digest during `init`.
+
+Run the packet suite and verify the first test is RED because the current state
+validator requires active requirements after every preflight phase.
+
+- [ ] **Step 4: Implement the minimal validator migration**
+
+In `validate_packet.py`:
+
+- allow both active requirements fields to be null only while phase is
+  `REQUIREMENTS_PENDING`, review round is `0`, no requirements packet has been
+  consumed, and no pending revision provenance exists;
+- continue rejecting a half-bound revision/digest pair;
+- preserve every existing non-initial state rule;
+- allow `PREFLIGHT -> REQUIREMENTS_PENDING` with that unbound pair;
+- in requirements transition-context validation, recognize the initial
+  unbound pending state and require revision `1` plus null
+  `supersedes_digest`;
+- allow the corresponding `REQUIREMENTS_PENDING -> REQUIREMENTS_FROZEN`
+  transition to initialize the active revision and canonical digest;
+- do not loosen material revision, approval, packet-consumption, or replay
+  rules.
+
+Run:
+
+```powershell
+python -m unittest discover -s evals/gpt-pro-codex-loop -p "test_validate_packet.py" -v
+```
+
+Expected: all packet tests pass.
+
+- [ ] **Step 5: Implement controller errors, safe paths, strict I/O, and lock**
 
 Start `gpc_loop_controller.py` with:
 
@@ -325,7 +411,7 @@ Implement:
 
 Do not auto-delete an existing lock.
 
-- [ ] **Step 4: Implement the complete initial states and initialization**
+- [ ] **Step 6: Implement the complete initial states and initialization**
 
 Add `initial_state(preflight, approved_paths, model_policy,
 requested_label)`. Return every key in
@@ -385,14 +471,18 @@ requested_label)`. Return every key in
 ```
 
 Clone it for the candidate and change only `phase` to
-`REQUIREMENTS_PENDING`. Require
+`REQUIREMENTS_PENDING`; the active requirements fields remain null until the
+first validated Pro requirements response is consumed. Require
 `validate_packet.validate_transition(previous, candidate) == []`.
 
 `initialize_run` must validate `PRO_CLASS`/`EXACT_LABEL`, inspect and validate
 preflight, stage all files, commit `state.json` last, and return
-`status_run(...)`.
+`status_run(...)`. Do not special-case request/context paths out of product
+preflight. Tests place those source files outside the repository; a real
+in-repository untracked source remains subject to explicit pre-existing path
+approval.
 
-- [ ] **Step 5: Implement read-only status**
+- [ ] **Step 7: Implement read-only status**
 
 Use a phase-to-command function so a review-origin user stop cannot be mistaken
 for a requirements approval:
@@ -435,7 +525,7 @@ transaction names, unreachable artifact names, and permitted commands.
 `next_commands`; it never returns both `prepare-*` and `accept-*` for one
 semantic turn.
 
-- [ ] **Step 6: Run Task 1 tests and existing suites**
+- [ ] **Step 8: Run Task 1 tests and existing suites**
 
 Run:
 
@@ -447,10 +537,10 @@ python -m unittest discover -s evals/gpt-pro-codex-loop -p "test_validate_packet
 
 Expected: all pass.
 
-- [ ] **Step 7: Commit Task 1**
+- [ ] **Step 9: Commit Task 1**
 
 ```powershell
-git add skills/gpt-pro-codex-loop/scripts/gpc_loop_controller.py evals/gpt-pro-codex-loop/test_gpc_loop.py
+git add skills/gpt-pro-codex-loop/scripts/gpc_loop_controller.py evals/gpt-pro-codex-loop/test_gpc_loop.py skills/gpt-pro-codex-loop/scripts/validate_packet.py evals/gpt-pro-codex-loop/test_validate_packet.py
 git commit -m "feat: initialize GPT Pro loop controller runs"
 ```
 

@@ -170,7 +170,16 @@ Behavior:
    `state.json`, and the initial event.
 
 The initial state remains conversation-unbound. `init` does not generate or
-send a prompt.
+send a prompt. Because no Pro requirements packet exists yet, the initial
+`REQUIREMENTS_PENDING` state keeps `active_requirements_revision` and
+`active_requirements_digest` null. This is the only post-preflight state where
+active requirements may be unbound.
+
+The supplied request and repository-context files are controller inputs, not
+product files. A source file located inside the repository remains subject to
+normal preflight product classification and approval. Tests place these source
+files outside the temporary repository; `init` copies their bounded contents
+into ignored `.ai-pro-loop/` artifacts.
 
 ### `prepare-requirements`
 
@@ -226,6 +235,14 @@ Behavior:
 `PLAN_READY` advances to `REQUIREMENTS_FROZEN`. A material
 `NEED_USER_INPUT` proposal is preserved unchanged in
 `USER_DECISION_REQUIRED`. `BLOCK` remains a hard stop.
+
+For the first requirements response only, the trusted previous state has no
+active requirements. The accepted packet must be revision `1` with a null
+`supersedes_digest`; its canonical digest and revision become the initial
+active requirements binding during the validated
+`REQUIREMENTS_PENDING -> REQUIREMENTS_FROZEN` transition. Later requirements
+turns must preserve or revise an existing active binding under the normal
+revision protocol.
 
 Material approval uses a separate `approve-requirements` command. That command
 accepts one local user-approval evidence file, derives the exact receipt from
@@ -500,6 +517,8 @@ credentials, network access, or mutable Browser selectors.
 Focused controller tests cover:
 
 - initialization and deterministic prompt/header generation;
+- the single initial unbound-requirements state and revision-1 binding on the
+  first accepted Pro packet;
 - the normal requirements, report, review `PASS`, and final-gate path;
 - `CHANGES_REQUESTED`, fresh report, fresh review, and convergence;
 - evidence-only review without snapshot change;
