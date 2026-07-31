@@ -3,6 +3,9 @@ name: Validate skills
 on:
   pull_request:
   push:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -48,3 +51,25 @@ jobs:
               bash --version | head -1
               bash evals/codex-orchestration/run_all.sh
             '
+
+  discord-bot-sdk-contract:
+    # Upstream drift, not a property of the pull request. Runs on the weekly
+    # schedule and on demand so an SDK release cannot silently make
+    # claude-code-discord-bot document a contract that no longer exists.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install the Agent SDK and Claude Code
+        run: npm install --no-save @anthropic-ai/claude-agent-sdk @anthropic-ai/claude-code
+      - name: Check the documented contract against what shipped
+        run: |
+          python skills/claude-code-discord-bot/scripts/check_sdk_contract.py \
+            --sdk-types node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts \
+            --cli node_modules/.bin/claude

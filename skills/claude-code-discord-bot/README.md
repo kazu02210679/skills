@@ -8,39 +8,46 @@
 - 長時間走らせているClaude Codeの完了・入力待ちをDiscordで受け取りたい
 - Claude Codeが危険なtoolを使う前に、人間の承認をDiscord経由で挟みたい
 
-## 3つのflowと経路
+## 2つのsession originを分ける
 
-bridgeが起こしたsessionと、自分でterminalから起こしたsessionでは配線が変わります。
+bridgeが起こしたsessionと、自分でterminalから起こしたsessionでは配線が違います。configもこの単位で分かれています。
 
-| flow | bridge起点のsession | terminal起点のsession |
+| flow | `bridge_sessions` | `terminal_sessions` |
 |---|---|---|
 | 指示 | Agent SDK `query()` / `claude -p` | 対象外 |
 | 通知 | SDKのmessage stream | `Stop` / `Notification` hook (`http`) |
 | 承認 | `canUseTool` callback | `PermissionRequest` hook (`http`) |
 
-Discordのthread 1本がClaude Code session 1本に対応します。`session_id`を保存し、次のturnで`resume`に渡します。
+`canUseTool` はAgent SDKのcallbackです。CLI transportには存在せず、terminal起点のsessionも当然カバーしません。Discordのthread 1本がClaude Code session 1本に対応し、`session_id`を保存して次のturnで`resume`に渡します。
 
 ## 信頼境界
 
 この bridge は実質「chat UIつきのremote code execution」です。機能を書く前に境界を固定します。
 
 - guild ID・channel ID・operator user IDのallowlistを必須にする（空を許さない）
-- sessionは`workspace_root`配下に限定する
+- `setting_sources` を明示する。省略すると user/project/local の設定がすべて読まれ、既存のruleやhookが承認経路より先にtoolを許可しうる
 - token類は環境変数のみ。設定fileに直接書かない
-- 承認endpointはloopbackにbindし、shared secretを要求する
-- 承認はfail closed。無回答・遅延・不正応答はすべてdeny
+- hook endpointはloopbackにbindし、shared secretを要求する
+- 承認はfail closed。Claude Codeは無応答・遅延・失敗を「拒否」とは扱わないので、bridge側が明示的にdenyを返す
 
-`bypassPermissions`はpermission eventそのものを消すため、承認flowとは併用できません。validatorが弾きます。
+`bypassPermissions`はpermission promptそのものを消すため、承認flowとは併用できません。validatorが弾きます。
+
+**`workspace_root` はsandboxではありません。** 起動可能なproject pathを制限するinput validationであって、Claude Codeは作業ディレクトリ外を読めますし、Bashは絶対pathに届きます。実際の隔離が要るなら SDK の `sandbox` 設定・コンテナ・VMを使ってください。
 
 ## 実装資材
 
 - `references/bridge-contract.md`: 設定schema、thread↔session対応、hookのpayloadと応答形式
 - `references/discord-app-setup.md`: Discord Developer Portalの手順、intent・権限、platform上限
+- `scripts/check_sdk_contract.py`: 文書化した契約と実際のSDK・CLIの差分検出
 - `scripts/validate_bridge_config.py`: `discord-bridge.json`の信頼境界検証
 
 ```bash
+python scripts/check_sdk_contract.py \
+  --sdk-types node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts --cli claude
 python scripts/validate_bridge_config.py <project>/discord-bridge.json
 ```
+
+契約はrelease間で変わります。`canUseTool`のsignatureも`PermissionRequest`のpayloadも実際に変わった実績があるので、実装前に必ずdrift checkを通してください。
 
 ## 制約
 

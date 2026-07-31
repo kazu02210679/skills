@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "discord": {
     "guild_id": "123456789012345678",
     "command_channel_ids": ["223456789012345678"],
@@ -8,26 +8,30 @@
     "approver_user_ids": ["423456789012345678"],
     "token_env": "DISCORD_BOT_TOKEN"
   },
-  "runtime": {
+  "bridge_sessions": {
+    "enabled": true,
     "transport": "agent-sdk",
     "workspace_root": "/home/me/src",
     "projects": {
       "skills": "/home/me/src/skills"
     },
-    "permission_mode": "default",
+    "permission_mode": "acceptEdits",
+    "setting_sources": ["project"],
     "allowed_tools": ["Read", "Grep", "Glob"],
     "disallowed_tools": [],
-    "max_concurrent_sessions": 2
+    "max_concurrent_sessions": 2,
+    "sandbox": {
+      "enabled": true,
+      "fail_if_unavailable": true
+    },
+    "approval": {
+      "enabled": true,
+      "transport": "can-use-tool",
+      "timeout_seconds": 300,
+      "on_timeout": "deny"
+    }
   },
-  "approval": {
-    "enabled": true,
-    "transport": "canusetool",
-    "timeout_seconds": 300,
-    "on_timeout": "deny"
-  },
-  "notifications": {
-    "on_completion": true,
-    "on_idle_prompt": true,
-    "on_permission_request": true
+  "terminal_sessions": {
+    "enabled": false
   }
 }
