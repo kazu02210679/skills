@@ -12,6 +12,22 @@ from typing import Sequence
 import gpc_loop_controller as controller
 
 
+COMMANDS = frozenset(
+    {
+        "init",
+        "prepare-requirements",
+        "accept-requirements",
+        "approve-requirements",
+        "build-report",
+        "prepare-review",
+        "accept-review",
+        "final-verify",
+        "status",
+        "abandon-attempt",
+    }
+)
+
+
 class _ArgumentError(ValueError):
     """A parser failure that can be emitted in the stable JSON envelope."""
 
@@ -21,7 +37,9 @@ class _Parser(argparse.ArgumentParser):
         raise _ArgumentError(message)
 
 
-def _command_parser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser], name: str) -> argparse.ArgumentParser:
+def _command_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser], name: str
+) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(name)
     parser.add_argument("--repo", required=True, type=Path)
     parser.add_argument("--task", required=True)
@@ -119,62 +137,78 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _write(value: dict[str, object]) -> None:
-    sys.stdout.write(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n")
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    sys.stdout.buffer.write(payload + b"\n")
 
 
 def _command_name(argv: Sequence[str]) -> str | None:
-    return next((value for value in argv if not value.startswith("-")), None)
+    return argv[0] if argv and argv[0] in COMMANDS else None
+
+
+def _emit_error(
+    command: str | None,
+    code: str,
+    message: str,
+    details: Sequence[str],
+    exit_code: int,
+    debug: bool,
+) -> int:
+    try:
+        _write(
+            {
+                "ok": False,
+                "command": command,
+                "error": {"code": code, "message": message, "details": list(details)},
+            }
+        )
+    except Exception:
+        if debug:
+            traceback.print_exc(file=sys.stderr)
+        return 1
+    return exit_code
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Dispatch one controller command and emit exactly one JSON result envelope."""
     values = list(sys.argv[1:] if argv is None else argv)
+    args: argparse.Namespace | None = None
+    debug = "--debug" in values
     try:
         args = build_parser().parse_args(values)
+        debug = args.debug
         result = _dispatch(args)
+        _write({"ok": True, "command": args.command, "result": result})
+        return 0
     except _ArgumentError:
-        _write(
-            {
-                "ok": False,
-                "command": _command_name(values),
-                "error": {
-                    "code": "ARGUMENT_ERROR",
-                    "message": "Invalid command arguments.",
-                    "details": [],
-                },
-            }
+        return _emit_error(
+            _command_name(values), "ARGUMENT_ERROR", "Invalid command arguments.", [], 2, debug
         )
-        return 2
     except controller.ControllerError as error:
-        _write(
-            {
-                "ok": False,
-                "command": getattr(locals().get("args", None), "command", _command_name(values)),
-                "error": {
-                    "code": error.code,
-                    "message": error.message,
-                    "details": list(error.details),
-                },
-            }
+        return _emit_error(
+            args.command if args is not None else _command_name(values),
+            error.code,
+            error.message,
+            error.details,
+            2,
+            debug,
         )
-        return 2
     except Exception:
-        if "args" in locals() and args.debug:
+        if debug:
             traceback.print_exc(file=sys.stderr)
-        _write(
-            {
-                "ok": False,
-                "command": getattr(locals().get("args", None), "command", _command_name(values)),
-                "error": {
-                    "code": "INTERNAL_ERROR",
-                    "message": "The controller encountered an internal error.",
-                    "details": [],
-                },
-            }
+        return _emit_error(
+            args.command if args is not None else _command_name(values),
+            "INTERNAL_ERROR",
+            "The controller encountered an internal error.",
+            [],
+            1,
+            False,
         )
-        return 1
-    _write({"ok": True, "command": args.command, "result": result})
-    return 0
 
 
 if __name__ == "__main__":

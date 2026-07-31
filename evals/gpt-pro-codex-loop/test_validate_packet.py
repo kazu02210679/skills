@@ -698,14 +698,18 @@ class PacketTransportTests(unittest.TestCase):
             packet_validator.strict_json_loads(body)
             for body in re.findall(r"```json\n(.*?)\n```", contract, re.DOTALL)
         ]
-        self.assertEqual(5, len(examples))
+        self.assertEqual(6, len(examples))
         (
+            local_evidence,
             requirements_envelope,
             documented_report,
             review_envelope,
             staged_review_state,
             final_gate,
         ) = examples
+        self.assertEqual(1, local_evidence["schema_version"])
+        self.assertEqual(["Focused test passed."], local_evidence["acceptance_evidence"]["AC-1"])
+        self.assertEqual("PASS", local_evidence["test_commands"][0]["outcome"])
         requirements = requirements_envelope["payload"]
         self.assertEqual(
             [],

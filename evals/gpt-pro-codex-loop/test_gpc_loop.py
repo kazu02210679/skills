@@ -22,6 +22,7 @@ SCRIPT_DIR = (
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import gpc_loop_controller as controller  # noqa: E402
+import gpc_loop as cli  # noqa: E402
 
 
 def write_raw_envelope(
@@ -556,6 +557,155 @@ class ControllerCase(unittest.TestCase):
                     error = json.loads(completed.stdout)["error"]
                     self.assertEqual(error["code"], "ARGUMENT_ERROR")
                     self.assertEqual(completed.stderr, "")
+
+    def test_cli_writes_canonical_utf8_bytes_with_one_lf(self) -> None:
+        script = (
+            "import sys; "
+            f"sys.path.insert(0, {str(SCRIPT_DIR)!r}); "
+            "import gpc_loop as cli; "
+            "cli._dispatch = lambda args: {'label': '東京🍣'}; "
+            "raise SystemExit(cli.main(['status', '--repo', '.', '--task', 'controller-test']))"
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script], check=False, capture_output=True
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(
+            completed.stdout,
+            b'{"command":"status","ok":true,"result":{"label":"\xe6\x9d\xb1\xe4\xba\xac\xf0\x9f\x8d\xa3"}}\n',
+        )
+        self.assertNotIn(b"\r", completed.stdout)
+        self.assertEqual(completed.stderr, b"")
+
+    def test_cli_parse_errors_do_not_echo_non_command_inputs(self) -> None:
+        unsafe_values = [
+            "https://chatgpt.com/c/private",
+            str(self.repository / "private evidence.txt"),
+            "Pro Experimental",
+            "not-sent-evidence.txt",
+        ]
+        for value in unsafe_values:
+            with self.subTest(value=value):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT_DIR / "gpc_loop.py"),
+                        "--unknown-option",
+                        value,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 2)
+                payload = json.loads(completed.stdout)
+                self.assertIsNone(payload["command"])
+                self.assertNotIn(value, completed.stdout)
+
+    def test_cli_rejects_missing_common_and_command_arguments(self) -> None:
+        required_arguments = {
+            "init": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+                ("--request", "request.md"),
+                ("--repository-context", "context.md"),
+                ("--model-policy", "PRO_CLASS"),
+            ],
+            "prepare-requirements": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+            ],
+            "accept-requirements": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+                ("--raw-response", "response.md"),
+                ("--observed-conversation-url", "https://chatgpt.com/c/example"),
+                ("--observed-model-label", "Pro"),
+            ],
+            "approve-requirements": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+                ("--approval-evidence", "approval.txt"),
+            ],
+            "build-report": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+                ("--local-evidence", "evidence.json"),
+            ],
+            "prepare-review": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+            ],
+            "accept-review": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+                ("--raw-response", "response.md"),
+                ("--observed-conversation-url", "https://chatgpt.com/c/example"),
+                ("--observed-model-label", "Pro"),
+            ],
+            "final-verify": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+            ],
+            "status": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+            ],
+            "abandon-attempt": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+                ("--send-status", "NOT_SENT"),
+                ("--not-sent-evidence", "not-sent.txt"),
+            ],
+        }
+        for command, arguments in required_arguments.items():
+            complete = [sys.executable, str(SCRIPT_DIR / "gpc_loop.py"), command]
+            for option, value in arguments:
+                complete.extend((option, value))
+            for option, value in arguments:
+                with self.subTest(command=command, option=option):
+                    missing = list(complete)
+                    missing.remove(option)
+                    missing.remove(value)
+                    completed = subprocess.run(
+                        missing, check=False, capture_output=True, text=True
+                    )
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertEqual(json.loads(completed.stdout)["command"], command)
+
+    def test_cli_dispatches_each_command_with_parsed_values(self) -> None:
+        request = Path("request.md")
+        context = Path("context.md")
+        response = Path("response.md")
+        evidence = Path("evidence.txt")
+        cases = [
+            (
+                "initialize_run",
+                [
+                    "init", "--repo", ".", "--task", "run", "--request", str(request),
+                    "--repository-context", str(context), "--approved-existing-path", "old.py",
+                    "--approved-existing-path", "legacy.py", "--model-policy", "EXACT_LABEL",
+                    "--requested-model-label", "Pro",
+                ],
+                (Path("."), "run", request, context, ["old.py", "legacy.py"], "EXACT_LABEL", "Pro"),
+            ),
+            ("prepare_requirements", ["prepare-requirements", "--repo", ".", "--task", "run", "--conflict-evidence", str(evidence)], (Path("."), "run", evidence)),
+            ("accept_requirements", ["accept-requirements", "--repo", ".", "--task", "run", "--raw-response", str(response), "--observed-conversation-url", "https://chatgpt.com/c/1", "--observed-model-label", "Pro"], (Path("."), "run", response, "https://chatgpt.com/c/1", "Pro")),
+            ("approve_requirements", ["approve-requirements", "--repo", ".", "--task", "run", "--approval-evidence", str(evidence)], (Path("."), "run", evidence)),
+            ("build_report", ["build-report", "--repo", ".", "--task", "run", "--local-evidence", str(evidence)], (Path("."), "run", evidence)),
+            ("prepare_review", ["prepare-review", "--repo", ".", "--task", "run", "--supplemental-evidence", str(evidence)], (Path("."), "run", evidence)),
+            ("accept_review", ["accept-review", "--repo", ".", "--task", "run", "--raw-response", str(response), "--observed-conversation-url", "https://chatgpt.com/c/1", "--observed-model-label", "Pro"], (Path("."), "run", response, "https://chatgpt.com/c/1", "Pro")),
+            ("final_verify", ["final-verify", "--repo", ".", "--task", "run"], (Path("."), "run")),
+            ("status_run", ["status", "--repo", ".", "--task", "run"], (Path("."), "run")),
+            ("abandon_attempt", ["abandon-attempt", "--repo", ".", "--task", "run", "--send-status", "NOT_SENT", "--not-sent-evidence", str(evidence)], (Path("."), "run", "NOT_SENT", evidence)),
+        ]
+        for function_name, arguments, expected in cases:
+            with self.subTest(command=arguments[0]):
+                with patch.object(cli.controller, function_name, return_value={}) as dispatch:
+                    with patch.object(cli, "_write"):
+                        self.assertEqual(cli.main(arguments), 0)
+                dispatch.assert_called_once_with(*expected)
 
     def test_failed_preflight_cleans_owned_run_and_allows_same_slug_retry(self) -> None:
         (self.repository / "new-product.py").write_text("value = 1\n", encoding="utf-8")

@@ -64,7 +64,24 @@ status
 abandon-attempt       --send-status NOT_SENT --not-sent-evidence FILE
 ```
 
-`--local-evidence` is one strict object with exactly `schema_version`, `changed_file_intents`, `intent_summary`, `acceptance_evidence`, `test_commands`, `diff_evidence`, `omissions`, and `unresolved_risks_or_blockers`. Each test command is exactly `{command, outcome, output_summary}`; the controller records it but does not execute it. Approval and not-sent evidence are non-empty bounded UTF-8 text files. `accept-*` always receives the complete raw response plus the URL and model label observed in the Browser at acceptance time.
+`--local-evidence` is one strict UTF-8 JSON object with exactly this shape (no unknown fields):
+
+```json
+{
+  "schema_version": 1,
+  "changed_file_intents": {"example.py": "Implement AC-1."},
+  "intent_summary": "Implement and verify AC-1.",
+  "acceptance_evidence": {"AC-1": ["Focused test passed."]},
+  "test_commands": [{"command": "python -m unittest test_example.py -v", "outcome": "PASS", "output_summary": "1 test passed."}],
+  "diff_evidence": ["example.py implements AC-1."],
+  "omissions": [],
+  "unresolved_risks_or_blockers": []
+}
+```
+
+`schema_version` is integer `1`. `changed_file_intents` is an object of non-empty changed-path keys and non-empty intent strings; its keys must equal the captured product snapshot's changed-path set exactly. `intent_summary` is a non-empty string. `acceptance_evidence` must have exactly every active acceptance ID as keys and each value is a non-empty list of non-empty strings. `diff_evidence`, `omissions`, and `unresolved_risks_or_blockers` are lists of non-empty strings. Every `test_commands` item has exactly non-empty string `command`, `outcome`, and `output_summary` fields; the controller records commands without executing them. A report may record a non-`PASS` outcome, but final verification requires at least one command and every outcome to be `PASS`, with empty omissions and unresolved blockers.
+
+`--request` and `--repository-context` are UTF-8 text inputs copied verbatim into the run. `--conflict-evidence`, `--supplemental-evidence`, and `--approval-evidence` are readable, non-empty UTF-8 text files. `--not-sent-evidence` is readable, non-empty UTF-8 text normalized to LF and stored up to 8192 UTF-8 bytes; it is valid only with literal `--send-status NOT_SENT`. `accept-*` always receives the complete raw response plus the URL and model label observed in the Browser at acceptance time.
 
 Each non-help invocation prints exactly one canonical UTF-8 JSON object and one LF: success is `{"ok":true,"command":"COMMAND","result":RESULT}`; a stable controller failure is `{"ok":false,"command":"COMMAND","error":{"code":"CODE","message":"MESSAGE","details":[]}}`. Success exits `0`, an expected controller failure exits `2`, and an unexpected failure returns `INTERNAL_ERROR` with exit `1`; `--debug` sends its traceback only to stderr.
 
