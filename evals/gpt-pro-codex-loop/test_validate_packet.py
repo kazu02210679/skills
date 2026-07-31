@@ -224,6 +224,7 @@ def valid_state(
     schema_version: object = 1,
     pending_requirements_envelope_digest: object = _UNSET_STATE_VALUE,
     pending_review_envelope_digest: object = _UNSET_STATE_VALUE,
+    pending_review_expected_header_digest: object = _UNSET_STATE_VALUE,
     last_consumed_packet_digest: object = _UNSET_STATE_VALUE,
     last_consumed_review_envelope_digest: object = _UNSET_STATE_VALUE,
     active_report_digest: object = None,
@@ -260,6 +261,10 @@ def valid_state(
     if pending_review_envelope_digest is _UNSET_STATE_VALUE:
         pending_review_envelope_digest = (
             REVIEW_ENVELOPE_DIGEST if phase == "REVIEW_PENDING" else None
+        )
+    if pending_review_expected_header_digest is _UNSET_STATE_VALUE:
+        pending_review_expected_header_digest = (
+            "sha256:" + "6" * 64 if phase == "REVIEW_PENDING" else None
         )
     if last_consumed_packet_digest is _UNSET_STATE_VALUE:
         if phase == "PREFLIGHT":
@@ -332,6 +337,7 @@ def valid_state(
         "resolution_stop_sequence": resolution_stop_sequence,
         "pending_requirements_envelope_digest": pending_requirements_envelope_digest,
         "pending_review_envelope_digest": pending_review_envelope_digest,
+        "pending_review_expected_header_digest": pending_review_expected_header_digest,
         "last_consumed_packet_digest": last_consumed_packet_digest,
         "last_consumed_review_envelope_digest": last_consumed_review_envelope_digest,
         "active_report_digest": active_report_digest,
@@ -507,6 +513,9 @@ def bind_review_transition_context(
         active_requirements_revision=requirements["requirements_revision"],
         active_requirements_digest=requirements_digest,
         pending_review_envelope_digest=envelope_digest,
+        pending_review_expected_header_digest=canonical_digest(
+            expected_envelope(envelope)
+        ),
         active_report_digest=canonical_digest(report),
         current_snapshot_digest=snapshot["snapshot_digest"],
         active_review_packet_digest=canonical_digest(review),
@@ -516,6 +525,7 @@ def bind_review_transition_context(
         active_requirements_revision=requirements["requirements_revision"],
         active_requirements_digest=requirements_digest,
         pending_review_envelope_digest=None,
+        pending_review_expected_header_digest=None,
         last_consumed_packet_digest=envelope_digest,
         last_consumed_review_envelope_digest=envelope_digest,
         active_report_digest=previous["active_report_digest"],
@@ -3526,12 +3536,16 @@ class TransitionTests(unittest.TestCase):
             blocker_fingerprints=["cause-2"],
         )
         current = valid_state(
-            "IMPLEMENTING",
+            "BLOCKED",
             3,
             latest_decision="CHANGES_REQUESTED",
             required_actions=["CODE_CHANGE"],
             unresolved_finding_ids=["F-1"],
             blocker_fingerprints=["cause-1"],
+            stop_origin_phase="REVIEW_PENDING",
+            stop_origin_category="REVIEW_ROUND_LIMIT",
+            stop_reason="The semantic review round limit was reached.",
+            stop_sequence=1,
         )
         self.assertEqual(
             validate_bound_review_transition(previous, current),

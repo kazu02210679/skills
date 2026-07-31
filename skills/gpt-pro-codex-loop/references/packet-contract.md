@@ -273,6 +273,7 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "resolution_stop_sequence": null,
   "pending_requirements_envelope_digest": null,
   "pending_review_envelope_digest": "sha256:3a63ffc1078e3eb2ca79474c0f63a79c203ebf00cef62e6b259e030d3afb5bb2",
+  "pending_review_expected_header_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
   "last_consumed_packet_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
   "last_consumed_review_envelope_digest": null,
   "active_report_digest": "sha256:4198d50d6002e2ac6819ba5f7398d4df12e457a9ee58f0d7d50538cc32a93204",

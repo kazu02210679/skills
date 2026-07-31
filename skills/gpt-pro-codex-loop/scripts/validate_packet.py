@@ -88,6 +88,7 @@ PENDING_REVISION_PROVENANCE_FIELDS = (
 MATERIAL_RESET_NULL_FIELDS = (
     "latest_decision",
     "pending_review_envelope_digest",
+    "pending_review_expected_header_digest",
     "active_report_digest",
     "current_snapshot_digest",
     "active_review_packet_digest",
@@ -105,6 +106,8 @@ STOP_ORIGIN_CATEGORIES = frozenset(
         "REQUIREMENTS_BLOCK",
         "REVIEW_USER_DECISION",
         "REVIEW_BLOCK",
+        "REVIEW_REPEATED_BLOCKER",
+        "REVIEW_ROUND_LIMIT",
         "FINAL_VERIFICATION_BLOCK",
     }
 )
@@ -113,6 +116,8 @@ STOP_CATEGORY_ORIGINS = {
     "REQUIREMENTS_BLOCK": "REQUIREMENTS_PENDING",
     "REVIEW_USER_DECISION": "REVIEW_PENDING",
     "REVIEW_BLOCK": "REVIEW_PENDING",
+    "REVIEW_REPEATED_BLOCKER": "REVIEW_PENDING",
+    "REVIEW_ROUND_LIMIT": "REVIEW_PENDING",
     "FINAL_VERIFICATION_BLOCK": "FINAL_VERIFICATION",
 }
 STOP_CATEGORY_PHASES = {
@@ -120,6 +125,8 @@ STOP_CATEGORY_PHASES = {
     "REQUIREMENTS_BLOCK": "BLOCKED",
     "REVIEW_USER_DECISION": "USER_DECISION_REQUIRED",
     "REVIEW_BLOCK": "USER_DECISION_REQUIRED",
+    "REVIEW_REPEATED_BLOCKER": "BLOCKED",
+    "REVIEW_ROUND_LIMIT": "BLOCKED",
     "FINAL_VERIFICATION_BLOCK": "BLOCKED",
 }
 STOP_RESUME_TARGETS = {
@@ -223,6 +230,7 @@ REQUIRED_STATE_FIELDS = (
     "resolution_stop_sequence",
     "pending_requirements_envelope_digest",
     "pending_review_envelope_digest",
+    "pending_review_expected_header_digest",
     "last_consumed_packet_digest",
     "last_consumed_review_envelope_digest",
     "active_report_digest",
@@ -287,6 +295,7 @@ STATE_TRANSITIONS = {
             "REQUIREMENTS_PENDING",
             "USER_DECISION_REQUIRED",
             "FINAL_VERIFICATION",
+            "BLOCKED",
         }
     ),
     "USER_DECISION_REQUIRED": frozenset(
@@ -1630,6 +1639,7 @@ def _validate_state_fields(
         "pending_approved_requirements_digest",
         "pending_requirements_envelope_digest",
         "pending_review_envelope_digest",
+        "pending_review_expected_header_digest",
         "last_consumed_packet_digest",
         "last_consumed_review_envelope_digest",
         "active_report_digest",
@@ -1722,6 +1732,13 @@ def _validate_state_fields(
     ):
         errors.append(
             f"{name}.pending_review_envelope_digest: is allowed only while review is pending"
+        )
+    if (
+        state.get("phase") != "REVIEW_PENDING"
+        and state.get("pending_review_expected_header_digest") is not None
+    ):
+        errors.append(
+            f"{name}.pending_review_expected_header_digest: is allowed only while review is pending"
         )
     active_revision = state.get("active_requirements_revision")
     active_digest = state.get("active_requirements_digest")
@@ -1966,6 +1983,7 @@ def _expected_requirements_target(
 def _expected_stop_category(
     previous_phase: str,
     current_phase: str,
+    previous_state: dict[str, object],
     current_state: dict[str, object],
 ) -> str | None:
     if previous_phase == "REQUIREMENTS_PENDING":
@@ -1985,6 +2003,17 @@ def _expected_stop_category(
             return "REVIEW_USER_DECISION"
         if decision == "BLOCK":
             return "REVIEW_BLOCK"
+    if previous_phase == "REVIEW_PENDING" and current_phase == "BLOCKED":
+        if (
+            _finding_ids(previous_state) & _finding_ids(current_state)
+            or _fingerprints(previous_state) & _fingerprints(current_state)
+        ):
+            return "REVIEW_REPEATED_BLOCKER"
+        if (
+            current_state.get("latest_decision") == "CHANGES_REQUESTED"
+            and current_state.get("review_round") == MAX_REVIEW_ROUNDS
+        ):
+            return "REVIEW_ROUND_LIMIT"
     if previous_phase == "FINAL_VERIFICATION" and current_phase == "BLOCKED":
         return "FINAL_VERIFICATION_BLOCK"
     return None
@@ -2032,6 +2061,7 @@ def _validate_stop_entry(
     expected_category = _expected_stop_category(
         previous_phase,
         current_phase,
+        previous_state,
         current_state,
     )
     if current_state.get("stop_origin_phase") != previous_phase:
@@ -2483,6 +2513,15 @@ def _validate_review_envelope_consumption(
         errors.append(
             "pending_review_envelope_digest: must clear after review consumption"
         )
+    _require_digest(
+        previous_state.get("pending_review_expected_header_digest"),
+        "pending_review_expected_header_digest",
+        errors,
+    )
+    if current_state.get("pending_review_expected_header_digest") is not None:
+        errors.append(
+            "pending_review_expected_header_digest: must clear after review consumption"
+        )
     for field in ("active_review_packet_digest", "reviewed_snapshot_digest"):
         if previous_state.get(field) is None:
             errors.append(
@@ -2538,6 +2577,18 @@ def _validate_review_transition_context(
     errors.extend(
         f"review_context.transport.{error}" for error in transport_errors
     )
+    expected_digest = _canonical_digest_checked(
+        context["expected"],
+        "review_context.expected",
+        errors,
+    )
+    if (
+        expected_digest is not None
+        and state.get("pending_review_expected_header_digest") != expected_digest
+    ):
+        errors.append(
+            "review_context.pending_review_expected_header_digest: expected header does not match trusted state"
+        )
     review_state = dict(state)
     for field in (
         "latest_decision",
@@ -2550,6 +2601,13 @@ def _validate_review_transition_context(
             review_state[field] = consumed_state[field]
         else:
             review_state.pop(field, None)
+    report = context.get("report")
+    if (
+        isinstance(report, dict)
+        and isinstance(state.get("review_round"), int)
+        and report.get("review_round") == state["review_round"] - 1
+    ):
+        review_state["review_round"] = report["review_round"]
     review_errors = validate_review_context(
         context["envelope"],
         context["requirements"],
@@ -2852,6 +2910,8 @@ def validate_transition(
         errors.append("review_round: must be an integer within the review limit")
 
     valid_review_consumption = False
+    consumes_review = False
+    review_context_valid = False
     if previous_phase and current_phase:
         initial_binding_transition = (
             previous_binding_valid
@@ -3140,7 +3200,6 @@ def validate_transition(
                 "approval_sequence: must preserve consumed approval history"
             )
         consumes_review = previous_phase == "REVIEW_PENDING" and current_phase != previous_phase
-        review_context_valid = False
         if consumes_review:
             review_context_errors = _validate_review_transition_context(
                 review_context,
@@ -3174,6 +3233,16 @@ def validate_transition(
                 expected_target = None
             else:
                 expected_target = _expected_review_target(previous_state, errors)
+                repeated_blocker = previous_round >= 1 and (
+                    _finding_ids(previous_state) & _finding_ids(current_state)
+                    or _fingerprints(previous_state) & _fingerprints(current_state)
+                )
+                round_limit = (
+                    decision == "CHANGES_REQUESTED"
+                    and current_round == MAX_REVIEW_ROUNDS
+                )
+                if repeated_blocker or round_limit:
+                    expected_target = "BLOCKED"
             if expected_target and current_phase != expected_target:
                 errors.append(
                     f"phase: review routing requires transition to {expected_target}, not {current_phase}"
@@ -3232,9 +3301,15 @@ def validate_transition(
                 "final_gate: evidence is allowed only for FINAL_VERIFICATION to COMPLETE"
             )
 
-    if valid_review_consumption and previous_round >= 1 and (
+    if (
+        consumes_review
+        and review_context_valid
+        and current_phase != "BLOCKED"
+        and previous_round >= 1
+        and (
         _finding_ids(previous_state) & _finding_ids(current_state)
         or _fingerprints(previous_state) & _fingerprints(current_state)
+        )
     ):
         errors.append(
             "unresolved_findings: blocker persisted across two consecutive valid review rounds"

@@ -254,6 +254,30 @@ class ControllerCase(unittest.TestCase):
             "Pro",
         )
 
+    def _accept_evidence_request(self) -> dict[str, object]:
+        attempt = self._prepare_valid_review()
+        review = self._valid_changes_review(
+            "PROVIDE_EVIDENCE", "INSUFFICIENT_EVIDENCE", "missing-focused-output"
+        )
+        raw = self._write_review_response(attempt, review)
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        self.assertEqual(result["phase"], "LOCAL_VERIFICATION")
+        return result
+
+    def _prepare_supplemental_review(self) -> dict[str, object]:
+        self._accept_evidence_request()
+        supplemental = self.input_directory / "supplemental.txt"
+        supplemental.write_text("Focused output: 1 test passed.\n", encoding="utf-8")
+        return controller.prepare_review(
+            self.repository, "controller-test", supplemental
+        )
+
     def _seed_evidence_only_route(self) -> dict[str, object]:
         self._build_valid_report()
         state = self._state()
@@ -1230,6 +1254,87 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(self._state_bytes(), before)
         self.assertEqual(list(self._run_dir().glob("expected-attempt-*.json")), [])
 
+    def test_evidence_only_review_accepts_pass_against_prior_round_report(self) -> None:
+        attempt = self._prepare_supplemental_review()
+        raw = self._write_review_response(attempt, self._valid_pass_review())
+
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+
+        self.assertEqual(result["phase"], "FINAL_VERIFICATION")
+        self.assertEqual(result["review_round"], 2)
+
+    def test_evidence_only_review_accepts_new_changes_requested_route(self) -> None:
+        attempt = self._prepare_supplemental_review()
+        review = self._valid_changes_review(
+            "REQUIREMENTS_REVISION", "REQUIREMENTS", "requirements-ambiguity"
+        )
+        review["findings"][0]["id"] = "F-2"
+        raw = self._write_review_response(attempt, review)
+
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+
+        self.assertEqual(result["phase"], "REQUIREMENTS_PENDING")
+        self.assertEqual(result["review_round"], 2)
+
+    def test_accept_review_rejects_valid_shaped_in_reply_to_tampering(self) -> None:
+        attempt = self._prepare_valid_review()
+        expected_path = Path(attempt["expected_header_path"])
+        tampered = controller.load_json(expected_path)
+        tampered["in_reply_to"] = "sha256:" + "a" * 64
+        controller.write_json_atomic(expected_path, tampered)
+        raw = self._write_review_response(attempt, self._valid_pass_review())
+        before = self._state_bytes()
+
+        with self.assertRaises(controller.ControllerError):
+            controller.accept_review(
+                self.repository,
+                "controller-test",
+                raw,
+                self._state()["bound_conversation_url"],
+                "Pro",
+            )
+
+        self.assertEqual(self._state_bytes(), before)
+
+    def test_accept_review_rejects_valid_shaped_prompt_and_expected_tampering(self) -> None:
+        attempt = self._prepare_valid_review()
+        expected_path = Path(attempt["expected_header_path"])
+        tampered = controller.load_json(expected_path)
+        original_digest = tampered["prompt_digest"]
+        tampered_digest = "sha256:" + "b" * 64
+        tampered["prompt_digest"] = tampered_digest
+        controller.write_json_atomic(expected_path, tampered)
+        prompt_path = Path(attempt["prompt_path"])
+        prompt = prompt_path.read_text(encoding="utf-8")
+        prompt_path.write_text(
+            prompt.replace(str(original_digest), tampered_digest), encoding="utf-8"
+        )
+        raw = self._write_review_response(attempt, self._valid_pass_review())
+        before = self._state_bytes()
+
+        with self.assertRaises(controller.ControllerError):
+            controller.accept_review(
+                self.repository,
+                "controller-test",
+                raw,
+                self._state()["bound_conversation_url"],
+                "Pro",
+            )
+
+        self.assertEqual(self._state_bytes(), before)
+
     def test_accept_pass_review_consumes_round_and_routes_to_final_verification(self) -> None:
         attempt = self._prepare_valid_review()
         raw = self._write_review_response(attempt, self._valid_pass_review())
@@ -1447,7 +1552,19 @@ class ControllerCase(unittest.TestCase):
             repeated_attempt,
             self._valid_changes_review("CODE_CHANGE", "CORRECTNESS", "missing-guard"),
         )
-        before = self._state_bytes()
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            repeated_raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        self.assertEqual(result["phase"], "BLOCKED")
+        self.assertEqual(result["review_round"], 2)
+        self.assertEqual(result["next_commands"], [])
+        self.assertEqual(result["stop_origin_category"], "REVIEW_REPEATED_BLOCKER")
+        self.assertEqual(list(self._run_dir().glob("expected-attempt-*.json")), [])
+        self.assertEqual(len(list(self._run_dir().glob("consumed-attempt-*.json"))), 3)
         with self.assertRaises(controller.ControllerError):
             controller.accept_review(
                 self.repository,
@@ -1456,21 +1573,48 @@ class ControllerCase(unittest.TestCase):
                 self._state()["bound_conversation_url"],
                 "Pro",
             )
-        self.assertEqual(self._state_bytes(), before)
-        new_review = self._valid_changes_review(
-            "TEST_CHANGE", "TEST_COVERAGE", "missing-focused-test"
+
+    def test_third_changes_review_durably_stops_before_round_four(self) -> None:
+        first_attempt = self._prepare_valid_review()
+        first_review = self._valid_changes_review(
+            "CODE_CHANGE", "CORRECTNESS", "first-correction"
         )
-        new_review["findings"][0]["id"] = "F-2"
-        new_route_raw = self._write_review_response(repeated_attempt, new_review)
-        result = controller.accept_review(
+        controller.accept_review(
             self.repository,
             "controller-test",
-            new_route_raw,
+            self._write_review_response(first_attempt, first_review),
             self._state()["bound_conversation_url"],
             "Pro",
         )
-        self.assertEqual(result["phase"], "IMPLEMENTING")
-        self.assertEqual(result["review_round"], 2)
+        for value, action, category, key, finding_id in (
+            (2, "TEST_CHANGE", "TEST_COVERAGE", "second-correction", "F-2"),
+            (3, "CODE_CHANGE", "CORRECTNESS", "third-correction", "F-3"),
+        ):
+            (self.repository / "example.py").write_text(
+                f"value = {value}\n", encoding="utf-8"
+            )
+            controller.build_report(
+                self.repository,
+                "controller-test",
+                self._write_local_evidence({"example.py": "Continue AC-1."}),
+            )
+            attempt = controller.prepare_review(self.repository, "controller-test")
+            review = self._valid_changes_review(action, category, key)
+            review["findings"][0]["id"] = finding_id
+            result = controller.accept_review(
+                self.repository,
+                "controller-test",
+                self._write_review_response(attempt, review),
+                self._state()["bound_conversation_url"],
+                "Pro",
+            )
+
+        self.assertEqual(result["phase"], "BLOCKED")
+        self.assertEqual(result["review_round"], 3)
+        self.assertEqual(result["next_commands"], [])
+        self.assertEqual(result["stop_origin_category"], "REVIEW_ROUND_LIMIT")
+        with self.assertRaises(controller.ControllerError):
+            controller.prepare_review(self.repository, "controller-test")
 
     def test_dynamic_path_and_acceptance_ids_are_not_secret_schema_fields(self) -> None:
         requirements = valid_requirements(

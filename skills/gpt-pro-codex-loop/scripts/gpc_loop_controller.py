@@ -460,6 +460,7 @@ def initial_state(
         "resolution_stop_sequence": None,
         "pending_requirements_envelope_digest": None,
         "pending_review_envelope_digest": None,
+        "pending_review_expected_header_digest": None,
         "last_consumed_packet_digest": None,
         "last_consumed_review_envelope_digest": None,
         "active_report_digest": None,
@@ -1168,6 +1169,11 @@ def build_report(
     with run_lock(paths.lock):
         _reconcile_incomplete_transactions(paths)
         state = load_json(paths.state)
+        if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
+            raise ControllerError(
+                "REVIEW_ROUND_LIMIT",
+                "The maximum number of semantic review rounds has been consumed.",
+            )
         if _outstanding_attempts(paths):
             raise ControllerError("OUTSTANDING_ATTEMPT", "An attempt is already outstanding.")
         if state.get("phase") not in {
@@ -1339,6 +1345,11 @@ def prepare_review(
     with run_lock(paths.lock):
         _reconcile_incomplete_transactions(paths)
         state = load_json(paths.state)
+        if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
+            raise ControllerError(
+                "REVIEW_ROUND_LIMIT",
+                "The maximum number of semantic review rounds has been consumed.",
+            )
         if _outstanding_attempts(paths):
             raise ControllerError("OUTSTANDING_ATTEMPT", "A review attempt is already outstanding.")
         evidence_only = supplemental_evidence_path is not None
@@ -1373,7 +1384,7 @@ def prepare_review(
             if state.get("phase") != "REVIEW_PENDING":
                 raise ControllerError("INVALID_PHASE", "Review can be prepared only when pending.")
             requirements, report, snapshot = _active_report_context(paths, state)
-            candidate = state
+            candidate = dict(state)
             template = load_template(_prompt_contract_path(), "Implementation review")
             values = {
                 "REQUIREMENTS_JSON": _canonical_prompt_json(requirements),
@@ -1422,14 +1433,12 @@ def prepare_review(
         )
         rendered = render_prompt(template, values)
         expected["prompt_digest"] = rendered["prompt_digest"]
-        if evidence_only:
-            prompt_path, expected_path = _save_review_attempt_with_state(
-                paths, attempt_number, expected, rendered["prompt"], candidate
-            )
-        else:
-            prompt_path, expected_path = _save_attempt(
-                paths, attempt_number, str(expected["turn_id"]), rendered["prompt"], expected
-            )
+        candidate["pending_review_expected_header_digest"] = (
+            validate_packet.canonical_digest(expected)
+        )
+        prompt_path, expected_path = _save_review_attempt_with_state(
+            paths, attempt_number, expected, rendered["prompt"], candidate
+        )
     return {
         "prompt_path": str(prompt_path),
         "expected_header_path": str(expected_path),
@@ -2032,6 +2041,50 @@ def _review_stop_provenance(
     }
 
 
+def _terminal_review_stop_provenance(
+    state: Mapping[str, object],
+    category: str | None,
+) -> dict[str, object]:
+    if category is None:
+        return {}
+    reasons = {
+        "REVIEW_REPEATED_BLOCKER": (
+            "A blocker persisted across two consecutive valid review rounds."
+        ),
+        "REVIEW_ROUND_LIMIT": (
+            "The maximum number of semantic review rounds was consumed."
+        ),
+    }
+    return {
+        "stop_origin_phase": "REVIEW_PENDING",
+        "stop_origin_category": category,
+        "stop_reason": reasons[category],
+        "stop_sequence": state["stop_sequence"] + 1,
+    }
+
+
+def _is_evidence_only_review(
+    paths: RunPaths,
+    state: Mapping[str, object],
+) -> bool:
+    review_round = state.get("review_round")
+    if (
+        not isinstance(review_round, int)
+        or isinstance(review_round, bool)
+        or review_round < 1
+        or state.get("latest_decision") != "CHANGES_REQUESTED"
+        or state.get("required_actions") != ["PROVIDE_EVIDENCE"]
+        or not isinstance(state.get("active_review_packet_digest"), str)
+    ):
+        return False
+    report = load_json(paths.run / "implementation-report.json")
+    return (
+        report.get("review_round") == review_round - 1
+        and validate_packet.canonical_digest(report)
+        == state.get("active_report_digest")
+    )
+
+
 def accept_review(
     repository: Path,
     task_slug: str,
@@ -2084,6 +2137,14 @@ def accept_review(
             )
         ):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding review attempt is invalid.")
+        if (
+            validate_packet.canonical_digest(expected)
+            != state.get("pending_review_expected_header_digest")
+        ):
+            raise ControllerError(
+                "INVALID_EXPECTED_ATTEMPT",
+                "Outstanding review attempt is invalid.",
+            )
         raw = _read_input(raw_response_path, "review response")
         try:
             envelope = validate_packet.extract_single_json_object(raw)
@@ -2098,7 +2159,14 @@ def accept_review(
         review = envelope.get("payload")
         if not isinstance(review, dict):
             raise ControllerError("INVALID_RESPONSE", "Review response payload is invalid.")
-        requirements, report, snapshot = _active_report_context(paths, state)
+        evidence_only = _is_evidence_only_review(paths, state)
+        requirements, report, snapshot = _active_report_context(
+            paths,
+            state,
+            prior_reviewed_report=evidence_only,
+        )
+        if evidence_only:
+            _active_prior_review(paths, state, requirements, report)
         _raise_validation(
             "INVALID_RESPONSE",
             "Review response payload is invalid.",
@@ -2148,11 +2216,14 @@ def accept_review(
         context = _review_context(
             envelope, expected, consumed, requirements, report, snapshot
         )
+        review_context_state = dict(staged)
+        if evidence_only:
+            review_context_state["review_round"] = review_round - 1
         _raise_validation(
             "INVALID_REVIEW_CONTEXT",
             "Review response failed context validation.",
             validate_packet.validate_review_context(
-                envelope, requirements, report, staged, snapshot
+                envelope, requirements, report, review_context_state, snapshot
             ),
         )
         transition_previous = dict(staged)
@@ -2160,16 +2231,34 @@ def accept_review(
             unresolved_finding_ids=state["unresolved_finding_ids"],
             blocker_fingerprints=state["blocker_fingerprints"],
         )
+        repeated_blocker = review_round >= 1 and (
+            set(state["unresolved_finding_ids"]) & set(finding_ids)
+            or set(state["blocker_fingerprints"]) & set(fingerprints)
+        )
+        terminal_category = (
+            "REVIEW_REPEATED_BLOCKER"
+            if repeated_blocker
+            else (
+                "REVIEW_ROUND_LIMIT"
+                if decision == "CHANGES_REQUESTED"
+                and review_round + 1 == validate_packet.MAX_REVIEW_ROUNDS
+                else None
+            )
+        )
+        if terminal_category is not None:
+            target = "BLOCKED"
         candidate = dict(staged)
         candidate.update(
             phase=target,
             review_round=review_round + 1,
             pending_review_envelope_digest=None,
+            pending_review_expected_header_digest=None,
             last_consumed_packet_digest=envelope_digest,
             last_consumed_review_envelope_digest=envelope_digest,
             **_review_stop_provenance(
                 state, decision, actions, review.get("next_instruction")
             ),
+            **_terminal_review_stop_provenance(state, terminal_category),
         )
         _raise_validation(
             "INVALID_TRANSITION",
@@ -2369,6 +2458,7 @@ def approve_requirements(
             resolution_stop_sequence=state["stop_sequence"],
             review_round=0,
             pending_review_envelope_digest=None,
+            pending_review_expected_header_digest=None,
             active_report_digest=None,
             current_snapshot_digest=None,
             active_review_packet_digest=None,
@@ -2493,6 +2583,11 @@ def next_commands(
     outstanding_attempt: Mapping[str, object] | None,
 ) -> list[str]:
     """Return only commands valid for the current phase and pre-send attempt."""
+    if (
+        state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS
+        and state.get("phase") not in {"FINAL_VERIFICATION", "COMPLETE"}
+    ):
+        return []
     if outstanding_attempt is not None:
         expected = outstanding_attempt.get("expected_header")
         packet_type = expected.get("packet_type") if isinstance(expected, Mapping) else None
