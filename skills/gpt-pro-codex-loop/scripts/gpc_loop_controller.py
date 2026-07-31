@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -466,6 +467,7 @@ def initial_state(
         "reviewed_snapshot_digest": None,
         "baseline_head": preflight["baseline_head"],
         "preflight_digest": validate_packet.canonical_digest(preflight),
+        "nonce_derivation_key": secrets.token_hex(32),
         "approved_existing_paths": sorted(approved_paths),
     }
 
@@ -682,6 +684,7 @@ def _valid_expected_header(
     task_slug: str | None = None,
     packet_type: str | None = None,
     semantic_sequence: int | None = None,
+    expected_nonce: str | None = None,
 ) -> bool:
     if not isinstance(value, dict) or set(value) != EXPECTED_HEADER_FIELDS:
         return False
@@ -695,6 +698,8 @@ def _valid_expected_header(
     ):
         return False
     if NONCE.fullmatch(value["nonce"]) is None:
+        return False
+    if expected_nonce is not None and value["nonce"] != expected_nonce:
         return False
     if task_slug is not None and value["run_id"] != f"gpc-loop-{task_slug}":
         return False
@@ -764,6 +769,7 @@ def _expected_header(
     semantic_sequence: int,
     source_digest: str,
     previous_packet_digest: object,
+    nonce: str,
 ) -> dict[str, object]:
     run_id = f"gpc-loop-{task_slug}"
     turn_id = f"{packet_type}-{semantic_sequence:02d}"
@@ -772,13 +778,36 @@ def _expected_header(
         "packet_type": packet_type,
         "run_id": run_id,
         "turn_id": turn_id,
-        "nonce": secrets.token_hex(16),
+        "nonce": nonce,
         "in_reply_to": validate_packet.canonical_digest(
             {"run_id": run_id, "turn_id": turn_id, "source_digest": source_digest}
         ),
         "prompt_digest": "",
         "previous_packet_digest": previous_packet_digest,
     }
+
+
+def _derive_attempt_nonce(
+    state: Mapping[str, object],
+    task_slug: str,
+    packet_type: str,
+    semantic_sequence: int,
+    attempt_number: int,
+) -> str:
+    """Bind one exact attempt nonce to immutable trusted run provenance."""
+    key = state.get("nonce_derivation_key")
+    if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None:
+        raise ControllerError("INVALID_STATE", "Trusted nonce derivation key is invalid.")
+    message = _canonical_json_bytes(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": f"gpc-loop-{task_slug}",
+            "packet_type": packet_type,
+            "semantic_sequence": semantic_sequence,
+            "attempt_number": attempt_number,
+        }
+    )
+    return hmac.new(bytes.fromhex(key), message, hashlib.sha256).hexdigest()[:32]
 
 
 def _save_attempt(
@@ -900,6 +929,13 @@ def prepare_requirements(
             semantic_sequence,
             source_digest,
             previous_packet_digest,
+            _derive_attempt_nonce(
+                state,
+                task_slug,
+                "requirements",
+                semantic_sequence,
+                attempt_number,
+            ),
         )
         values.update(
             {
@@ -1062,8 +1098,14 @@ def _cleanup_transaction_files(transaction: Path, allowed: set[str]) -> None:
             unexpected,
         )
     try:
-        for path in present:
+        manifest_path = transaction / "manifest.json"
+        for path in sorted(
+            (path for path in present if path != manifest_path),
+            key=lambda path: path.name,
+        ):
             path.unlink()
+        if manifest_path in present:
+            manifest_path.unlink()
         transaction.rmdir()
     except OSError as exc:
         raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not clean transaction.") from exc
@@ -1315,6 +1357,12 @@ def accept_requirements(
             raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
         expected_path = paths.run / str(attempts[0]["name"])
         expected = attempts[0]["expected_header"]
+        attempt_match = ATTEMPT_NAME.fullmatch(expected_path.name)
+        if attempt_match is None:
+            raise ControllerError(
+                "INVALID_EXPECTED_ATTEMPT",
+                "Outstanding requirements attempt name is invalid.",
+            )
         active_revision = state.get("active_requirements_revision")
         semantic_sequence = (
             1
@@ -1328,6 +1376,13 @@ def accept_requirements(
             task_slug=task_slug,
             packet_type="requirements",
             semantic_sequence=semantic_sequence,
+            expected_nonce=_derive_attempt_nonce(
+                state,
+                task_slug,
+                "requirements",
+                semantic_sequence,
+                int(attempt_match.group(1)),
+            ),
         ):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding requirements attempt is invalid.")
         raw = _read_input(raw_response_path, "requirements response")

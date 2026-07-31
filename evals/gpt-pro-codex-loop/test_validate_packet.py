@@ -232,6 +232,7 @@ def valid_state(
     reviewed_snapshot_digest: object = _UNSET_STATE_VALUE,
     baseline_head: object = "a" * 40,
     preflight_digest: object = "sha256:" + "f" * 64,
+    nonce_derivation_key: object = "0" * 64,
     approved_existing_paths: object = None,
 ) -> dict[str, object]:
     if active_requirements_revision is _UNSET_STATE_VALUE:
@@ -339,6 +340,7 @@ def valid_state(
         "reviewed_snapshot_digest": reviewed_snapshot_digest,
         "baseline_head": baseline_head,
         "preflight_digest": preflight_digest,
+        "nonce_derivation_key": nonce_derivation_key,
         "approved_existing_paths": (
             [] if approved_existing_paths is None else approved_existing_paths
         ),
@@ -1785,6 +1787,30 @@ class TransitionTests(unittest.TestCase):
             validate_transition(
                 missing_preflight,
                 valid_state("LOCAL_VERIFICATION", 0),
+            ),
+        )
+        malformed_key = valid_state(
+            "IMPLEMENTING",
+            0,
+            nonce_derivation_key="A" * 64,
+        )
+        self.assertIn(
+            "previous.nonce_derivation_key: must be 64 lowercase hexadecimal characters",
+            validate_transition(
+                malformed_key,
+                valid_state("LOCAL_VERIFICATION", 0),
+            ),
+        )
+        changed_key = valid_state(
+            "LOCAL_VERIFICATION",
+            0,
+            nonce_derivation_key="1" * 64,
+        )
+        self.assertIn(
+            "nonce_derivation_key: must preserve immutable preflight provenance",
+            validate_transition(
+                valid_state("IMPLEMENTING", 0),
+                changed_key,
             ),
         )
 

@@ -629,6 +629,130 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(frozen["phase"], "REQUIREMENTS_FROZEN")
         self.assertEqual(list(paths.transactions.iterdir()), [])
 
+    def test_acceptance_cleanup_interruption_keeps_manifest_for_repeatable_recovery(
+        self,
+    ) -> None:
+        self._freeze_initial_requirements()
+        self._seed_requirements_revision_pending()
+        active_digest = self._state()["active_requirements_digest"]
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=active_digest,
+                change_reason="Clarify the existing behavior without changing it.",
+            ),
+            "revision-cleanup.raw.md",
+        )
+        paths = controller.resolve_run(self.repository, "controller-test")
+        unlink = Path.unlink
+        iterdir = Path.iterdir
+        interrupted = False
+
+        def manifest_first(path: Path):
+            entries = list(iterdir(path))
+            if path.parent == paths.transactions:
+                entries.sort(key=lambda entry: entry.name != "manifest.json")
+            return iter(entries)
+
+        def interrupt_backup_cleanup(
+            path: Path, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal interrupted
+            if path.name.startswith("backup-") and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt("simulated cleanup interruption")
+            unlink(path, *args, **kwargs)
+
+        with (
+            patch.object(Path, "iterdir", new=manifest_first),
+            patch.object(Path, "unlink", new=interrupt_backup_cleanup),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                controller.accept_requirements(
+                    self.repository,
+                    "controller-test",
+                    raw,
+                    self._state()["bound_conversation_url"],
+                    "Pro",
+                )
+
+        transaction = next(paths.transactions.iterdir())
+        self.assertTrue((transaction / "manifest.json").is_file())
+        self.assertTrue(
+            any(path.name.startswith("backup-") for path in transaction.iterdir())
+        )
+        self.assertEqual(self._state()["phase"], "REQUIREMENTS_FROZEN")
+        for _ in range(2):
+            with self.assertRaisesRegex(controller.ControllerError, "pending"):
+                controller.prepare_requirements(self.repository, "controller-test")
+        self.assertEqual(list(paths.transactions.iterdir()), [])
+
+    def test_approval_cleanup_interruption_keeps_manifest_for_repeatable_recovery(
+        self,
+    ) -> None:
+        self._freeze_initial_requirements()
+        self._seed_requirements_revision_pending()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=self._state()["active_requirements_digest"],
+                decision="NEED_USER_INPUT",
+                behavior_changed=True,
+                user_approval_required=True,
+                prior_evidence_invalidated=True,
+                review_round_reset=True,
+            ),
+            "revision-approval-cleanup.raw.md",
+        )
+        controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        paths = controller.resolve_run(self.repository, "controller-test")
+        approval = self.repository / "approval-cleanup.txt"
+        approval.write_text("Approved exact material proposal.\n", encoding="utf-8")
+        unlink = Path.unlink
+        iterdir = Path.iterdir
+        interrupted = False
+
+        def manifest_first(path: Path):
+            entries = list(iterdir(path))
+            if path.parent == paths.transactions:
+                entries.sort(key=lambda entry: entry.name != "manifest.json")
+            return iter(entries)
+
+        def interrupt_backup_cleanup(
+            path: Path, *args: object, **kwargs: object
+        ) -> None:
+            nonlocal interrupted
+            if path.name.startswith("backup-") and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt("simulated cleanup interruption")
+            unlink(path, *args, **kwargs)
+
+        with (
+            patch.object(Path, "iterdir", new=manifest_first),
+            patch.object(Path, "unlink", new=interrupt_backup_cleanup),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                controller.approve_requirements(
+                    self.repository, "controller-test", approval
+                )
+
+        transaction = next(paths.transactions.iterdir())
+        self.assertTrue((transaction / "manifest.json").is_file())
+        self.assertTrue(
+            any(path.name.startswith("backup-") for path in transaction.iterdir())
+        )
+        self.assertEqual(self._state()["phase"], "REQUIREMENTS_FROZEN")
+        for _ in range(2):
+            with self.assertRaisesRegex(controller.ControllerError, "pending"):
+                controller.prepare_requirements(self.repository, "controller-test")
+        self.assertEqual(list(paths.transactions.iterdir()), [])
+
     def test_initial_requirements_need_user_input_preserves_proposal(self) -> None:
         self._init_run()
         _, raw = self._prepare_raw_requirements(
@@ -808,3 +932,26 @@ class ControllerCase(unittest.TestCase):
                         "https://chatgpt.com/c/controller-test",
                         "Pro",
                     )
+
+    def test_tampered_expected_nonce_is_rejected_even_when_shape_is_valid(self) -> None:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected_path = Path(attempt["expected_header_path"])
+        tampered = controller.load_json(expected_path)
+        replacement = "0" * 32
+        if tampered["nonce"] == replacement:
+            replacement = "1" * 32
+        tampered["nonce"] = replacement
+        controller.write_json_atomic(expected_path, tampered)
+        raw = self.repository / "tampered-valid-nonce.raw.md"
+        write_raw_envelope(raw, tampered, valid_requirements())
+        before = self._state_bytes()
+        with self.assertRaisesRegex(controller.ControllerError, "attempt"):
+            controller.accept_requirements(
+                self.repository,
+                "controller-test",
+                raw,
+                "https://chatgpt.com/c/controller-test",
+                "Pro",
+            )
+        self.assertEqual(self._state_bytes(), before)

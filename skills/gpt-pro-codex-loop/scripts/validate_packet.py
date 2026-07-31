@@ -231,6 +231,7 @@ REQUIRED_STATE_FIELDS = (
     "reviewed_snapshot_digest",
     "baseline_head",
     "preflight_digest",
+    "nonce_derivation_key",
     "approved_existing_paths",
 )
 OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
@@ -1649,6 +1650,14 @@ def _validate_state_fields(
             f"{name}.preflight_digest",
             errors,
         )
+    nonce_derivation_key = state.get("nonce_derivation_key")
+    if "nonce_derivation_key" in state and (
+        not isinstance(nonce_derivation_key, str)
+        or re.fullmatch(r"[0-9a-f]{64}", nonce_derivation_key) is None
+    ):
+        errors.append(
+            f"{name}.nonce_derivation_key: must be 64 lowercase hexadecimal characters"
+        )
     baseline_head = state.get("baseline_head")
     if "baseline_head" in state and (
         not isinstance(baseline_head, str)
@@ -2921,6 +2930,7 @@ def validate_transition(
         for field in (
             "baseline_head",
             "preflight_digest",
+            "nonce_derivation_key",
             "approved_existing_paths",
         ):
             if current_state.get(field) != previous_state.get(field):

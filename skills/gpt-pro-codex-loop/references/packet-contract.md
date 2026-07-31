@@ -281,9 +281,12 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "reviewed_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "baseline_head": "1111111111111111111111111111111111111111",
   "preflight_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "nonce_derivation_key": "0000000000000000000000000000000000000000000000000000000000000000",
   "approved_existing_paths": []
 }
 ```
+
+`nonce_derivation_key` is immutable, local-only preparation provenance. The controller derives each exact attempt nonce from it and the trusted run, packet, semantic-turn, and attempt identities; acceptance recomputes that nonce instead of trusting the mutable expected-attempt file.
 
 After envelope and report checks pass, the controller constructs this complete state as an ephemeral candidate using the validated review payload, pending envelope digest, routed actions, and locally derived history. Run `review-context` against that candidate. Only after it passes may the controller atomically replace persisted `state.json`; never mutate persisted trusted state before candidate validation. `REVIEW_PENDING -> FINAL_VERIFICATION` then consumes the pending envelope: increment round, move its digest to both consumed fields, clear pending identity, and preserve active report/review/snapshot digests. Other routes populate their candidate actions and derived history before validation and the corresponding edge. Never hand-author or persist a partial state.
 
