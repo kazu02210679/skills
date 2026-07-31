@@ -964,6 +964,406 @@ def prepare_requirements(
     }
 
 
+LOCAL_EVIDENCE_FIELDS = {
+    "schema_version",
+    "changed_file_intents",
+    "intent_summary",
+    "acceptance_evidence",
+    "test_commands",
+    "diff_evidence",
+    "omissions",
+    "unresolved_risks_or_blockers",
+}
+LOCAL_EVIDENCE_COMMAND_FIELDS = {"command", "outcome", "output_summary"}
+FORBIDDEN_EVIDENCE_FIELD_NAMES = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "session",
+    "session_id",
+    "token",
+}
+
+
+def _require_nonempty_string(value: object, field: str, errors: list[str]) -> None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{field}: must be a non-empty string")
+
+
+def _validate_evidence_strings(value: object, field: str, errors: list[str]) -> None:
+    if not isinstance(value, list):
+        errors.append(f"{field}: must be a list of non-empty strings")
+        return
+    for index, item in enumerate(value):
+        _require_nonempty_string(item, f"{field}.{index}", errors)
+
+
+def _forbidden_evidence_field_names(value: object, field: str = "") -> list[str]:
+    errors: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                errors.append(f"{field}: evidence field names must be strings")
+                continue
+            normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+            if normalized in FORBIDDEN_EVIDENCE_FIELD_NAMES:
+                errors.append(f"{field}{key}: credential or session fields are forbidden")
+            errors.extend(_forbidden_evidence_field_names(item, f"{field}{key}."))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            errors.extend(_forbidden_evidence_field_names(item, f"{field}{index}."))
+    return errors
+
+
+def _load_local_evidence(
+    path: Path, requirements: Mapping[str, object]
+) -> dict[str, object]:
+    evidence = load_json(path)
+    errors: list[str] = []
+    if set(evidence) != LOCAL_EVIDENCE_FIELDS:
+        errors.append("local evidence: contains unknown or missing fields")
+    if type(evidence.get("schema_version")) is not int or evidence.get("schema_version") != SCHEMA_VERSION:
+        errors.append("schema_version: must be 1")
+    errors.extend(_forbidden_evidence_field_names(evidence))
+
+    intents = evidence.get("changed_file_intents")
+    if not isinstance(intents, dict):
+        errors.append("changed_file_intents: must be an object")
+    else:
+        for path_name, intent in intents.items():
+            _require_nonempty_string(path_name, "changed_file_intents path", errors)
+            _require_nonempty_string(intent, f"changed_file_intents.{path_name}", errors)
+    _require_nonempty_string(evidence.get("intent_summary"), "intent_summary", errors)
+
+    acceptance_ids = {
+        item.get("id")
+        for item in requirements.get("acceptance_criteria", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    acceptance_evidence = evidence.get("acceptance_evidence")
+    if not isinstance(acceptance_evidence, dict):
+        errors.append("acceptance_evidence: must be an object")
+    else:
+        for acceptance_id in sorted(acceptance_ids - set(acceptance_evidence)):
+            errors.append(f"acceptance_evidence.{acceptance_id}: missing acceptance evidence")
+        for acceptance_id, entries in acceptance_evidence.items():
+            if acceptance_id not in acceptance_ids:
+                errors.append(f"acceptance_evidence.{acceptance_id}: unknown acceptance ID")
+            if not isinstance(entries, list) or not entries:
+                errors.append(
+                    f"acceptance_evidence.{acceptance_id}: must be a non-empty list of non-empty strings"
+                )
+            else:
+                _validate_evidence_strings(entries, f"acceptance_evidence.{acceptance_id}", errors)
+
+    commands = evidence.get("test_commands")
+    if not isinstance(commands, list):
+        errors.append("test_commands: must be a list")
+    else:
+        for index, command in enumerate(commands):
+            if not isinstance(command, dict) or set(command) != LOCAL_EVIDENCE_COMMAND_FIELDS:
+                errors.append(f"test_commands.{index}: contains unknown or missing fields")
+                continue
+            for key in LOCAL_EVIDENCE_COMMAND_FIELDS:
+                _require_nonempty_string(command.get(key), f"test_commands.{index}.{key}", errors)
+    for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
+        _validate_evidence_strings(evidence.get(field), field, errors)
+    _raise_validation("INVALID_LOCAL_EVIDENCE", "Local evidence is invalid.", sorted(set(errors)))
+    return evidence
+
+
+def _active_requirements(paths: RunPaths, state: Mapping[str, object]) -> dict[str, object]:
+    requirements = load_json(paths.run / "requirements.json")
+    requirements_errors = validate_packet.validate_requirements(requirements)
+    _raise_validation(
+        "INVALID_STATE", "Stored requirements are invalid.", requirements_errors
+    )
+    if validate_packet.canonical_digest(requirements) != state.get("active_requirements_digest"):
+        raise ControllerError("INVALID_STATE", "Stored requirements do not match trusted state.")
+    if requirements.get("requirements_revision") != state.get("active_requirements_revision"):
+        raise ControllerError("INVALID_STATE", "Stored requirements revision does not match trusted state.")
+    return requirements
+
+
+def _capture_snapshot(paths: RunPaths, state: Mapping[str, object]) -> dict[str, object]:
+    try:
+        return capture_snapshot.capture_snapshot(
+            paths.repository, str(state["baseline_head"]), load_json(paths.preflight)
+        )
+    except (capture_snapshot.SnapshotError, KeyError) as exc:
+        raise ControllerError("SNAPSHOT_FAILED", "Could not capture the implementation snapshot.") from exc
+
+
+def _snapshot_changed_file_intents(
+    snapshot: Mapping[str, object], evidence: Mapping[str, object]
+) -> list[dict[str, object]]:
+    discovered = snapshot.get("changed_files")
+    intents = evidence.get("changed_file_intents")
+    if not isinstance(discovered, list) or not isinstance(intents, dict):
+        raise ControllerError("INVALID_LOCAL_EVIDENCE", "Local evidence is invalid.")
+    paths: list[str] = []
+    changed_files: list[dict[str, object]] = []
+    for index, item in enumerate(discovered):
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ControllerError("SNAPSHOT_FAILED", "Captured snapshot has invalid changed files.")
+        path = item["path"]
+        if path in paths:
+            raise ControllerError("SNAPSHOT_FAILED", "Captured snapshot has duplicate changed file paths.")
+        paths.append(path)
+        intent = intents.get(path)
+        if not isinstance(intent, str) or not intent.strip():
+            continue
+        changed_files.append({**item, "intent": intent})
+    if set(intents) != set(paths) or len(changed_files) != len(paths):
+        raise ControllerError(
+            "INVALID_LOCAL_EVIDENCE",
+            "changed_file_intents must match captured changed file paths exactly.",
+        )
+    return changed_files
+
+
+def _advance_report_phase(state: Mapping[str, object]) -> dict[str, object]:
+    current = dict(state)
+    routes = {
+        "REQUIREMENTS_FROZEN": "IMPLEMENTING",
+        "IMPLEMENTING": "LOCAL_VERIFICATION",
+        "LOCAL_VERIFICATION": "REVIEW_PENDING",
+    }
+    while current.get("phase") in routes:
+        candidate = dict(current)
+        candidate["phase"] = routes[str(current["phase"])]
+        _raise_validation(
+            "INVALID_TRANSITION",
+            "Report construction failed state validation.",
+            validate_packet.validate_transition(current, candidate),
+        )
+        current = candidate
+    if current.get("phase") != "REVIEW_PENDING":
+        raise ControllerError("INVALID_PHASE", "A report can be built only before review.")
+    return current
+
+
+def _append_event(paths: RunPaths, event: Mapping[str, object]) -> str:
+    prior = _read_input(paths.events, "controller events")
+    return prior + _canonical_json_bytes(dict(event)).decode("utf-8")
+
+
+def build_report(
+    repository: Path,
+    task_slug: str,
+    local_evidence_path: Path,
+) -> dict[str, object]:
+    """Build a snapshot-bound implementation report from closed local evidence."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _reconcile_incomplete_transactions(paths)
+        state = load_json(paths.state)
+        if _outstanding_attempts(paths):
+            raise ControllerError("OUTSTANDING_ATTEMPT", "An attempt is already outstanding.")
+        if state.get("phase") not in {
+            "REQUIREMENTS_FROZEN",
+            "IMPLEMENTING",
+            "LOCAL_VERIFICATION",
+        }:
+            raise ControllerError("INVALID_PHASE", "A report can be built only before review.")
+        requirements = _active_requirements(paths, state)
+        evidence = _load_local_evidence(local_evidence_path, requirements)
+        snapshot = _capture_snapshot(paths, state)
+        changed_files = _snapshot_changed_file_intents(snapshot, evidence)
+        report = {
+            "schema_version": SCHEMA_VERSION,
+            "baseline_head": state["baseline_head"],
+            "requirements_revision": state["active_requirements_revision"],
+            "requirements_digest": state["active_requirements_digest"],
+            "review_round": state["review_round"],
+            "snapshot_digest": snapshot["snapshot_digest"],
+            "tracked_diff_digest": snapshot["tracked_diff_digest"],
+            "untracked_manifest_digest": snapshot["untracked_manifest_digest"],
+            "changed_files": changed_files,
+            "intent_summary": evidence["intent_summary"],
+            "acceptance_evidence": evidence["acceptance_evidence"],
+            "test_commands": evidence["test_commands"],
+            "diff_evidence": evidence["diff_evidence"],
+            "omissions": evidence["omissions"],
+            "unresolved_risks_or_blockers": evidence["unresolved_risks_or_blockers"],
+        }
+        candidate = _advance_report_phase(state)
+        candidate.update(
+            active_report_digest=validate_packet.canonical_digest(report),
+            current_snapshot_digest=snapshot["snapshot_digest"],
+        )
+        context_errors = validate_packet.validate_report_context(
+            report, requirements, candidate, snapshot
+        )
+        _raise_validation(
+            "INVALID_REPORT", "Implementation report failed context validation.", context_errors
+        )
+        report_path = paths.run / "implementation-report.json"
+        snapshot_path = paths.run / "snapshot.json"
+        events = _append_event(
+            paths,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "event": "REPORT_BUILT",
+                "report_digest": candidate["active_report_digest"],
+                "snapshot_digest": candidate["current_snapshot_digest"],
+            },
+        )
+        _commit_artifacts_then_state(
+            paths,
+            [(snapshot_path, snapshot), (report_path, report), (paths.events, events)],
+            candidate,
+            replaceable_artifacts=frozenset({snapshot_path, report_path, paths.events}),
+        )
+    return {
+        "report_path": str(report_path),
+        "snapshot_path": str(snapshot_path),
+        "report_digest": candidate["active_report_digest"],
+        "snapshot_digest": candidate["current_snapshot_digest"],
+    }
+
+
+def _active_report_context(
+    paths: RunPaths, state: Mapping[str, object]
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    requirements = _active_requirements(paths, state)
+    report = load_json(paths.run / "implementation-report.json")
+    snapshot = load_json(paths.run / "snapshot.json")
+    _raise_validation(
+        "INVALID_REPORT", "Active implementation report failed context validation.",
+        validate_packet.validate_report_context(report, requirements, state, snapshot),
+    )
+    return requirements, report, snapshot
+
+
+def _save_review_attempt_with_state(
+    paths: RunPaths,
+    attempt_number: int,
+    expected: Mapping[str, object],
+    prompt: str,
+    state: dict[str, object],
+) -> tuple[Path, Path]:
+    turn_id = expected.get("turn_id")
+    if not isinstance(turn_id, str):
+        raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Review attempt is invalid.")
+    prompt_path = paths.run / "prompts" / f"{turn_id}-attempt-{attempt_number:02d}.md"
+    expected_path = paths.run / f"expected-attempt-{attempt_number:02d}.json"
+    _commit_artifacts_then_state(paths, [(prompt_path, prompt), (expected_path, dict(expected))], state)
+    return prompt_path, expected_path
+
+
+def prepare_review(
+    repository: Path,
+    task_slug: str,
+    supplemental_evidence_path: Path | None = None,
+) -> dict[str, object]:
+    """Persist a correlated review prompt without using Browser interactions."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _reconcile_incomplete_transactions(paths)
+        state = load_json(paths.state)
+        if _outstanding_attempts(paths):
+            raise ControllerError("OUTSTANDING_ATTEMPT", "A review attempt is already outstanding.")
+        evidence_only = supplemental_evidence_path is not None
+        if evidence_only:
+            if state.get("phase") != "LOCAL_VERIFICATION" or state.get("required_actions") != ["PROVIDE_EVIDENCE"]:
+                raise ControllerError("INVALID_PHASE", "Evidence-only review requires only PROVIDE_EVIDENCE.")
+            supplemental = _read_input(supplemental_evidence_path, "supplemental evidence")
+            if not supplemental.strip():
+                raise ControllerError("INVALID_SUPPLEMENTAL_EVIDENCE", "Supplemental evidence must not be empty.")
+            candidate = dict(state)
+            candidate["phase"] = "REVIEW_PENDING"
+            requirements, report, snapshot = _active_report_context(paths, candidate)
+            fresh_snapshot = _capture_snapshot(paths, candidate)
+            if fresh_snapshot.get("snapshot_digest") != snapshot.get("snapshot_digest"):
+                raise ControllerError("SNAPSHOT_CHANGED", "Evidence-only review requires an unchanged product snapshot.")
+            _raise_validation(
+                "INVALID_TRANSITION",
+                "Evidence-only review failed state validation.",
+                validate_packet.validate_transition(state, candidate),
+            )
+            template = load_template(_prompt_contract_path(), "Evidence-only supplementation")
+            values: dict[str, str | Template] = {
+                "SNAPSHOT_DIGEST": str(snapshot["snapshot_digest"]),
+                "REQUIREMENTS_JSON": _canonical_prompt_json(requirements),
+                "PRIOR_REVIEW_JSON": _canonical_prompt_json(report),
+                "SUPPLEMENTAL_EVIDENCE": supplemental,
+            }
+        else:
+            if state.get("phase") != "REVIEW_PENDING":
+                raise ControllerError("INVALID_PHASE", "Review can be prepared only when pending.")
+            requirements, report, snapshot = _active_report_context(paths, state)
+            candidate = state
+            template = load_template(_prompt_contract_path(), "Implementation review")
+            values = {
+                "REQUIREMENTS_JSON": _canonical_prompt_json(requirements),
+                "REQUIREMENTS_DIGEST": str(state["active_requirements_digest"]),
+                "IMPLEMENTATION_REPORT_JSON": _canonical_prompt_json(report),
+                "SNAPSHOT_DIGEST": str(snapshot["snapshot_digest"]),
+            }
+        shared = load_template(_prompt_contract_path(), "Shared envelope instruction")
+        attempt_number = _attempt_number(paths)
+        semantic_sequence = int(state["review_round"]) + 1
+        previous_packet_digest = state.get("last_consumed_packet_digest")
+        if not isinstance(previous_packet_digest, str):
+            raise ControllerError("INVALID_STATE", "Review requires a trusted packet-chain head.")
+        source_digest = validate_packet.canonical_digest(
+            {
+                "requirements_digest": state["active_requirements_digest"],
+                "report_digest": state["active_report_digest"],
+                "snapshot_digest": snapshot["snapshot_digest"],
+                "supplemental_evidence": _normalize_text(supplemental) if evidence_only else None,
+            }
+        )
+        expected = _expected_header(
+            task_slug,
+            "review",
+            semantic_sequence,
+            source_digest,
+            previous_packet_digest,
+            _derive_attempt_nonce(
+                state, task_slug, "review", semantic_sequence, attempt_number
+            ),
+        )
+        values.update(
+            {
+                "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REVIEW": shared,
+                "PACKET_TYPE": "review",
+                "RUN_ID": str(expected["run_id"]),
+                "TURN_ID": str(expected["turn_id"]),
+                "NONCE": str(expected["nonce"]),
+                "IN_REPLY_TO_DIGEST": str(expected["in_reply_to"]),
+                "PREVIOUS_PACKET_DIGEST_OR_NULL": previous_packet_digest,
+            }
+        )
+        rendered = render_prompt(template, values)
+        expected["prompt_digest"] = rendered["prompt_digest"]
+        if evidence_only:
+            prompt_path, expected_path = _save_review_attempt_with_state(
+                paths, attempt_number, expected, rendered["prompt"], candidate
+            )
+        else:
+            prompt_path, expected_path = _save_attempt(
+                paths, attempt_number, str(expected["turn_id"]), rendered["prompt"], expected
+            )
+    return {
+        "prompt_path": str(prompt_path),
+        "expected_header_path": str(expected_path),
+        "prompt_digest": expected["prompt_digest"],
+        "nonce": expected["nonce"],
+        "turn_id": expected["turn_id"],
+    }
+
+
 REQUIREMENTS_TARGETS = {
     "PLAN_READY": "REQUIREMENTS_FROZEN",
     "NEED_USER_INPUT": "USER_DECISION_REQUIRED",

@@ -104,10 +104,10 @@ class ControllerCase(unittest.TestCase):
             check=True,
             capture_output=True,
         )
-        input_directory = Path(self.temporary.name) / "controller-inputs"
-        input_directory.mkdir()
-        self.request = input_directory / "request.txt"
-        self.context = input_directory / "context.txt"
+        self.input_directory = Path(self.temporary.name) / "controller-inputs"
+        self.input_directory.mkdir()
+        self.request = self.input_directory / "request.txt"
+        self.context = self.input_directory / "context.txt"
         self.request.write_text("Add deterministic behavior.\n", encoding="utf-8")
         self.context.write_text("The repository uses Python.\n", encoding="utf-8")
 
@@ -135,7 +135,7 @@ class ControllerCase(unittest.TestCase):
         self._init_run()
         attempt = controller.prepare_requirements(self.repository, "controller-test")
         expected = controller.load_json(Path(attempt["expected_header_path"]))
-        raw = self.repository / "requirements.raw.md"
+        raw = self.input_directory / "requirements.raw.md"
         write_raw_envelope(raw, expected, valid_requirements())
         return controller.accept_requirements(
             self.repository,
@@ -144,6 +144,41 @@ class ControllerCase(unittest.TestCase):
             "https://chatgpt.com/c/controller-test",
             "Pro",
         )
+
+    def _write_local_evidence(
+        self, intents: dict[str, str], **overrides: object
+    ) -> Path:
+        path = self.input_directory / "local-evidence.json"
+        value: dict[str, object] = {
+            "schema_version": 1,
+            "changed_file_intents": intents,
+            "intent_summary": "Implement AC-1.",
+            "acceptance_evidence": {"AC-1": ["Focused unittest passed."]},
+            "test_commands": [
+                {
+                    "command": "python -m unittest test_example.py -v",
+                    "outcome": "PASS",
+                    "output_summary": "1 test passed.",
+                }
+            ],
+            "diff_evidence": ["example.py implements AC-1."],
+            "omissions": [],
+            "unresolved_risks_or_blockers": [],
+        }
+        value.update(overrides)
+        path.write_text(
+            json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _build_valid_report(self, **evidence_overrides: object) -> dict[str, object]:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        evidence = self._write_local_evidence(
+            {"example.py": "Implement AC-1."}, **evidence_overrides
+        )
+        return controller.build_report(self.repository, "controller-test", evidence)
 
     def _seed_requirements_revision_pending(self) -> None:
         state = self._state()
@@ -178,7 +213,7 @@ class ControllerCase(unittest.TestCase):
             ),
         )
         expected = controller.load_json(Path(attempt["expected_header_path"]))
-        raw = self.repository / name
+        raw = self.input_directory / name
         write_raw_envelope(raw, expected, payload)
         return expected, raw
 
@@ -955,3 +990,44 @@ class ControllerCase(unittest.TestCase):
                 "Pro",
             )
         self.assertEqual(self._state_bytes(), before)
+
+    def test_build_report_fills_controller_owned_fields_and_binds_snapshot(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        evidence = self._write_local_evidence({"example.py": "Implement AC-1."})
+        result = controller.build_report(self.repository, "controller-test", evidence)
+        report = controller.load_json(Path(result["report_path"]))
+        snapshot = controller.load_json(Path(result["snapshot_path"]))
+        self.assertEqual(report["snapshot_digest"], snapshot["snapshot_digest"])
+        self.assertEqual(
+            report["requirements_digest"],
+            self._state()["active_requirements_digest"],
+        )
+        self.assertEqual(self._state()["phase"], "REVIEW_PENDING")
+
+    def test_build_report_rejects_missing_and_extra_changed_path_intents(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        for intents in ({}, {"example.py": "Implement AC-1.", "ghost.py": "extra"}):
+            with self.subTest(intents=intents):
+                evidence = self._write_local_evidence(intents)
+                before = self._state_bytes()
+                with self.assertRaisesRegex(controller.ControllerError, "changed_file_intents"):
+                    controller.build_report(self.repository, "controller-test", evidence)
+                self.assertEqual(self._state_bytes(), before)
+
+    def test_prepare_review_binds_active_requirements_report_and_snapshot(self) -> None:
+        self._build_valid_report()
+        result = controller.prepare_review(self.repository, "controller-test")
+        expected = controller.load_json(Path(result["expected_header_path"]))
+        prompt = Path(result["prompt_path"]).read_text(encoding="utf-8")
+        self.assertEqual(expected["packet_type"], "review")
+        self.assertEqual(
+            expected["previous_packet_digest"],
+            self._state()["last_consumed_packet_digest"],
+        )
+        self.assertIn(self._state()["active_requirements_digest"], prompt)
+        self.assertEqual(
+            controller.status_run(self.repository, "controller-test")["next_commands"],
+            ["accept-review", "abandon-attempt"],
+        )
