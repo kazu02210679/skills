@@ -165,6 +165,23 @@ class ControllerCase(unittest.TestCase):
         )
         return path
 
+    def _prepare_raw_requirements(
+        self, payload: dict[str, object], name: str = "requirements.raw.md"
+    ) -> tuple[dict[str, object], Path]:
+        attempt = controller.prepare_requirements(
+            self.repository,
+            "controller-test",
+            conflict_evidence_path=(
+                self._write_conflict()
+                if payload.get("requirements_revision") != 1
+                else None
+            ),
+        )
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.repository / name
+        write_raw_envelope(raw, expected, payload)
+        return expected, raw
+
     def test_resolve_run_rejects_traversal_and_separator_slugs(self) -> None:
         for slug in ("../escape", r"a\b", "a/b", ".", "..", "a\nb"):
             with self.subTest(slug=slug):
@@ -506,3 +523,288 @@ class ControllerCase(unittest.TestCase):
         )
         self.assertEqual(frozen["phase"], "REQUIREMENTS_FROZEN")
         self.assertEqual(frozen["review_round"], 0)
+
+    def test_acceptance_rolls_back_if_state_publish_fails(self) -> None:
+        self._init_run()
+        expected, raw = self._prepare_raw_requirements(valid_requirements())
+        paths = controller.resolve_run(self.repository, "controller-test")
+        before = paths.state.read_bytes()
+        replace = controller.os.replace
+
+        def fail_state_publish(source: object, destination: object) -> None:
+            if Path(destination) == paths.state:
+                raise OSError("injected state publish failure")
+            replace(source, destination)
+
+        with patch.object(controller.os, "replace", side_effect=fail_state_publish):
+            with self.assertRaisesRegex(controller.ControllerError, "commit"):
+                controller.accept_requirements(
+                    self.repository,
+                    "controller-test",
+                    raw,
+                    "https://chatgpt.com/c/controller-test",
+                    "Pro",
+                )
+        self.assertEqual(paths.state.read_bytes(), before)
+        self.assertTrue(Path(self._run_dir() / "expected-attempt-01.json").is_file())
+        self.assertFalse((paths.run / "envelope-01.json").exists())
+        self.assertFalse((paths.run / "requirements-revision-01.json").exists())
+        self.assertFalse((paths.run / "requirements.json").exists())
+        self.assertFalse((paths.run / "responses" / f"{expected['turn_id']}.raw.md").exists())
+        self.assertEqual(list(paths.transactions.iterdir()), [])
+
+    def test_acceptance_recovers_interrupted_publish_on_restart(self) -> None:
+        self._init_run()
+        _, raw = self._prepare_raw_requirements(valid_requirements())
+        paths = controller.resolve_run(self.repository, "controller-test")
+        replace = controller.os.replace
+
+        def interrupt_state_publish(source: object, destination: object) -> None:
+            if Path(destination) == paths.state:
+                raise KeyboardInterrupt("simulated process interruption")
+            replace(source, destination)
+
+        with patch.object(controller.os, "replace", side_effect=interrupt_state_publish):
+            with self.assertRaises(KeyboardInterrupt):
+                controller.accept_requirements(
+                    self.repository,
+                    "controller-test",
+                    raw,
+                    "https://chatgpt.com/c/controller-test",
+                    "Pro",
+                )
+        result = controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            "Pro",
+        )
+        self.assertEqual(result["phase"], "REQUIREMENTS_FROZEN")
+        self.assertEqual(list(paths.transactions.iterdir()), [])
+
+    def test_approval_recovers_interrupted_publish_on_restart(self) -> None:
+        self._freeze_initial_requirements()
+        self._seed_requirements_revision_pending()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=self._state()["active_requirements_digest"],
+                decision="NEED_USER_INPUT",
+                behavior_changed=True,
+                user_approval_required=True,
+                prior_evidence_invalidated=True,
+                review_round_reset=True,
+            ),
+            "revision.raw.md",
+        )
+        controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        paths = controller.resolve_run(self.repository, "controller-test")
+        prior_active = (paths.run / "requirements.json").read_bytes()
+        approval = self.repository / "approval.txt"
+        approval.write_text("The user approved this exact proposal.\n", encoding="utf-8")
+        replace = controller.os.replace
+
+        def interrupt_state_publish(source: object, destination: object) -> None:
+            if Path(destination) == paths.state:
+                raise KeyboardInterrupt("simulated process interruption")
+            replace(source, destination)
+
+        with patch.object(controller.os, "replace", side_effect=interrupt_state_publish):
+            with self.assertRaises(KeyboardInterrupt):
+                controller.approve_requirements(
+                    self.repository, "controller-test", approval
+                )
+        self.assertEqual(self._state()["phase"], "USER_DECISION_REQUIRED")
+        self.assertNotEqual((paths.run / "requirements.json").read_bytes(), prior_active)
+        frozen = controller.approve_requirements(
+            self.repository, "controller-test", approval
+        )
+        self.assertEqual(frozen["phase"], "REQUIREMENTS_FROZEN")
+        self.assertEqual(list(paths.transactions.iterdir()), [])
+
+    def test_initial_requirements_need_user_input_preserves_proposal(self) -> None:
+        self._init_run()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                decision="NEED_USER_INPUT",
+                change_reason="A product choice remains open.",
+                open_questions=["Which behavior should be selected?"],
+            )
+        )
+        result = controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            "Pro",
+        )
+        self.assertEqual(result["phase"], "USER_DECISION_REQUIRED")
+        state = self._state()
+        self.assertEqual(state["pending_requirements_revision"], 1)
+        self.assertEqual(
+            state["pending_requirements_digest"],
+            controller.validate_packet.canonical_digest(valid_requirements(
+                decision="NEED_USER_INPUT",
+                change_reason="A product choice remains open.",
+                open_questions=["Which behavior should be selected?"],
+            )),
+        )
+
+    def test_initial_requirements_block_is_a_valid_terminal_route(self) -> None:
+        self._init_run()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                decision="BLOCK",
+                change_reason="Repository evidence is insufficient.",
+            )
+        )
+        result = controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            "Pro",
+        )
+        self.assertEqual(result["phase"], "BLOCKED")
+        self.assertIsNone(self._state()["active_requirements_digest"])
+
+    def test_requirements_revision_block_preserves_active_and_clears_proposal(self) -> None:
+        self._freeze_initial_requirements()
+        active_digest = self._state()["active_requirements_digest"]
+        self._seed_requirements_revision_pending()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=active_digest,
+                decision="BLOCK",
+                change_reason="The revision cannot be made safely.",
+            ),
+            "revision-block.raw.md",
+        )
+        result = controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        self.assertEqual(result["phase"], "BLOCKED")
+        state = self._state()
+        self.assertEqual(state["active_requirements_digest"], active_digest)
+        self.assertIsNone(state["pending_requirements_revision"])
+        self.assertIsNone(state["pending_requirements_digest"])
+
+    def test_material_approval_clears_every_review_binding(self) -> None:
+        self._freeze_initial_requirements()
+        state = self._state()
+        review_head = "sha256:" + "9" * 64
+        state.update(
+            phase="REQUIREMENTS_PENDING",
+            review_round=2,
+            latest_decision="CHANGES_REQUESTED",
+            latest_requirements_decision=None,
+            required_actions=["REQUIREMENTS_REVISION"],
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["sha256:" + "4" * 64],
+            active_report_digest="sha256:" + "1" * 64,
+            current_snapshot_digest="sha256:" + "2" * 64,
+            active_review_packet_digest="sha256:" + "3" * 64,
+            reviewed_snapshot_digest="sha256:" + "2" * 64,
+            last_consumed_packet_digest=review_head,
+            last_consumed_review_envelope_digest=review_head,
+        )
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=state["active_requirements_digest"],
+                decision="NEED_USER_INPUT",
+                behavior_changed=True,
+                user_approval_required=True,
+                prior_evidence_invalidated=True,
+                review_round_reset=True,
+            ),
+            "revision-reset.raw.md",
+        )
+        controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            state["bound_conversation_url"],
+            "Pro",
+        )
+        requirements_head = self._state()["last_consumed_packet_digest"]
+        approval = self.repository / "approval-reset.txt"
+        approval.write_text("Approved exact material proposal.\n", encoding="utf-8")
+        controller.approve_requirements(self.repository, "controller-test", approval)
+        frozen = self._state()
+        self.assertEqual(frozen["review_round"], 0)
+        self.assertEqual(frozen["latest_decision"], None)
+        self.assertEqual(frozen["required_actions"], [])
+        self.assertEqual(frozen["unresolved_finding_ids"], [])
+        self.assertEqual(frozen["blocker_fingerprints"], [])
+        for field in (
+            "pending_review_envelope_digest",
+            "active_report_digest",
+            "current_snapshot_digest",
+            "active_review_packet_digest",
+            "reviewed_snapshot_digest",
+        ):
+            with self.subTest(field=field):
+                self.assertIsNone(frozen[field])
+        self.assertEqual(frozen["last_consumed_packet_digest"], requirements_head)
+        self.assertEqual(frozen["last_consumed_review_envelope_digest"], review_head)
+
+    def test_tampered_expected_turn_id_cannot_escape_run(self) -> None:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected_path = Path(attempt["expected_header_path"])
+        expected = controller.load_json(expected_path)
+        expected["turn_id"] = "../../escape"
+        controller.write_json_atomic(expected_path, expected)
+        raw = self.repository / "traversal.raw.md"
+        write_raw_envelope(raw, expected, valid_requirements())
+        before = self._state_bytes()
+        with self.assertRaisesRegex(controller.ControllerError, "attempt"):
+            controller.accept_requirements(
+                self.repository,
+                "controller-test",
+                raw,
+                "https://chatgpt.com/c/controller-test",
+                "Pro",
+            )
+        self.assertEqual(self._state_bytes(), before)
+        self.assertFalse((self._run_dir().parent / "escape.raw.md").exists())
+
+    def test_tampered_expected_identifiers_are_rejected(self) -> None:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected_path = Path(attempt["expected_header_path"])
+        original = controller.load_json(expected_path)
+        cases = (
+            ("run_id", "gpc-loop-other"),
+            ("turn_id", "requirements-99"),
+            ("nonce", "not-a-generated-nonce"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                tampered = dict(original)
+                tampered[field] = value
+                controller.write_json_atomic(expected_path, tampered)
+                raw = self.repository / f"tampered-{field}.raw.md"
+                write_raw_envelope(raw, tampered, valid_requirements())
+                with self.assertRaisesRegex(controller.ControllerError, "attempt"):
+                    controller.accept_requirements(
+                        self.repository,
+                        "controller-test",
+                        raw,
+                        "https://chatgpt.com/c/controller-test",
+                        "Pro",
+                    )

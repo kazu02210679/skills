@@ -25,8 +25,9 @@ import validate_packet
 SCHEMA_VERSION = 1
 TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
 TEMPLATE_TOKEN = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
-ATTEMPT_NAME = re.compile(r"(?:expected|abandoned)-attempt-(\d+)\.json\Z")
+ATTEMPT_NAME = re.compile(r"(?:expected|abandoned|consumed)-attempt-(\d+)\.json\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+NONCE = re.compile(r"[0-9a-f]{32}\Z")
 MAX_ABANDON_EVIDENCE_BYTES = 8192
 EXPECTED_HEADER_FIELDS = {
     "schema_version",
@@ -676,7 +677,12 @@ def _canonical_prompt_json(value: object) -> str:
         raise ControllerError("INVALID_PROMPT_VALUE", "Prompt value is not canonical JSON.") from exc
 
 
-def _valid_expected_header(value: object) -> bool:
+def _valid_expected_header(
+    value: object,
+    task_slug: str | None = None,
+    packet_type: str | None = None,
+    semantic_sequence: int | None = None,
+) -> bool:
     if not isinstance(value, dict) or set(value) != EXPECTED_HEADER_FIELDS:
         return False
     if type(value.get("schema_version")) is not int or value["schema_version"] != SCHEMA_VERSION:
@@ -686,6 +692,16 @@ def _valid_expected_header(value: object) -> bool:
     if any(
         not isinstance(value.get(field), str) or not value[field]
         for field in ("run_id", "turn_id", "nonce")
+    ):
+        return False
+    if NONCE.fullmatch(value["nonce"]) is None:
+        return False
+    if task_slug is not None and value["run_id"] != f"gpc-loop-{task_slug}":
+        return False
+    if packet_type is not None and value["packet_type"] != packet_type:
+        return False
+    if semantic_sequence is not None and value["turn_id"] != (
+        f"{value['packet_type']}-{semantic_sequence:02d}"
     ):
         return False
     if any(
@@ -838,6 +854,7 @@ def prepare_requirements(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
+        _reconcile_incomplete_transactions(paths)
         state = load_json(paths.state)
         if state.get("phase") != "REQUIREMENTS_PENDING":
             raise ControllerError("INVALID_PHASE", "Requirements can be prepared only when pending.")
@@ -995,6 +1012,200 @@ def _requirements_revision_path(paths: RunPaths, revision: int) -> Path:
     return paths.run / f"requirements-revision-{revision:02d}.json"
 
 
+def _run_relative_path(paths: RunPaths, path: Path) -> str:
+    resolved = Path(path).resolve(strict=False)
+    run = paths.run.resolve(strict=False)
+    if not _is_contained(resolved, run) or resolved == run:
+        raise ControllerError("UNSAFE_ARTIFACT_PATH", "Controller artifact path escapes the run directory.")
+    return resolved.relative_to(run).as_posix()
+
+
+def _manifest_run_path(paths: RunPaths, value: object) -> Path:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise ControllerError("INVALID_TRANSACTION", "Transaction contains an invalid run path.")
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or ".." in relative.parts or "." in relative.parts:
+        raise ControllerError("INVALID_TRANSACTION", "Transaction contains an unsafe run path.")
+    resolved = Path(paths.run, *relative.parts).resolve(strict=False)
+    if not _is_contained(resolved, paths.run.resolve(strict=False)):
+        raise ControllerError("INVALID_TRANSACTION", "Transaction run path escapes the run directory.")
+    return resolved
+
+
+def _transaction_file(transaction: Path, value: object) -> Path:
+    if (
+        not isinstance(value, str)
+        or PurePosixPath(value).name != value
+        or not re.fullmatch(r"(?:artifact|backup)-[0-9]{2}\.bin|state\.next", value)
+    ):
+        raise ControllerError("INVALID_TRANSACTION", "Transaction contains an invalid staged path.")
+    return transaction / value
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return sha256_bytes(path.read_bytes())
+    except OSError as exc:
+        raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not read transaction artifact.") from exc
+
+
+def _cleanup_transaction_files(transaction: Path, allowed: set[str]) -> None:
+    try:
+        present = list(transaction.iterdir())
+    except OSError as exc:
+        raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not inspect transaction.") from exc
+    unexpected = [path.name for path in present if not path.is_file() or path.name not in allowed]
+    if unexpected:
+        raise ControllerError(
+            "INVALID_TRANSACTION",
+            "Transaction contains unexpected recovery artifacts.",
+            unexpected,
+        )
+    try:
+        for path in present:
+            path.unlink()
+        transaction.rmdir()
+    except OSError as exc:
+        raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not clean transaction.") from exc
+
+
+def _recover_transaction(paths: RunPaths, transaction: Path) -> None:
+    manifest_path = transaction / "manifest.json"
+    if not manifest_path.is_file():
+        _cleanup_transaction_files(
+            transaction,
+            {
+                path.name
+                for path in transaction.iterdir()
+                if path.is_file()
+                and re.fullmatch(r"artifact-[0-9]{2}\.bin|state\.next", path.name)
+            },
+        )
+        return
+    manifest = load_json(manifest_path)
+    if set(manifest) != {
+        "schema_version",
+        "operations",
+        "attempt_rename",
+        "old_state_digest",
+        "new_state_digest",
+    } or manifest.get("schema_version") != SCHEMA_VERSION:
+        raise ControllerError("INVALID_TRANSACTION", "Transaction recovery manifest is invalid.")
+    operations = manifest.get("operations")
+    if not isinstance(operations, list):
+        raise ControllerError("INVALID_TRANSACTION", "Transaction operations are invalid.")
+    parsed: list[tuple[Path, Path, Path | None, str, str | None]] = []
+    allowed = {"manifest.json", "state.next"}
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict) or set(operation) != {
+            "destination",
+            "stage",
+            "backup",
+            "new_digest",
+            "old_digest",
+        }:
+            raise ControllerError("INVALID_TRANSACTION", "Transaction operation is invalid.")
+        destination = _manifest_run_path(paths, operation["destination"])
+        stage = _transaction_file(transaction, operation["stage"])
+        backup_value = operation["backup"]
+        backup = None if backup_value is None else _transaction_file(transaction, backup_value)
+        new_digest = operation["new_digest"]
+        old_digest = operation["old_digest"]
+        if not isinstance(new_digest, str) or DIGEST.fullmatch(new_digest) is None:
+            raise ControllerError("INVALID_TRANSACTION", "Transaction new digest is invalid.")
+        if old_digest is not None and (
+            not isinstance(old_digest, str) or DIGEST.fullmatch(old_digest) is None
+        ):
+            raise ControllerError("INVALID_TRANSACTION", "Transaction old digest is invalid.")
+        if (backup is None) != (old_digest is None):
+            raise ControllerError("INVALID_TRANSACTION", "Transaction backup provenance is invalid.")
+        allowed.add(stage.name)
+        if backup is not None:
+            allowed.add(backup.name)
+        parsed.append((destination, stage, backup, new_digest, old_digest))
+
+    attempt = manifest.get("attempt_rename")
+    attempt_paths: tuple[Path, Path] | None = None
+    if attempt is not None:
+        if not isinstance(attempt, dict) or set(attempt) != {"source", "destination"}:
+            raise ControllerError("INVALID_TRANSACTION", "Attempt rename is invalid.")
+        attempt_paths = (
+            _manifest_run_path(paths, attempt["source"]),
+            _manifest_run_path(paths, attempt["destination"]),
+        )
+    old_state_digest = manifest.get("old_state_digest")
+    new_state_digest = manifest.get("new_state_digest")
+    if any(
+        not isinstance(value, str) or DIGEST.fullmatch(value) is None
+        for value in (old_state_digest, new_state_digest)
+    ):
+        raise ControllerError("INVALID_TRANSACTION", "Transaction state digests are invalid.")
+    state_digest = _file_digest(paths.state)
+    if state_digest == new_state_digest:
+        for destination, _, _, new_digest, _ in parsed:
+            if not destination.is_file() or _file_digest(destination) != new_digest:
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Committed transaction is missing a published artifact.",
+                )
+        if attempt_paths is not None:
+            source, destination = attempt_paths
+            if source.exists() or not destination.is_file():
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Committed transaction has an incomplete attempt rename.",
+                )
+        _cleanup_transaction_files(transaction, allowed)
+        return
+    if state_digest != old_state_digest:
+        raise ControllerError(
+            "TRANSACTION_RECOVERY_FAILED",
+            "Transaction state matches neither committed nor rollback provenance.",
+        )
+
+    if attempt_paths is not None:
+        source, destination = attempt_paths
+        if destination.exists() and not source.exists():
+            os.replace(destination, source)
+        elif destination.exists() and source.exists():
+            raise ControllerError(
+                "TRANSACTION_RECOVERY_FAILED", "Attempt rename has two live copies."
+            )
+    for destination, _, backup, new_digest, old_digest in reversed(parsed):
+        if backup is None:
+            if destination.exists():
+                if _file_digest(destination) != new_digest:
+                    raise ControllerError(
+                        "TRANSACTION_RECOVERY_FAILED",
+                        "Unowned artifact blocks transaction rollback.",
+                    )
+                destination.unlink()
+            continue
+        if backup.exists():
+            if destination.exists():
+                if _file_digest(destination) != new_digest:
+                    raise ControllerError(
+                        "TRANSACTION_RECOVERY_FAILED",
+                        "Replaceable artifact changed during transaction rollback.",
+                    )
+                destination.unlink()
+            os.replace(backup, destination)
+        if not destination.is_file() or _file_digest(destination) != old_digest:
+            raise ControllerError(
+                "TRANSACTION_RECOVERY_FAILED",
+                "Replaceable artifact backup could not be restored.",
+            )
+    _cleanup_transaction_files(transaction, allowed)
+
+
+def _reconcile_incomplete_transactions(paths: RunPaths) -> None:
+    if not paths.transactions.is_dir():
+        return
+    for transaction in sorted(paths.transactions.iterdir()):
+        if transaction.is_dir() and transaction.name.startswith("consume-"):
+            _recover_transaction(paths, transaction)
+
+
 def _commit_artifacts_then_state(
     paths: RunPaths,
     artifacts: Sequence[tuple[Path, str | dict[str, object]]],
@@ -1002,33 +1213,74 @@ def _commit_artifacts_then_state(
     consumed_attempt: Path | None = None,
     replaceable_artifacts: frozenset[Path] = frozenset(),
 ) -> None:
-    """Atomically stage all artifacts and publish state only after they exist."""
+    """Publish a recoverable artifact transaction with trusted state last."""
     transaction = paths.transactions / f"consume-{os.getpid()}-{time.time_ns()}"
     transaction.mkdir()
-    staged: list[tuple[Path, os.stat_result]] = []
+    operations: list[dict[str, object]] = []
     try:
-        for destination, value in artifacts:
+        for index, (destination, value) in enumerate(artifacts):
+            destination_relative = _run_relative_path(paths, destination)
             if destination.exists() and destination not in replaceable_artifacts:
                 raise ControllerError("ARTIFACT_EXISTS", "Controller artifact already exists.")
             destination.parent.mkdir(exist_ok=True)
-            stage = transaction / destination.name
+            stage = transaction / f"artifact-{index:02d}.bin"
             if isinstance(value, str):
                 write_text_atomic(stage, value)
             else:
                 write_json_atomic(stage, value)
-            staged.append(_owned_path(stage))
-            os.replace(stage, destination)
-        state_stage = transaction / "state.json"
+            existed = destination.is_file()
+            backup = f"backup-{index:02d}.bin" if existed else None
+            operations.append(
+                {
+                    "destination": destination_relative,
+                    "stage": stage.name,
+                    "backup": backup,
+                    "new_digest": _file_digest(stage),
+                    "old_digest": _file_digest(destination) if existed else None,
+                }
+            )
+        state_stage = transaction / "state.next"
         write_json_atomic(state_stage, state)
-        staged.append(_owned_path(state_stage))
+        attempt_rename = None
         if consumed_attempt is not None:
+            source_relative = _run_relative_path(paths, consumed_attempt)
             consumed_name = consumed_attempt.name.replace("expected-", "consumed-")
-            os.replace(consumed_attempt, paths.run / consumed_name)
+            consumed_destination = paths.run / consumed_name
+            destination_relative = _run_relative_path(paths, consumed_destination)
+            if consumed_destination.exists():
+                raise ControllerError("ARTIFACT_EXISTS", "Consumed attempt receipt already exists.")
+            attempt_rename = {
+                "source": source_relative,
+                "destination": destination_relative,
+            }
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "operations": operations,
+            "attempt_rename": attempt_rename,
+            "old_state_digest": _file_digest(paths.state),
+            "new_state_digest": _file_digest(state_stage),
+        }
+        write_json_atomic(transaction / "manifest.json", manifest)
+        for operation in operations:
+            destination = _manifest_run_path(paths, operation["destination"])
+            stage = _transaction_file(transaction, operation["stage"])
+            if operation["backup"] is not None:
+                backup = _transaction_file(transaction, operation["backup"])
+                os.replace(destination, backup)
+            os.replace(stage, destination)
+        if attempt_rename is not None:
+            os.replace(
+                _manifest_run_path(paths, attempt_rename["source"]),
+                _manifest_run_path(paths, attempt_rename["destination"]),
+            )
         os.replace(state_stage, paths.state)
     except OSError as exc:
+        _recover_transaction(paths, transaction)
         raise ControllerError("WRITE_FAILED", "Could not commit controller acceptance artifacts.") from exc
-    finally:
-        _cleanup_owned_transaction(transaction, staged)
+    except ControllerError:
+        _recover_transaction(paths, transaction)
+        raise
+    _recover_transaction(paths, transaction)
 
 
 def accept_requirements(
@@ -1043,6 +1295,7 @@ def accept_requirements(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
+        _reconcile_incomplete_transactions(paths)
         state = load_json(paths.state)
         if state.get("phase") != "REQUIREMENTS_PENDING":
             raise ControllerError("INVALID_PHASE", "Requirements can be accepted only when pending.")
@@ -1062,7 +1315,20 @@ def accept_requirements(
             raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
         expected_path = paths.run / str(attempts[0]["name"])
         expected = attempts[0]["expected_header"]
-        if not _valid_expected_header(expected) or expected.get("packet_type") != "requirements":
+        active_revision = state.get("active_requirements_revision")
+        semantic_sequence = (
+            1
+            if active_revision is None
+            else active_revision + 1
+            if isinstance(active_revision, int) and not isinstance(active_revision, bool)
+            else -1
+        )
+        if not _valid_expected_header(
+            expected,
+            task_slug=task_slug,
+            packet_type="requirements",
+            semantic_sequence=semantic_sequence,
+        ):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding requirements attempt is invalid.")
         raw = _read_input(raw_response_path, "requirements response")
         try:
@@ -1093,7 +1359,7 @@ def accept_requirements(
         staged_previous = dict(state)
         staged_previous["pending_requirements_envelope_digest"] = envelope_digest
         is_revision = state.get("active_requirements_digest") is not None
-        if is_revision:
+        if is_revision or decision == "NEED_USER_INPUT":
             staged_previous.update(
                 pending_requirements_revision=requirements["requirements_revision"],
                 pending_requirements_digest=requirements_digest,
@@ -1132,6 +1398,16 @@ def accept_requirements(
                 stop_reason=requirements["change_reason"],
                 stop_sequence=state["stop_sequence"] + 1,
             )
+        if target == "BLOCKED" and is_revision:
+            candidate.update(
+                pending_requirements_revision=None,
+                pending_requirements_digest=None,
+                pending_supersedes_digest=None,
+                pending_approval_sequence=None,
+                pending_approved_requirements_digest=None,
+                pending_user_approval_evidence=None,
+                **{field: False for field in validate_packet.MATERIAL_REVISION_FLAGS},
+            )
         if target == "REQUIREMENTS_FROZEN":
             candidate.update(
                 active_requirements_revision=requirements["requirements_revision"],
@@ -1152,8 +1428,9 @@ def accept_requirements(
         )
         _raise_validation("INVALID_TRANSITION", "Requirements acceptance failed state validation.", transition_errors)
         revision = requirements["requirements_revision"]
+        trusted_turn_id = f"requirements-{semantic_sequence:02d}"
         artifacts: list[tuple[Path, str | dict[str, object]]] = [
-            (paths.run / "responses" / f"{expected['turn_id']}.raw.md", raw),
+            (paths.run / "responses" / f"{trusted_turn_id}.raw.md", raw),
             (paths.run / f"envelope-{revision:02d}.json", envelope),
             (_requirements_revision_path(paths, revision), requirements),
         ]
@@ -1181,6 +1458,7 @@ def approve_requirements(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
+        _reconcile_incomplete_transactions(paths)
         state = load_json(paths.state)
         if (
             state.get("phase") != "USER_DECISION_REQUIRED"
@@ -1208,7 +1486,11 @@ def approve_requirements(
         candidate = dict(state)
         candidate.update(
             phase="REQUIREMENTS_FROZEN",
+            latest_decision=None,
             latest_requirements_decision=None,
+            required_actions=[],
+            unresolved_finding_ids=[],
+            blocker_fingerprints=[],
             active_requirements_revision=revision,
             active_requirements_digest=digest,
             approval_sequence=state["approval_sequence"] + 1,
@@ -1225,6 +1507,11 @@ def approve_requirements(
             resolution_evidence=receipt,
             resolution_stop_sequence=state["stop_sequence"],
             review_round=0,
+            pending_review_envelope_digest=None,
+            active_report_digest=None,
+            current_snapshot_digest=None,
+            active_review_packet_digest=None,
+            reviewed_snapshot_digest=None,
         )
         context = _requirements_context(
             envelope,
@@ -1297,6 +1584,7 @@ def abandon_attempt(
         "utf-8", errors="ignore"
     )
     with run_lock(paths.lock):
+        _reconcile_incomplete_transactions(paths)
         attempts = _outstanding_attempts(paths)
         if len(attempts) != 1:
             raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
@@ -1356,6 +1644,8 @@ def next_commands(
         return (
             ["approve-requirements"]
             if state["stop_origin_category"] == "REQUIREMENTS_NEED_USER_INPUT"
+            and state.get("user_approval_required") is True
+            and isinstance(state.get("active_requirements_revision"), int)
             else []
         )
     return {

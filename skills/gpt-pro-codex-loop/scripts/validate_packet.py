@@ -85,6 +85,19 @@ PENDING_REVISION_PROVENANCE_FIELDS = (
     "pending_user_approval_evidence",
     *MATERIAL_REVISION_FLAGS,
 )
+MATERIAL_RESET_NULL_FIELDS = (
+    "latest_decision",
+    "pending_review_envelope_digest",
+    "active_report_digest",
+    "current_snapshot_digest",
+    "active_review_packet_digest",
+    "reviewed_snapshot_digest",
+)
+MATERIAL_RESET_EMPTY_LIST_FIELDS = (
+    "required_actions",
+    "unresolved_finding_ids",
+    "blocker_fingerprints",
+)
 STOP_PHASES = frozenset({"USER_DECISION_REQUIRED", "BLOCKED"})
 STOP_ORIGIN_CATEGORIES = frozenset(
     {
@@ -1428,6 +1441,43 @@ def _is_initial_unbound_requirements(state: dict[str, object]) -> bool:
     )
 
 
+def _is_initial_requirements_stop(state: dict[str, object]) -> bool:
+    """Return whether initial requirements were consumed into a valid stop route."""
+    category = state.get("stop_origin_category")
+    decision = state.get("latest_requirements_decision")
+    return (
+        state.get("phase") in STOP_PHASES
+        and state.get("stop_origin_phase") == "REQUIREMENTS_PENDING"
+        and category in {"REQUIREMENTS_NEED_USER_INPUT", "REQUIREMENTS_BLOCK"}
+        and decision
+        == (
+            "NEED_USER_INPUT"
+            if category == "REQUIREMENTS_NEED_USER_INPUT"
+            else "BLOCK"
+        )
+        and state.get("review_round") == 0
+        and state.get("active_requirements_revision") is None
+        and state.get("active_requirements_digest") is None
+        and isinstance(state.get("last_consumed_packet_digest"), str)
+        and bool(DIGEST_PATTERN.fullmatch(state["last_consumed_packet_digest"]))
+    )
+
+
+def _is_initial_requirements_candidate(state: dict[str, object]) -> bool:
+    """Return whether a prevalidated initial proposal is awaiting consumption."""
+    return (
+        state.get("phase") == "REQUIREMENTS_PENDING"
+        and state.get("review_round") == 0
+        and state.get("active_requirements_revision") is None
+        and state.get("active_requirements_digest") is None
+        and state.get("pending_requirements_revision") == 1
+        and isinstance(state.get("pending_requirements_digest"), str)
+        and bool(DIGEST_PATTERN.fullmatch(state["pending_requirements_digest"]))
+        and state.get("pending_supersedes_digest") is None
+        and state.get("last_consumed_packet_digest") is None
+    )
+
+
 def _validate_conversation_binding(
     state: dict[str, object], name: str, errors: list[str]
 ) -> bool:
@@ -1679,7 +1729,11 @@ def _validate_state_fields(
             errors.append(
                 f"{name}.active_requirements: must be null during preflight"
             )
-    elif _is_initial_unbound_requirements(state):
+    elif (
+        _is_initial_unbound_requirements(state)
+        or _is_initial_requirements_candidate(state)
+        or _is_initial_requirements_stop(state)
+    ):
         pass
     elif (
         not isinstance(active_revision, int)
@@ -2330,6 +2384,25 @@ def _validate_requirements_promotion(
             errors.append(
                 "review_round: approved material revision must reset the review round to zero"
             )
+        for field in MATERIAL_RESET_NULL_FIELDS:
+            if current_state.get(field) is not None:
+                errors.append(
+                    f"{field}: approved material revision must clear stale review state"
+                )
+        for field in MATERIAL_RESET_EMPTY_LIST_FIELDS:
+            if current_state.get(field) != []:
+                errors.append(
+                    f"{field}: approved material revision must clear stale review history"
+                )
+        if direct_stop_approval:
+            for field in (
+                "last_consumed_packet_digest",
+                "last_consumed_review_envelope_digest",
+            ):
+                if current_state.get(field) != previous_state.get(field):
+                    errors.append(
+                        f"{field}: approved material revision must preserve consumed history"
+                    )
     elif (
         current_state.get("approval_sequence")
         != previous_state.get("approval_sequence")

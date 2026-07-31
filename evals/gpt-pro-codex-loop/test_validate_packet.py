@@ -2128,13 +2128,12 @@ class TransitionTests(unittest.TestCase):
         frozen = valid_state(
             "REQUIREMENTS_FROZEN",
             0,
-            latest_decision="CHANGES_REQUESTED",
             latest_requirements_decision="PLAN_READY",
-            required_actions=["REQUIREMENTS_REVISION"],
             active_requirements_revision=2,
             active_requirements_digest="sha256:" + "b" * 64,
             approval_sequence=1,
             last_consumed_packet_digest=REQ_ENVELOPE_DIGEST,
+            last_consumed_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
         )
         self.assertIn(
             "requirements_context: explicit composed context is required for requirements consumption",
@@ -2746,6 +2745,12 @@ class TransitionTests(unittest.TestCase):
             resolution_evidence=approval_receipt,
             resolution_stop_sequence=1,
         )
+        frozen["last_consumed_packet_digest"] = stopped[
+            "last_consumed_packet_digest"
+        ]
+        frozen["last_consumed_review_envelope_digest"] = stopped[
+            "last_consumed_review_envelope_digest"
+        ]
         self.assertEqual(validate_transition(stopped, frozen), [])
         implementation_state = valid_state(
             "LOCAL_VERIFICATION",
@@ -3550,6 +3555,74 @@ class TransitionTests(unittest.TestCase):
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, prompt_contract)
+
+    def test_material_approval_must_clear_review_bindings_and_preserve_history(self) -> None:
+        active_digest = "sha256:" + "a" * 64
+        proposal_digest = "sha256:" + "6" * 64
+        requirements_head = "sha256:" + "7" * 64
+        review_head = "sha256:" + "8" * 64
+        stopped = valid_state(
+            "USER_DECISION_REQUIRED",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            latest_requirements_decision="NEED_USER_INPUT",
+            required_actions=["REQUIREMENTS_REVISION"],
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["sha256:" + "9" * 64],
+            active_requirements_revision=1,
+            active_requirements_digest=active_digest,
+            pending_requirements_revision=2,
+            pending_requirements_digest=proposal_digest,
+            pending_supersedes_digest=active_digest,
+            behavior_changed=True,
+            user_approval_required=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+            stop_origin_phase="REQUIREMENTS_PENDING",
+            stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
+            stop_reason="Material requirements need approval.",
+            stop_sequence=1,
+            last_consumed_packet_digest=requirements_head,
+            last_consumed_review_envelope_digest=review_head,
+            active_report_digest="sha256:" + "1" * 64,
+            current_snapshot_digest="sha256:" + "2" * 64,
+            active_review_packet_digest="sha256:" + "3" * 64,
+            reviewed_snapshot_digest="sha256:" + "2" * 64,
+        )
+        receipt = f"user-approval:stop-1:{proposal_digest}"
+        frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            active_requirements_revision=2,
+            active_requirements_digest=proposal_digest,
+            approval_sequence=1,
+            stop_sequence=1,
+            resolution_evidence=receipt,
+            resolution_stop_sequence=1,
+            last_consumed_packet_digest=requirements_head,
+            last_consumed_review_envelope_digest=review_head,
+        )
+        self.assertEqual(validate_transition(stopped, frozen), [])
+        cases = (
+            ("latest_decision", "CHANGES_REQUESTED", "clear stale review state"),
+            ("required_actions", ["REQUIREMENTS_REVISION"], "clear stale review history"),
+            ("unresolved_finding_ids", ["F-1"], "clear stale review history"),
+            ("blocker_fingerprints", ["sha256:" + "9" * 64], "clear stale review history"),
+            ("pending_review_envelope_digest", "sha256:" + "4" * 64, "clear stale review state"),
+            ("active_report_digest", "sha256:" + "1" * 64, "clear stale review state"),
+            ("current_snapshot_digest", "sha256:" + "2" * 64, "clear stale review state"),
+            ("active_review_packet_digest", "sha256:" + "3" * 64, "clear stale review state"),
+            ("reviewed_snapshot_digest", "sha256:" + "2" * 64, "clear stale review state"),
+            ("last_consumed_packet_digest", "sha256:" + "5" * 64, "preserve consumed history"),
+            ("last_consumed_review_envelope_digest", "sha256:" + "5" * 64, "preserve consumed history"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                tampered = dict(frozen)
+                tampered[field] = value
+                self.assertTrue(
+                    any(message in error for error in validate_transition(stopped, tampered))
+                )
 
 
 if __name__ == "__main__":
