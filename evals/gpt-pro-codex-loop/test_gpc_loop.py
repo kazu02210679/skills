@@ -234,6 +234,19 @@ class ControllerCase(unittest.TestCase):
         with self.assertRaisesRegex(controller.ControllerError, "missing"):
             controller.parse_template("plain\n", {"USER_REQUEST"})
 
+    def test_template_rejects_unmatched_incomplete_and_multiline_braces(self) -> None:
+        malformed = (
+            "{{USER_REQUEST}}\n{{BROKEN}\n",
+            "{{USER_REQUEST}}\nBROKEN}}\n",
+            "{{USER_REQUEST}}\n{{BROKEN\nTOKEN}}\n",
+            "{{USER_REQUEST}}\n{{\n",
+            "{{USER_REQUEST}}\n}}\n",
+        )
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(controller.ControllerError, "malformed"):
+                    controller.parse_template(raw, {"USER_REQUEST"})
+
     def test_prepare_requirements_persists_expected_header_before_return(self) -> None:
         self._init_run()
         result = controller.prepare_requirements(self.repository, "controller-test")
@@ -280,3 +293,45 @@ class ControllerCase(unittest.TestCase):
         )
         replacement = controller.prepare_requirements(self.repository, "controller-test")
         self.assertNotEqual(result["nonce"], replacement["nonce"])
+
+    def test_tampered_abandoned_receipts_keep_the_semantic_turn_blocked(self) -> None:
+        self._init_run()
+        controller.prepare_requirements(self.repository, "controller-test")
+        evidence = self.repository / "not-sent.txt"
+        evidence.write_text("The composer remained empty.\n", encoding="utf-8")
+        abandoned = controller.abandon_attempt(
+            self.repository, "controller-test", "NOT_SENT", evidence
+        )
+        receipt_path = Path(abandoned["abandoned_attempt_path"])
+        receipt = controller.load_json(receipt_path)
+        tampered_receipts = {
+            "missing fields": {"status": "ABANDONED_NOT_SENT"},
+            "unknown field": {**receipt, "unknown": True},
+            "wrong schema type": {**receipt, "schema_version": True},
+            "wrong header digest": {
+                **receipt,
+                "expected_header_digest": "sha256:" + "0" * 64,
+            },
+            "wrong copied nonce": {**receipt, "nonce": "tampered"},
+            "wrong copied prompt digest": {
+                **receipt,
+                "prompt_digest": "sha256:" + "1" * 64,
+            },
+            "wrong evidence type": {**receipt, "evidence": ["not sent"]},
+            "wrong timestamp type": {**receipt, "abandoned_at_unix": True},
+        }
+        for name, tampered in tampered_receipts.items():
+            with self.subTest(name=name):
+                controller.write_json_atomic(receipt_path, tampered)
+                status = controller.status_run(self.repository, "controller-test")
+                self.assertEqual(status["next_commands"], [])
+                with self.assertRaisesRegex(controller.ControllerError, "outstanding"):
+                    controller.prepare_requirements(self.repository, "controller-test")
+
+        controller.write_json_atomic(receipt_path, receipt)
+        malformed_sequence_receipt = receipt_path.with_name("abandoned-attempt-99.json")
+        controller.write_json_atomic(
+            malformed_sequence_receipt, {"status": "ABANDONED_NOT_SENT"}
+        )
+        with self.assertRaisesRegex(controller.ControllerError, "abandoned"):
+            controller.prepare_requirements(self.repository, "controller-test")

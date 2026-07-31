@@ -25,7 +25,28 @@ SCHEMA_VERSION = 1
 TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
 TEMPLATE_TOKEN = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 ATTEMPT_NAME = re.compile(r"(?:expected|abandoned)-attempt-(\d+)\.json\Z")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 MAX_ABANDON_EVIDENCE_BYTES = 8192
+EXPECTED_HEADER_FIELDS = {
+    "schema_version",
+    "packet_type",
+    "run_id",
+    "turn_id",
+    "nonce",
+    "in_reply_to",
+    "prompt_digest",
+    "previous_packet_digest",
+}
+ABANDONED_ATTEMPT_FIELDS = {
+    "schema_version",
+    "status",
+    "expected_header",
+    "expected_header_digest",
+    "nonce",
+    "prompt_digest",
+    "evidence",
+    "abandoned_at_unix",
+}
 
 TEMPLATE_TOKENS = {
     "Shared envelope instruction": {
@@ -227,6 +248,9 @@ def _parse_template(
     for placeholder in re.finditer(r"\{\{[^{}\n]*\}\}", normalized):
         if TEMPLATE_TOKEN.fullmatch(placeholder.group(0)) is None:
             raise ControllerError("UNKNOWN_TEMPLATE_TOKEN", "Template contains an unknown token.")
+    without_tokens = TEMPLATE_TOKEN.sub("", normalized)
+    if "{{" in without_tokens or "}}" in without_tokens:
+        raise ControllerError("MALFORMED_TEMPLATE_TOKEN", "Template contains malformed token braces.")
     parts: list[str | Token] = []
     present: set[str] = set()
     position = 0
@@ -651,11 +675,68 @@ def _canonical_prompt_json(value: object) -> str:
         raise ControllerError("INVALID_PROMPT_VALUE", "Prompt value is not canonical JSON.") from exc
 
 
+def _valid_expected_header(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != EXPECTED_HEADER_FIELDS:
+        return False
+    if type(value.get("schema_version")) is not int or value["schema_version"] != SCHEMA_VERSION:
+        return False
+    if value.get("packet_type") not in {"requirements", "review"}:
+        return False
+    if any(
+        not isinstance(value.get(field), str) or not value[field]
+        for field in ("run_id", "turn_id", "nonce")
+    ):
+        return False
+    if any(
+        not isinstance(value.get(field), str) or DIGEST.fullmatch(value[field]) is None
+        for field in ("in_reply_to", "prompt_digest")
+    ):
+        return False
+    previous = value.get("previous_packet_digest")
+    return previous is None or (
+        isinstance(previous, str) and DIGEST.fullmatch(previous) is not None
+    )
+
+
+def _validate_abandoned_attempt_receipt(value: object) -> None:
+    valid = isinstance(value, dict) and set(value) == ABANDONED_ATTEMPT_FIELDS
+    expected = value.get("expected_header") if isinstance(value, dict) else None
+    valid = valid and value.get("schema_version") == SCHEMA_VERSION
+    valid = valid and type(value.get("schema_version")) is int
+    valid = valid and value.get("status") == "ABANDONED_NOT_SENT"
+    valid = valid and _valid_expected_header(expected)
+    if valid and isinstance(expected, dict):
+        valid = value.get("expected_header_digest") == validate_packet.canonical_digest(
+            expected
+        )
+        valid = valid and value.get("nonce") == expected.get("nonce")
+        valid = valid and value.get("prompt_digest") == expected.get("prompt_digest")
+    evidence = value.get("evidence") if isinstance(value, dict) else None
+    valid = valid and isinstance(evidence, str) and bool(evidence.strip())
+    valid = valid and len(evidence.encode("utf-8")) <= MAX_ABANDON_EVIDENCE_BYTES
+    abandoned_at = value.get("abandoned_at_unix") if isinstance(value, dict) else None
+    valid = valid and type(abandoned_at) is int and abandoned_at >= 0
+    if not valid:
+        raise ControllerError(
+            "INVALID_ABANDONED_ATTEMPT",
+            "Invalid abandoned attempt receipt.",
+        )
+
+
 def _attempt_number(paths: RunPaths) -> int:
     numbers: list[int] = []
     for path in paths.run.iterdir():
         match = ATTEMPT_NAME.fullmatch(path.name)
         if match is not None:
+            try:
+                artifact = load_json(path)
+            except ControllerError as exc:
+                raise ControllerError(
+                    "INVALID_ABANDONED_ATTEMPT",
+                    "Invalid abandoned attempt receipt.",
+                ) from exc
+            if path.name.startswith("abandoned-") or artifact.get("status") == "ABANDONED_NOT_SENT":
+                _validate_abandoned_attempt_receipt(artifact)
             numbers.append(int(match.group(1)))
     return max(numbers, default=0) + 1
 
@@ -882,11 +963,7 @@ def abandon_attempt(
             raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
         expected_path = paths.run / str(attempts[0]["name"])
         expected = attempts[0]["expected_header"]
-        header_fields = {
-            "schema_version", "packet_type", "run_id", "turn_id", "nonce", "in_reply_to",
-            "prompt_digest", "previous_packet_digest",
-        }
-        if not isinstance(expected, dict) or set(expected) != header_fields:
+        if not _valid_expected_header(expected):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding attempt header is invalid.")
         if _matches_sent_artifact(paths, expected):
             raise ControllerError("AMBIGUOUS_SEND", "Attempt may have been sent or received.")
@@ -966,6 +1043,10 @@ def _outstanding_attempts(paths: RunPaths) -> list[dict[str, object]]:
             attempts.append({"name": path.name, "expected_header": {}})
             continue
         if artifact.get("status") == "ABANDONED_NOT_SENT":
+            try:
+                _validate_abandoned_attempt_receipt(artifact)
+            except ControllerError:
+                attempts.append({"name": path.name, "expected_header": {}})
             continue
         expected = artifact.get("expected_header", artifact)
         attempts.append(
