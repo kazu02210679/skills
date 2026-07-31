@@ -242,7 +242,7 @@ REQUIRED_STATE_FIELDS = (
     "nonce_derivation_key",
     "approved_existing_paths",
 )
-OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
+OPTIONAL_STATE_FIELDS: tuple[str, ...] = ("pending_requirements_expected_header_digest",)
 FINAL_GATE_FIELDS = (
     "schema_version",
     "requirements_digest",
@@ -1637,8 +1637,9 @@ def _validate_state_fields(
         "pending_requirements_digest",
         "pending_supersedes_digest",
         "pending_approved_requirements_digest",
-        "pending_requirements_envelope_digest",
-        "pending_review_envelope_digest",
+    "pending_requirements_envelope_digest",
+    "pending_requirements_expected_header_digest",
+    "pending_review_envelope_digest",
         "pending_review_expected_header_digest",
         "last_consumed_packet_digest",
         "last_consumed_review_envelope_digest",
@@ -1725,6 +1726,13 @@ def _validate_state_fields(
     ):
         errors.append(
             f"{name}.pending_requirements_envelope_digest: is allowed only while requirements are pending"
+        )
+    if (
+        state.get("phase") != "REQUIREMENTS_PENDING"
+        and state.get("pending_requirements_expected_header_digest") is not None
+    ):
+        errors.append(
+            f"{name}.pending_requirements_expected_header_digest: is allowed only while requirements are pending"
         )
     if (
         state.get("phase") != "REVIEW_PENDING"
@@ -2475,6 +2483,16 @@ def _validate_requirements_envelope_consumption(
         errors.append(
             "pending_requirements_envelope_digest: must clear after requirements consumption"
         )
+    if "pending_requirements_expected_header_digest" in previous_state:
+        _require_digest(
+            previous_state.get("pending_requirements_expected_header_digest"),
+            "pending_requirements_expected_header_digest",
+            errors,
+        )
+        if current_state.get("pending_requirements_expected_header_digest") is not None:
+            errors.append(
+                "pending_requirements_expected_header_digest: must clear after requirements consumption"
+            )
 
 
 def _validate_review_envelope_consumption(
@@ -2697,6 +2715,18 @@ def _validate_requirements_transition_context(
     ):
         errors.append(
             "requirements_context.pending_requirements_envelope_digest: envelope was not prevalidated"
+        )
+    expected_digest = _canonical_digest_checked(
+        context["expected"], "requirements_context.expected", errors
+    )
+    if (
+        isinstance(previous_state.get("pending_requirements_expected_header_digest"), str)
+        and expected_digest is not None
+        and previous_state.get("pending_requirements_expected_header_digest")
+        != expected_digest
+    ):
+        errors.append(
+            "requirements_context.pending_requirements_expected_header_digest: expected header does not match trusted state"
         )
     if packet.get("previous_packet_digest") != previous_state.get(
         "last_consumed_packet_digest"
@@ -2968,6 +2998,11 @@ def validate_transition(
             same_phase_format_correction
             or same_phase_browser_reconnect
             or initial_binding_transition
+            or (
+                previous_phase == current_phase == "REQUIREMENTS_PENDING"
+                and current_state.get("pending_requirements_expected_header_digest")
+                != previous_state.get("pending_requirements_expected_header_digest")
+            )
         )
         if same_phase_format_correction:
             for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -1038,7 +1039,7 @@ class ControllerCase(unittest.TestCase):
         self.assertFalse((paths.run / "responses" / f"{expected['turn_id']}.raw.md").exists())
         self.assertEqual(list(paths.transactions.iterdir()), [])
 
-    def test_acceptance_recovers_interrupted_publish_on_restart(self) -> None:
+    def test_acceptance_requires_manual_recovery_after_interrupted_publish(self) -> None:
         self._init_run()
         _, raw = self._prepare_raw_requirements(valid_requirements())
         paths = controller.resolve_run(self.repository, "controller-test")
@@ -1058,17 +1059,14 @@ class ControllerCase(unittest.TestCase):
                     "https://chatgpt.com/c/controller-test",
                     "Pro",
                 )
-        result = controller.accept_requirements(
-            self.repository,
-            "controller-test",
-            raw,
-            "https://chatgpt.com/c/controller-test",
-            "Pro",
-        )
-        self.assertEqual(result["phase"], "REQUIREMENTS_FROZEN")
-        self.assertEqual(list(paths.transactions.iterdir()), [])
+        with self.assertRaisesRegex(controller.ControllerError, "recovery"):
+            controller.accept_requirements(
+                self.repository, "controller-test", raw,
+                "https://chatgpt.com/c/controller-test", "Pro",
+            )
+        self.assertNotEqual(list(paths.transactions.iterdir()), [])
 
-    def test_approval_recovers_interrupted_publish_on_restart(self) -> None:
+    def test_approval_requires_manual_recovery_after_interrupted_publish(self) -> None:
         self._freeze_initial_requirements()
         self._seed_requirements_revision_pending()
         _, raw = self._prepare_raw_requirements(
@@ -1108,11 +1106,9 @@ class ControllerCase(unittest.TestCase):
                 )
         self.assertEqual(self._state()["phase"], "USER_DECISION_REQUIRED")
         self.assertNotEqual((paths.run / "requirements.json").read_bytes(), prior_active)
-        frozen = controller.approve_requirements(
-            self.repository, "controller-test", approval
-        )
-        self.assertEqual(frozen["phase"], "REQUIREMENTS_FROZEN")
-        self.assertEqual(list(paths.transactions.iterdir()), [])
+        with self.assertRaisesRegex(controller.ControllerError, "recovery"):
+            controller.approve_requirements(self.repository, "controller-test", approval)
+        self.assertNotEqual(list(paths.transactions.iterdir()), [])
 
     def test_acceptance_cleanup_interruption_keeps_manifest_for_repeatable_recovery(
         self,
@@ -1168,9 +1164,9 @@ class ControllerCase(unittest.TestCase):
         )
         self.assertEqual(self._state()["phase"], "REQUIREMENTS_FROZEN")
         for _ in range(2):
-            with self.assertRaisesRegex(controller.ControllerError, "pending"):
+            with self.assertRaisesRegex(controller.ControllerError, "recovery"):
                 controller.prepare_requirements(self.repository, "controller-test")
-        self.assertEqual(list(paths.transactions.iterdir()), [])
+        self.assertNotEqual(list(paths.transactions.iterdir()), [])
 
     def test_approval_cleanup_interruption_keeps_manifest_for_repeatable_recovery(
         self,
@@ -1234,9 +1230,9 @@ class ControllerCase(unittest.TestCase):
         )
         self.assertEqual(self._state()["phase"], "REQUIREMENTS_FROZEN")
         for _ in range(2):
-            with self.assertRaisesRegex(controller.ControllerError, "pending"):
+            with self.assertRaisesRegex(controller.ControllerError, "recovery"):
                 controller.prepare_requirements(self.repository, "controller-test")
-        self.assertEqual(list(paths.transactions.iterdir()), [])
+        self.assertNotEqual(list(paths.transactions.iterdir()), [])
 
     def test_initial_requirements_need_user_input_preserves_proposal(self) -> None:
         self._init_run()
@@ -1936,3 +1932,102 @@ class ControllerCase(unittest.TestCase):
         report = controller.load_json(Path(result["report_path"]))
         self.assertEqual(report["changed_files"][0]["path"], "token")
         self.assertEqual(report["acceptance_evidence"], {"SESSION": ["Focused unittest passed."]})
+
+    def test_requirements_expected_header_is_bound_in_trusted_state(self) -> None:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        expected_path = Path(attempt["expected_header_path"])
+        expected = controller.load_json(expected_path)
+        self.assertEqual(
+            self._state()["pending_requirements_expected_header_digest"],
+            controller.validate_packet.canonical_digest(expected),
+        )
+        for field, replacement in (
+            ("in_reply_to", "sha256:" + "0" * 64),
+            ("prompt_digest", "sha256:" + "1" * 64),
+        ):
+            with self.subTest(field=field):
+                tampered = dict(expected)
+                tampered[field] = replacement
+                controller.write_json_atomic(expected_path, tampered)
+                raw = self.input_directory / f"tampered-{field}.md"
+                write_raw_envelope(raw, tampered, valid_requirements())
+                with self.assertRaisesRegex(controller.ControllerError, "attempt"):
+                    controller.accept_requirements(
+                        self.repository, "controller-test", raw,
+                        "https://chatgpt.com/c/controller-test", "Pro",
+                    )
+                self.assertEqual(paths.state.read_bytes(), self._state_bytes())
+                controller.write_json_atomic(expected_path, expected)
+
+    def test_mutation_requires_manual_recovery_without_touching_orphan(self) -> None:
+        self._init_run()
+        paths = controller.resolve_run(self.repository, "controller-test")
+        orphan = paths.transactions / "consume-interrupted"
+        orphan.mkdir()
+        state = paths.state.read_bytes()
+        with self.assertRaisesRegex(controller.ControllerError, "recovery"):
+            controller.prepare_requirements(self.repository, "controller-test")
+        self.assertTrue(orphan.is_dir())
+        self.assertEqual(paths.state.read_bytes(), state)
+
+    def test_state_race_before_replace_preserves_external_state(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        external = self._state()
+        external["format_error_count"] = 1
+        real_check = controller._require_state_digest
+        checks = 0
+
+        def inject_race(run_paths: object, digest: object) -> None:
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                controller.write_json_atomic(paths.state, external)
+            real_check(run_paths, digest)
+
+        with patch.object(controller, "_require_state_digest", new=inject_race):
+            with self.assertRaisesRegex(controller.ControllerError, "state"):
+                controller.build_report(
+                    self.repository,
+                    "controller-test",
+                    self._write_local_evidence({"example.py": "Implement AC-1."}),
+                )
+        self.assertEqual(checks, 2)
+        self.assertEqual(paths.state.read_bytes(), controller._canonical_json_bytes(external))
+
+    def test_event_is_not_published_when_state_commit_fails(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        before_events = paths.events.read_bytes()
+        replace = controller.os.replace
+
+        def fail_state(source: object, destination: object) -> None:
+            if Path(destination) == paths.state:
+                raise OSError("injected state failure")
+            replace(source, destination)
+
+        with patch.object(controller.os, "replace", side_effect=fail_state):
+            with self.assertRaises(controller.ControllerError):
+                controller.build_report(
+                    self.repository, "controller-test",
+                    self._write_local_evidence({"example.py": "Implement AC-1."}),
+                )
+        self.assertEqual(paths.events.read_bytes(), before_events)
+
+    def test_event_failure_after_state_commit_may_omit_only_event(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        before_events = paths.events.read_bytes()
+        with patch.object(controller, "_record_events", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                controller.build_report(
+                    self.repository, "controller-test",
+                    self._write_local_evidence({"example.py": "Implement AC-1."}),
+                )
+        self.assertEqual(self._state()["phase"], "REVIEW_PENDING")
+        self.assertEqual(paths.events.read_bytes(), before_events)

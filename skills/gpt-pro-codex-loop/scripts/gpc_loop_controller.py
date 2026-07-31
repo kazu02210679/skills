@@ -459,6 +459,7 @@ def initial_state(
         "resolution_evidence": None,
         "resolution_stop_sequence": None,
         "pending_requirements_envelope_digest": None,
+        "pending_requirements_expected_header_digest": None,
         "pending_review_envelope_digest": None,
         "pending_review_expected_header_digest": None,
         "last_consumed_packet_digest": None,
@@ -618,7 +619,6 @@ def initialize_run(
                 request_stage = transaction / "request.md"
                 context_stage = transaction / "repository-context.md"
                 preflight_stage = transaction / "preflight.json"
-                events_stage = transaction / "events.jsonl"
                 state_stage = transaction / "state.json"
                 staged_paths: list[tuple[Path, os.stat_result]] = []
                 try:
@@ -628,17 +628,6 @@ def initialize_run(
                     staged_paths.append(_owned_path(context_stage))
                     write_json_atomic(preflight_stage, preflight)
                     staged_paths.append(_owned_path(preflight_stage))
-                    write_text_atomic(
-                        events_stage,
-                        _canonical_json_bytes(
-                            {
-                                "schema_version": SCHEMA_VERSION,
-                                "event": "RUN_INITIALIZED",
-                                "at_unix": int(time.time()),
-                            }
-                        ).decode("utf-8"),
-                    )
-                    staged_paths.append(_owned_path(events_stage))
                     write_json_atomic(state_stage, candidate)
                     staged_paths.append(_owned_path(state_stage))
                     try:
@@ -650,8 +639,6 @@ def initialize_run(
                         )
                         os.replace(preflight_stage, paths.preflight)
                         committed_paths.append(_owned_path(paths.preflight))
-                        os.replace(events_stage, paths.events)
-                        committed_paths.append(_owned_path(paths.events))
                         os.replace(state_stage, paths.state)
                         committed_paths.append(_owned_path(paths.state))
                     except OSError as exc:
@@ -660,6 +647,11 @@ def initialize_run(
                             "Could not commit initialized controller artifacts.",
                         ) from exc
                     initialized = True
+                    _record_events(paths, [{
+                        "schema_version": SCHEMA_VERSION,
+                        "event": "RUN_INITIALIZED",
+                        "at_unix": int(time.time()),
+                    }])
                 finally:
                     _cleanup_owned_transaction(transaction, staged_paths)
         finally:
@@ -885,7 +877,7 @@ def prepare_requirements(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
-        _reconcile_incomplete_transactions(paths)
+        _require_manual_recovery(paths)
         state = load_json(paths.state)
         if state.get("phase") != "REQUIREMENTS_PENDING":
             raise ControllerError("INVALID_PHASE", "Requirements can be prepared only when pending.")
@@ -954,8 +946,22 @@ def prepare_requirements(
         )
         rendered = render_prompt(template, values)
         expected["prompt_digest"] = rendered["prompt_digest"]
-        prompt_path, expected_path = _save_attempt(
-            paths, attempt_number, str(expected["turn_id"]), rendered["prompt"], expected
+        candidate = dict(state)
+        candidate["pending_requirements_expected_header_digest"] = (
+            validate_packet.canonical_digest(expected)
+        )
+        _raise_validation(
+            "INVALID_TRANSITION",
+            "Requirements preparation failed state validation.",
+            validate_packet.validate_transition(state, candidate),
+        )
+        prompt_path = paths.run / "prompts" / f"{expected['turn_id']}-attempt-{attempt_number:02d}.md"
+        expected_path = paths.run / f"expected-attempt-{attempt_number:02d}.json"
+        _commit_artifacts_then_state(
+            paths,
+            [(prompt_path, rendered["prompt"]), (expected_path, expected)],
+            candidate,
+            expected_state_digest=_file_digest(paths.state),
         )
     return {
         "prompt_path": str(prompt_path),
@@ -1157,6 +1163,14 @@ def _append_event(paths: RunPaths, event: Mapping[str, object]) -> str:
     return prior + _canonical_json_bytes(dict(event)).decode("utf-8")
 
 
+def _record_events(paths: RunPaths, events: Sequence[Mapping[str, object]]) -> None:
+    """Persist diagnostics only after the authoritative state commit."""
+    content = _read_input(paths.events, "controller events") if paths.events.exists() else ""
+    for event in events:
+        content += _canonical_json_bytes(dict(event)).decode("utf-8")
+    write_text_atomic(paths.events, content)
+
+
 def build_report(
     repository: Path,
     task_slug: str,
@@ -1167,7 +1181,7 @@ def build_report(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
-        _reconcile_incomplete_transactions(paths)
+        _require_manual_recovery(paths)
         state = load_json(paths.state)
         if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
             raise ControllerError(
@@ -1216,20 +1230,40 @@ def build_report(
         )
         report_path = paths.run / "implementation-report.json"
         snapshot_path = paths.run / "snapshot.json"
-        events = _append_event(
-            paths,
-            {
-                "schema_version": SCHEMA_VERSION,
-                "event": "REPORT_BUILT",
-                "report_digest": candidate["active_report_digest"],
-                "snapshot_digest": candidate["current_snapshot_digest"],
-            },
-        )
         _commit_artifacts_then_state(
             paths,
-            [(snapshot_path, snapshot), (report_path, report), (paths.events, events)],
+            [(snapshot_path, snapshot), (report_path, report)],
             candidate,
-            replaceable_artifacts=frozenset({snapshot_path, report_path, paths.events}),
+            replaceable_artifacts=frozenset({snapshot_path, report_path}),
+        )
+        _record_events(
+            paths,
+            [
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": "REPORT_PHASE_ADVANCED",
+                    "from_phase": state["phase"],
+                    "to_phase": "IMPLEMENTING",
+                },
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": "REPORT_PHASE_ADVANCED",
+                    "from_phase": "IMPLEMENTING",
+                    "to_phase": "LOCAL_VERIFICATION",
+                },
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": "REPORT_PHASE_ADVANCED",
+                    "from_phase": "LOCAL_VERIFICATION",
+                    "to_phase": "REVIEW_PENDING",
+                },
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": "REPORT_BUILT",
+                    "report_digest": candidate["active_report_digest"],
+                    "snapshot_digest": candidate["current_snapshot_digest"],
+                },
+            ],
         )
     return {
         "report_path": str(report_path),
@@ -1343,7 +1377,7 @@ def prepare_review(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
-        _reconcile_incomplete_transactions(paths)
+        _require_manual_recovery(paths)
         state = load_json(paths.state)
         if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
             raise ControllerError(
@@ -1732,14 +1766,66 @@ def _reconcile_incomplete_transactions(paths: RunPaths) -> None:
             _recover_transaction(paths, transaction)
 
 
+def _require_manual_recovery(paths: RunPaths) -> None:
+    """Keep interrupted transactions visible; normal commands never repair them."""
+    if paths.transactions.is_dir() and any(paths.transactions.iterdir()):
+        raise ControllerError(
+            "RECOVERY_REQUIRED",
+            "An interrupted transaction requires manual recovery before mutation.",
+        )
+
+
+def _require_state_digest(paths: RunPaths, expected: str) -> None:
+    if _file_digest(paths.state) != expected:
+        raise ControllerError(
+            "STATE_CHANGED",
+            "Trusted state changed while this command was running.",
+        )
+
+
+def _rollback_uncommitted_transaction(paths: RunPaths, transaction: Path) -> None:
+    """Undo only this command's published artifacts after an external state race."""
+    manifest = load_json(transaction / "manifest.json")
+    operations = manifest.get("operations")
+    if not isinstance(operations, list):
+        raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not roll back transaction artifacts.")
+    attempt = manifest.get("attempt_rename")
+    if isinstance(attempt, dict):
+        source = _manifest_run_path(paths, attempt.get("source"))
+        destination = _manifest_run_path(paths, attempt.get("destination"))
+        if destination.exists() and not source.exists():
+            os.replace(destination, source)
+    for operation in reversed(operations):
+        if not isinstance(operation, dict):
+            raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not roll back transaction artifacts.")
+        destination = _manifest_run_path(paths, operation.get("destination"))
+        backup_name = operation.get("backup")
+        if backup_name is None:
+            if destination.exists() and _file_digest(destination) == operation.get("new_digest"):
+                destination.unlink()
+            continue
+        backup = _transaction_file(transaction, backup_name)
+        if backup.exists() and destination.exists() and _file_digest(destination) == operation.get("new_digest"):
+            destination.unlink()
+        if backup.exists():
+            os.replace(backup, destination)
+    _cleanup_transaction_files(
+        transaction,
+        {path.name for path in transaction.iterdir() if path.is_file()},
+    )
+
+
 def _commit_artifacts_then_state(
     paths: RunPaths,
     artifacts: Sequence[tuple[Path, str | dict[str, object]]],
     state: dict[str, object],
     consumed_attempt: Path | None = None,
     replaceable_artifacts: frozenset[Path] = frozenset(),
+    expected_state_digest: str | None = None,
 ) -> None:
     """Publish a recoverable artifact transaction with trusted state last."""
+    if expected_state_digest is None:
+        expected_state_digest = _file_digest(paths.state)
     transaction = paths.transactions / f"consume-{os.getpid()}-{time.time_ns()}"
     transaction.mkdir()
     operations: list[dict[str, object]] = []
@@ -1783,10 +1869,11 @@ def _commit_artifacts_then_state(
             "schema_version": SCHEMA_VERSION,
             "operations": operations,
             "attempt_rename": attempt_rename,
-            "old_state_digest": _file_digest(paths.state),
+            "old_state_digest": expected_state_digest,
             "new_state_digest": _file_digest(state_stage),
         }
         write_json_atomic(transaction / "manifest.json", manifest)
+        _require_state_digest(paths, expected_state_digest)
         for operation in operations:
             destination = _manifest_run_path(paths, operation["destination"])
             stage = _transaction_file(transaction, operation["stage"])
@@ -1799,12 +1886,16 @@ def _commit_artifacts_then_state(
                 _manifest_run_path(paths, attempt_rename["source"]),
                 _manifest_run_path(paths, attempt_rename["destination"]),
             )
+        _require_state_digest(paths, expected_state_digest)
         os.replace(state_stage, paths.state)
     except OSError as exc:
         _recover_transaction(paths, transaction)
         raise ControllerError("WRITE_FAILED", "Could not commit controller acceptance artifacts.") from exc
-    except ControllerError:
-        _recover_transaction(paths, transaction)
+    except ControllerError as exc:
+        if exc.code == "STATE_CHANGED":
+            _rollback_uncommitted_transaction(paths, transaction)
+        else:
+            _recover_transaction(paths, transaction)
         raise
     _recover_transaction(paths, transaction)
 
@@ -1821,7 +1912,7 @@ def accept_requirements(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
-        _reconcile_incomplete_transactions(paths)
+        _require_manual_recovery(paths)
         state = load_json(paths.state)
         if state.get("phase") != "REQUIREMENTS_PENDING":
             raise ControllerError("INVALID_PHASE", "Requirements can be accepted only when pending.")
@@ -1869,6 +1960,11 @@ def accept_requirements(
             ),
         ):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding requirements attempt is invalid.")
+        if (
+            validate_packet.canonical_digest(expected)
+            != state.get("pending_requirements_expected_header_digest")
+        ):
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding requirements attempt is invalid.")
         raw = _read_input(raw_response_path, "requirements response")
         try:
             envelope = validate_packet.extract_single_json_object(raw)
@@ -1913,6 +2009,7 @@ def accept_requirements(
             phase=target,
             latest_requirements_decision=decision,
             pending_requirements_envelope_digest=None,
+            pending_requirements_expected_header_digest=None,
             last_consumed_packet_digest=envelope_digest,
         )
         if state.get("conversation_binding_state") == "CONVERSATION_UNBOUND":
@@ -1984,6 +2081,14 @@ def accept_requirements(
             if target == "REQUIREMENTS_FROZEN"
             else frozenset(),
         )
+        _record_events(paths, [{
+            "schema_version": SCHEMA_VERSION,
+            "event": "REQUIREMENTS_ACCEPTED",
+            "requirements_digest": requirements_digest,
+            "envelope_digest": envelope_digest,
+            "decision": decision,
+            "target_phase": target,
+        }])
     return status_run(paths.repository, task_slug)
 
 
@@ -2097,7 +2202,7 @@ def accept_review(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
-        _reconcile_incomplete_transactions(paths)
+        _require_manual_recovery(paths)
         state = load_json(paths.state)
         if state.get("phase") != "REVIEW_PENDING":
             raise ControllerError("INVALID_PHASE", "Review can be accepted only when pending.")
@@ -2270,29 +2375,25 @@ def accept_review(
         turn_id = expected.get("turn_id")
         if not isinstance(turn_id, str):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding review attempt is invalid.")
-        events = _append_event(
-            paths,
-            {
-                "schema_version": SCHEMA_VERSION,
-                "event": "REVIEW_ACCEPTED",
-                "review_digest": review_digest,
-                "envelope_digest": envelope_digest,
-                "decision": decision,
-                "target_phase": target,
-            },
-        )
         _commit_artifacts_then_state(
             paths,
             [
                 (paths.run / "responses" / f"{turn_id}.raw.md", raw),
                 (paths.run / f"review-envelope-{review_round + 1:02d}.json", envelope),
                 (paths.run / "review.json", review),
-                (paths.events, events),
             ],
             candidate,
             expected_path,
-            frozenset({paths.run / "review.json", paths.events}),
+            frozenset({paths.run / "review.json"}),
         )
+        _record_events(paths, [{
+            "schema_version": SCHEMA_VERSION,
+            "event": "REVIEW_ACCEPTED",
+            "review_digest": review_digest,
+            "envelope_digest": envelope_digest,
+            "decision": decision,
+            "target_phase": target,
+        }])
     return status_run(paths.repository, task_slug)
 
 
@@ -2318,7 +2419,7 @@ def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
-        _reconcile_incomplete_transactions(paths)
+        _require_manual_recovery(paths)
         state = load_json(paths.state)
         if state.get("phase") != "FINAL_VERIFICATION":
             raise ControllerError("INVALID_PHASE", "Final verification is available only after PASS review.")
@@ -2376,25 +2477,21 @@ def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
                 final_gate_requirements=requirements,
             ),
         )
-        events = _append_event(
-            paths,
-            {
-                "schema_version": SCHEMA_VERSION,
-                "event": "FINAL_VERIFIED",
-                "final_gate_digest": validate_packet.canonical_digest(gate),
-                "snapshot_digest": current_snapshot["snapshot_digest"],
-            },
-        )
         _commit_artifacts_then_state(
             paths,
             [
                 (paths.run / "snapshot.json", current_snapshot),
                 (paths.run / "final-gate.json", gate),
-                (paths.events, events),
             ],
             candidate,
-            replaceable_artifacts=frozenset({paths.run / "snapshot.json", paths.events}),
+            replaceable_artifacts=frozenset({paths.run / "snapshot.json"}),
         )
+        _record_events(paths, [{
+            "schema_version": SCHEMA_VERSION,
+            "event": "FINAL_VERIFIED",
+            "final_gate_digest": validate_packet.canonical_digest(gate),
+            "snapshot_digest": current_snapshot["snapshot_digest"],
+        }])
     return status_run(paths.repository, task_slug)
 
 
@@ -2408,7 +2505,7 @@ def approve_requirements(
     if not paths.run.is_dir() or not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
-        _reconcile_incomplete_transactions(paths)
+        _require_manual_recovery(paths)
         state = load_json(paths.state)
         if (
             state.get("phase") != "USER_DECISION_REQUIRED"
@@ -2484,6 +2581,12 @@ def approve_requirements(
             candidate,
             replaceable_artifacts=frozenset({paths.run / "requirements.json"}),
         )
+        _record_events(paths, [{
+            "schema_version": SCHEMA_VERSION,
+            "event": "MATERIAL_REQUIREMENTS_APPROVED",
+            "requirements_digest": digest,
+            "stop_sequence": state["stop_sequence"],
+        }])
     return status_run(paths.repository, task_slug)
 
 
@@ -2535,7 +2638,7 @@ def abandon_attempt(
         "utf-8", errors="ignore"
     )
     with run_lock(paths.lock):
-        _reconcile_incomplete_transactions(paths)
+        _require_manual_recovery(paths)
         attempts = _outstanding_attempts(paths)
         if len(attempts) != 1:
             raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
