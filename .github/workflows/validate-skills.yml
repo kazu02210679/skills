@@ -32,6 +32,7 @@ jobs:
           python-version: "3.12"
       - run: python -m unittest discover -s evals/gpt-pro-codex-loop -p "test_validate_packet.py" -v
       - run: python -m unittest discover -s evals/gpt-pro-codex-loop -p "test_capture_snapshot.py" -v
+      - run: python -m unittest discover -s evals/gpt-pro-codex-loop -p "test_gpc_loop.py" -v
 
   bash-4-4:
     runs-on: ubuntu-latest

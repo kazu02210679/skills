@@ -13,13 +13,29 @@ Read [references/packet-contract.md](references/packet-contract.md) before creat
 
 ## Workflow
 
-1. Preflight the repository and disclosure boundary. Capture and validate the immutable baseline; require explicit inclusion of pre-existing product paths. Refuse tracked or staged `.ai-pro-loop/` metadata.
-2. Open a new ChatGPT conversation, visibly verify the requested Pro model policy, and send one correlated requirements-envelope prompt. Bind the persistent conversation URL only after the first valid response. A response from any other conversation is a hard stop recorded as `conversation_identity_mismatch`.
-3. Save the raw response, strictly decode exactly one fenced JSON object, and validate its envelope against trusted attempt data. Freeze a valid `PLAN_READY` payload, or preserve an unapproved material proposal unchanged in `USER_DECISION_REQUIRED`. If the user approves, bind the receipt to that stop sequence and exact proposal digest and promote it directly; never ask Pro to rewrite an approved proposal.
-4. Implement and verify locally. Capture a stable product snapshot and validate the report against active requirements, trusted state, and that snapshot.
-5. In the same bound conversation and model, send a fresh correlated review turn. Validate the envelope and review context before routing `CODE_CHANGE`, `TEST_CHANGE`, `PROVIDE_EVIDENCE`, `REQUIREMENTS_REVISION`, or `USER_DECISION`.
-6. Derive every root-cause fingerprint locally from the finding's acceptance ID, category, required action, and stable root-cause key. Never trust a model-selected digest.
-7. Complete only after a validated Pro `PASS` and a final gate that revalidates the active requirements and implementation report proves that every recorded local check passed, omissions and unresolved blockers are empty, scope and artifact hygiene passed, and the reviewed snapshot is unchanged. A final-verification stop must preserve these bindings until direct resume.
+Use `scripts/gpc_loop.py` for the normal loop. Run `status` before each mutation and execute only a command it lists. Use `validate_packet.py` and `capture_snapshot.py` directly only for documented diagnostic or recovery paths.
+
+`init` is the sole exception to the status-first rule because the run does not exist yet. Do the repository investigation and disclosure review outside the controller, write the bounded request and repository-context inputs, then initialize the run:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py init --repo REPOSITORY --task TASK --request REQUEST.md --repository-context CONTEXT.md --model-policy PRO_CLASS
+```
+
+After `init`, before every state-changing command, run:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py status --repo REPOSITORY --task TASK
+```
+
+The `next_commands` result is authoritative. Do not hand-author state, expected headers, envelopes, prompt digests, consumed history, snapshots, reports, final gates, or approval receipts. If the controller returns an error, stop: do not retry a different transition or alter controller artifacts by hand.
+
+1. When status permits `prepare-requirements`, run it (with `--conflict-evidence FILE` only for a requirements revision). It returns the prompt and expected-header paths. Browser work remains outside the controller: create or reacquire the appropriate conversation, visibly verify the required model and conversation identity, send the prepared prompt once, and save the complete raw response.
+2. Run status again. When it permits `accept-requirements`, pass `--raw-response FILE --observed-conversation-url URL --observed-model-label LABEL`. The observed URL and model are required on every accepted response; do not infer either from prior state.
+3. When status permits `approve-requirements`, obtain the user's authorization outside the controller, record bounded local evidence, then use `--approval-evidence FILE`. When it permits `build-report`, complete product work and local commands outside the controller, create the closed local-evidence input, then use `--local-evidence FILE`. The controller records evidence and captures the snapshot; it never runs project commands.
+4. When status permits `prepare-review`, run it (with `--supplemental-evidence FILE` only for a `PROVIDE_EVIDENCE` route). Use Browser only after that prepared prompt exists. Save the raw response, run status, then use `accept-review --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL` when listed.
+5. When status permits `final-verify`, run it. Only its successful result completes the controller run. `abandon-attempt` is allowed only when status lists it and a prompt is proven unsent; it requires exactly `--send-status NOT_SENT --not-sent-evidence FILE`. Ambiguous Browser send status is a hard stop governed by the recovery contract.
+
+All Browser interaction, project-command execution, detailed design, implementation, tests, and user escalation remain outside the controller. The controller never drives the Browser or runs project commands.
 
 ## Hard Stops
 

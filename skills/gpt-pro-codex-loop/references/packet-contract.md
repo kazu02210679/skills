@@ -48,6 +48,28 @@ REVIEW_CONTEXT.json:
 
 `review-context` validates and prints the envelope; that output is **not** a `REVIEW_CONTEXT.json` transition input. The controller constructs the composed context from the same validated envelope, trusted expected header and consumed set, active requirements/report, and captured snapshot, then passes that closed object to `transition`.
 
+## Controller CLI
+
+The normal-loop entry point is `python skills/gpt-pro-codex-loop/scripts/gpc_loop.py COMMAND`. Every command accepts `--repo REPOSITORY --task TASK`. `init` additionally requires `--request FILE --repository-context FILE --model-policy PRO_CLASS|EXACT_LABEL`, with repeatable `--approved-existing-path PATH` and optional `--requested-model-label LABEL`. The other command-specific inputs are:
+
+```text
+prepare-requirements  [--conflict-evidence FILE]
+accept-requirements   --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL
+approve-requirements  --approval-evidence FILE
+build-report          --local-evidence FILE
+prepare-review        [--supplemental-evidence FILE]
+accept-review         --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL
+final-verify
+status
+abandon-attempt       --send-status NOT_SENT --not-sent-evidence FILE
+```
+
+`--local-evidence` is one strict object with exactly `schema_version`, `changed_file_intents`, `intent_summary`, `acceptance_evidence`, `test_commands`, `diff_evidence`, `omissions`, and `unresolved_risks_or_blockers`. Each test command is exactly `{command, outcome, output_summary}`; the controller records it but does not execute it. Approval and not-sent evidence are non-empty bounded UTF-8 text files. `accept-*` always receives the complete raw response plus the URL and model label observed in the Browser at acceptance time.
+
+Each non-help invocation prints exactly one canonical UTF-8 JSON object and one LF: success is `{"ok":true,"command":"COMMAND","result":RESULT}`; a stable controller failure is `{"ok":false,"command":"COMMAND","error":{"code":"CODE","message":"MESSAGE","details":[]}}`. Success exits `0`, an expected controller failure exits `2`, and an unexpected failure returns `INTERNAL_ERROR` with exit `1`; `--debug` sends its traceback only to stderr.
+
+Use `status` before every controller mutation after `init` and follow only its `next_commands`. The controller writes artifacts and validates candidates before replacing `state.json` last. Its consumed-envelope set comes only from trusted chain-head fields in `state.json`, never from scanning artifact history. It derives and validates every prompt/header digest, state transition, snapshot/report binding, and final gate; never hand-author those artifacts. `abandon-attempt` atomically replaces only the outstanding expected attempt with a `NOT_SENT` receipt and preserves `state.json` and all domain artifacts unchanged.
+
 ## Complete requirements envelope
 
 ```json

@@ -410,6 +410,153 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(status["next_commands"], ["prepare-requirements"])
         self.assertEqual(paths.state.read_bytes(), original)
 
+    def test_cli_status_prints_one_canonical_json_object(self) -> None:
+        self._init_run()
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "gpc_loop.py"),
+                "status",
+                "--repo",
+                str(self.repository),
+                "--task",
+                "controller-test",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        value = json.loads(completed.stdout)
+        self.assertEqual(value["ok"], True)
+        self.assertEqual(value["command"], "status")
+        self.assertEqual(completed.stderr, "")
+
+    def test_cli_expected_error_is_json_and_exit_two(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "gpc_loop.py"),
+                "status",
+                "--repo",
+                str(self.repository),
+                "--task",
+                "missing",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        error = json.loads(completed.stdout)["error"]
+        self.assertEqual(error["code"], "RUN_NOT_FOUND")
+        self.assertNotIn("Traceback", completed.stdout)
+
+    def test_cli_help_covers_each_command_and_its_special_arguments(self) -> None:
+        expected_arguments = {
+            "init": [
+                "--request",
+                "--repository-context",
+                "--approved-existing-path",
+                "--model-policy",
+                "--requested-model-label",
+            ],
+            "prepare-requirements": ["--conflict-evidence"],
+            "accept-requirements": [
+                "--raw-response",
+                "--observed-conversation-url",
+                "--observed-model-label",
+            ],
+            "approve-requirements": ["--approval-evidence"],
+            "build-report": ["--local-evidence"],
+            "prepare-review": ["--supplemental-evidence"],
+            "accept-review": [
+                "--raw-response",
+                "--observed-conversation-url",
+                "--observed-model-label",
+            ],
+            "final-verify": [],
+            "status": [],
+            "abandon-attempt": ["--send-status", "--not-sent-evidence"],
+        }
+
+        root_help = subprocess.run(
+            [sys.executable, str(SCRIPT_DIR / "gpc_loop.py"), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(root_help.returncode, 0)
+        for command, arguments in expected_arguments.items():
+            with self.subTest(command=command):
+                self.assertIn(command, root_help.stdout)
+                completed = subprocess.run(
+                    [sys.executable, str(SCRIPT_DIR / "gpc_loop.py"), command, "--help"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0)
+                self.assertIn("--repo", completed.stdout)
+                self.assertIn("--task", completed.stdout)
+                for argument in arguments:
+                    self.assertIn(argument, completed.stdout)
+
+    def test_cli_rejects_each_missing_required_command_argument(self) -> None:
+        required_arguments = {
+            "init": [
+                ("--request", "request.md"),
+                ("--repository-context", "context.md"),
+                ("--model-policy", "PRO_CLASS"),
+            ],
+            "accept-requirements": [
+                ("--raw-response", "response.md"),
+                ("--observed-conversation-url", "https://chatgpt.com/c/example"),
+                ("--observed-model-label", "Pro"),
+            ],
+            "approve-requirements": [("--approval-evidence", "approval.txt")],
+            "build-report": [("--local-evidence", "evidence.json")],
+            "accept-review": [
+                ("--raw-response", "response.md"),
+                ("--observed-conversation-url", "https://chatgpt.com/c/example"),
+                ("--observed-model-label", "Pro"),
+            ],
+            "abandon-attempt": [
+                ("--send-status", "NOT_SENT"),
+                ("--not-sent-evidence", "not-sent.txt"),
+            ],
+        }
+        for command, arguments in required_arguments.items():
+            complete = [
+                sys.executable,
+                str(SCRIPT_DIR / "gpc_loop.py"),
+                command,
+                "--repo",
+                str(self.repository),
+                "--task",
+                "controller-test",
+            ]
+            for option, value in arguments:
+                complete.extend((option, value))
+            for option, value in arguments:
+                with self.subTest(command=command, option=option):
+                    missing = list(complete)
+                    missing.remove(option)
+                    missing.remove(value)
+                    completed = subprocess.run(
+                        missing,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(completed.returncode, 2)
+                    error = json.loads(completed.stdout)["error"]
+                    self.assertEqual(error["code"], "ARGUMENT_ERROR")
+                    self.assertEqual(completed.stderr, "")
+
     def test_failed_preflight_cleans_owned_run_and_allows_same_slug_retry(self) -> None:
         (self.repository / "new-product.py").write_text("value = 1\n", encoding="utf-8")
         paths = controller.resolve_run(self.repository, "retry-test")
