@@ -424,10 +424,14 @@ def bind_review_transition_context(
             "acceptance_id": "AC-1",
             "root_cause_key": root_cause_key,
             "severity": "HIGH",
-            "category": "context",
+            "category": "OTHER",
             "required_action": action,
             "evidence": "Transition context fixture.",
         }
+        if action in {"CODE_CHANGE", "TEST_CHANGE"}:
+            finding["required_change"] = "Apply the routed bounded change."
+        elif action == "PROVIDE_EVIDENCE":
+            finding["required_evidence"] = "Provide the missing bounded evidence."
         findings.append(finding)
     review = valid_review(
         requirements,
@@ -461,7 +465,7 @@ def bind_review_transition_context(
             packet_validator.derive_root_cause_fingerprint(
                 {
                     "acceptance_id": "AC-1",
-                    "category": "context",
+                    "category": "OTHER",
                     "required_action": (
                         action_values[index]
                         if index < len(action_values)
@@ -486,7 +490,7 @@ def bind_review_transition_context(
                     packet_validator.derive_root_cause_fingerprint(
                         {
                             "acceptance_id": "AC-1",
-                            "category": "context",
+                            "category": "OTHER",
                             "required_action": (
                                 action_values[index]
                                 if index < len(action_values)
@@ -745,7 +749,12 @@ class PacketTransportTests(unittest.TestCase):
         )
         self.assertEqual(
             [],
-            packet_validator.validate_final_gate(final_gate, state),
+            packet_validator.validate_final_gate(
+                final_gate,
+                state,
+                documented_report,
+                requirements,
+            ),
         )
 
     def test_extract_requires_exactly_one_json_fence(self) -> None:
@@ -850,7 +859,7 @@ class PacketTransportTests(unittest.TestCase):
                     "acceptance_id": "AC-1",
                     "root_cause_key": "invalid-enum-containers",
                     "severity": [],
-                    "category": "correctness",
+                    "category": "CORRECTNESS",
                     "required_action": [],
                     "evidence": "Invalid enum containers.",
                 }
@@ -1233,9 +1242,10 @@ class ReviewPacketTests(unittest.TestCase):
             "acceptance_id": "AC-1",
             "root_cause_key": "incorrect-behavior",
             "severity": "HIGH",
-            "category": "correctness",
+            "category": "CORRECTNESS",
             "required_action": "CODE_CHANGE",
             "evidence": "The behavior is incorrect.",
+            "required_change": "Correct the observable behavior.",
         }
         review = valid_review(
             requirements,
@@ -1276,6 +1286,7 @@ class ReviewPacketTests(unittest.TestCase):
             **source,
             "severity": "HIGH",
             "evidence": "The report omits the focused test output.",
+            "required_evidence": "Provide the focused test output.",
         }
         review = valid_review(
             requirements,
@@ -1302,9 +1313,10 @@ class ReviewPacketTests(unittest.TestCase):
             "acceptance_id": "AC-1",
             "root_cause_key": "first-name",
             "severity": "HIGH",
-            "category": "correctness",
+            "category": "CORRECTNESS",
             "required_action": "CODE_CHANGE",
             "evidence": "The same routed defect remains.",
+            "required_change": "Correct the routed defect.",
         }
         renamed = dict(
             base,
@@ -1359,7 +1371,7 @@ class ReviewPacketTests(unittest.TestCase):
                     "acceptance_id": "AC-1",
                     "root_cause_key": "failing-test",
                     "severity": "HIGH",
-                    "category": "correctness",
+                    "category": "CORRECTNESS",
                     "evidence": "The test fails.",
                 }
             ],
@@ -1382,15 +1394,89 @@ class ReviewPacketTests(unittest.TestCase):
                     "acceptance_id": "AC-1",
                     "root_cause_key": "omitted-output",
                     "severity": "LOW",
-                    "category": "evidence",
+                    "category": "INSUFFICIENT_EVIDENCE",
                     "required_action": "PROVIDE_EVIDENCE",
                     "evidence": "Test output is omitted.",
-                    "required_change": {"kind": "CODE_CHANGE", "description": "Rewrite code."},
+                    "required_change": "Modify normalizer.py and add an empty-input check.",
                 }
             ],
         )
         self.assertIn(
             "findings.0.required_change: PROVIDE_EVIDENCE cannot request a code change",
+            validate_review(review, requirements, report),
+        )
+
+    def test_finding_action_payloads_are_structurally_closed(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        evidence_finding = {
+            "id": "F-1",
+            "acceptance_id": "AC-1",
+            "root_cause_key": "omitted-output",
+            "severity": "LOW",
+            "category": "INSUFFICIENT_EVIDENCE",
+            "required_action": "PROVIDE_EVIDENCE",
+            "evidence": "Test output is omitted.",
+            "required_evidence": "Provide the complete focused test output.",
+        }
+        evidence_review = valid_review(
+            requirements,
+            report,
+            decision="CHANGES_REQUESTED",
+            findings=[evidence_finding],
+        )
+        self.assertEqual(
+            validate_review(evidence_review, requirements, report),
+            [],
+        )
+
+        for required_change in (None, ["Modify normalizer.py"]):
+            with self.subTest(required_change=required_change):
+                code_finding = dict(
+                    evidence_finding,
+                    required_action="CODE_CHANGE",
+                )
+                code_finding.pop("required_evidence")
+                if required_change is not None:
+                    code_finding["required_change"] = required_change
+                code_review = valid_review(
+                    requirements,
+                    report,
+                    decision="CHANGES_REQUESTED",
+                    findings=[code_finding],
+                )
+                expected = (
+                    "findings.0.required_change: required for CODE_CHANGE"
+                    if required_change is None
+                    else "findings.0.required_change: must be a non-empty string"
+                )
+                self.assertIn(
+                    expected,
+                    validate_review(code_review, requirements, report),
+                )
+
+    def test_finding_category_is_a_closed_enum(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(requirements)
+        review = valid_review(
+            requirements,
+            report,
+            decision="CHANGES_REQUESTED",
+            findings=[
+                {
+                    "id": "F-1",
+                    "acceptance_id": "AC-1",
+                    "root_cause_key": "incorrect-normalization",
+                    "severity": "HIGH",
+                    "category": "logic_error",
+                    "required_action": "CODE_CHANGE",
+                    "evidence": "Whitespace-only input is accepted.",
+                    "required_change": "Reject normalized empty values.",
+                }
+            ],
+        )
+        self.assertIn(
+            "findings.0.category: must be a supported finding category",
             validate_review(review, requirements, report),
         )
 
@@ -1429,9 +1515,10 @@ class ReviewPacketTests(unittest.TestCase):
                     "acceptance_id": "AC-1",
                     "root_cause_key": "missing-more-output",
                     "severity": "LOW",
-                    "category": "evidence",
+                    "category": "INSUFFICIENT_EVIDENCE",
                     "required_action": "PROVIDE_EVIDENCE",
                     "evidence": "More output is needed.",
+                    "required_evidence": "Provide the missing output.",
                 }
             ],
         )
@@ -1592,7 +1679,7 @@ class ContextValidationTests(unittest.TestCase):
         fingerprint = canonical_digest(
             {
                 "acceptance_id": "AC-1",
-                "category": "correctness",
+                "category": "CORRECTNESS",
                 "required_action": "CODE_CHANGE",
                 "root_cause_key": "context-bound",
             }
@@ -1607,9 +1694,10 @@ class ContextValidationTests(unittest.TestCase):
                     "acceptance_id": "AC-1",
                     "root_cause_key": "context-bound",
                     "severity": "HIGH",
-                    "category": "correctness",
+                    "category": "CORRECTNESS",
                     "required_action": "CODE_CHANGE",
                     "evidence": "The validated finding remains unresolved.",
+                    "required_change": "Correct the validated defect.",
                 }
             ],
         )
@@ -1810,9 +1898,15 @@ class TransitionTests(unittest.TestCase):
         )
 
     def test_complete_requires_explicit_bound_final_gate_evidence(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(
+            requirements,
+            review_round=2,
+            snapshot_digest="sha256:" + "b" * 64,
+        )
         state_fields = {
-            "active_requirements_digest": "sha256:" + "a" * 64,
-            "active_report_digest": "sha256:" + "e" * 64,
+            "active_requirements_digest": canonical_digest(requirements),
+            "active_report_digest": canonical_digest(report),
             "active_review_packet_digest": REVIEW_PACKET_DIGEST,
             "reviewed_snapshot_digest": "sha256:" + "b" * 64,
             "current_snapshot_digest": "sha256:" + "b" * 64,
@@ -1847,7 +1941,12 @@ class TransitionTests(unittest.TestCase):
             "artifact_hygiene_passed": True,
         }
         self.assertEqual(
-            packet_validator.validate_final_gate(evidence, previous),
+            packet_validator.validate_final_gate(
+                evidence,
+                previous,
+                report,
+                requirements,
+            ),
             [],
         )
         self.assertEqual(
@@ -1855,6 +1954,8 @@ class TransitionTests(unittest.TestCase):
                 previous,
                 current,
                 final_gate_evidence=evidence,
+                final_gate_report=report,
+                final_gate_requirements=requirements,
             ),
             [],
         )
@@ -1868,8 +1969,123 @@ class TransitionTests(unittest.TestCase):
                 previous,
                 tampered_complete,
                 final_gate_evidence=evidence,
+                final_gate_report=report,
+                final_gate_requirements=requirements,
             ),
         )
+
+    def test_final_gate_rejects_self_asserted_pass_without_report(self) -> None:
+        state = valid_state(
+            "FINAL_VERIFICATION",
+            1,
+            latest_decision="PASS",
+            active_requirements_digest="sha256:" + "a" * 64,
+            active_report_digest="sha256:" + "e" * 64,
+            active_review_packet_digest=REVIEW_PACKET_DIGEST,
+            reviewed_snapshot_digest="sha256:" + "b" * 64,
+            current_snapshot_digest="sha256:" + "b" * 64,
+            last_consumed_packet_digest=REVIEW_ENVELOPE_DIGEST,
+            last_consumed_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
+        )
+        evidence = {
+            "schema_version": 1,
+            "requirements_digest": state["active_requirements_digest"],
+            "review_packet_digest": state["active_review_packet_digest"],
+            "reviewed_snapshot_digest": state["reviewed_snapshot_digest"],
+            "current_snapshot_digest": state["current_snapshot_digest"],
+            "acceptance_gate_passed": True,
+            "local_checks_passed": True,
+            "scope_gate_passed": True,
+            "artifact_hygiene_passed": True,
+        }
+        self.assertIn(
+            "report: final gate requires the active implementation report",
+            packet_validator.validate_final_gate(evidence, state),
+        )
+
+    def test_final_gate_cli_requires_report_artifact(self) -> None:
+        with redirect_stdout(StringIO()), self.assertRaises(SystemExit):
+            main(
+                [
+                    "final-gate",
+                    "final-gate.json",
+                    "--state",
+                    "state.json",
+                ]
+            )
+
+    def test_final_gate_rejects_failed_or_incomplete_active_report(self) -> None:
+        requirements = valid_requirements()
+        report = valid_report(
+            requirements,
+            review_round=1,
+            snapshot_digest="sha256:" + "b" * 64,
+        )
+        state = valid_state(
+            "FINAL_VERIFICATION",
+            1,
+            latest_decision="PASS",
+            active_requirements_digest=canonical_digest(requirements),
+            active_report_digest=canonical_digest(report),
+            active_review_packet_digest=REVIEW_PACKET_DIGEST,
+            reviewed_snapshot_digest=report["snapshot_digest"],
+            current_snapshot_digest=report["snapshot_digest"],
+            last_consumed_packet_digest=REVIEW_ENVELOPE_DIGEST,
+            last_consumed_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
+        )
+        evidence = {
+            "schema_version": 1,
+            "requirements_digest": state["active_requirements_digest"],
+            "review_packet_digest": state["active_review_packet_digest"],
+            "reviewed_snapshot_digest": state["reviewed_snapshot_digest"],
+            "current_snapshot_digest": state["current_snapshot_digest"],
+            "acceptance_gate_passed": True,
+            "local_checks_passed": True,
+            "scope_gate_passed": True,
+            "artifact_hygiene_passed": True,
+        }
+        cases = (
+            (
+                dict(report, schema_version=True),
+                "schema_version: must be integer 1",
+            ),
+            (
+                dict(
+                    report,
+                    test_commands=[
+                        {
+                            "command": "python -m unittest",
+                            "outcome": "FAIL",
+                            "output_summary": "2 tests failed",
+                        }
+                    ],
+                ),
+                "report.test_commands.0.outcome: final gate requires PASS",
+            ),
+            (
+                dict(report, unresolved_risks_or_blockers=["Known data-loss risk"]),
+                "report.unresolved_risks_or_blockers: final gate requires an empty list",
+            ),
+            (
+                dict(report, omissions=["AC-1 output was omitted"]),
+                "report.omissions: final gate requires an empty list",
+            ),
+        )
+        for candidate, expected in cases:
+            with self.subTest(expected=expected):
+                candidate_state = dict(
+                    state,
+                    active_report_digest=canonical_digest(candidate),
+                )
+                self.assertIn(
+                    expected,
+                    packet_validator.validate_final_gate(
+                        evidence,
+                        candidate_state,
+                        candidate,
+                        requirements,
+                    ),
+                )
 
     def test_approved_material_revision_promotes_and_consumes_provenance(self) -> None:
         review_pending = valid_state(
@@ -2668,6 +2884,7 @@ class TransitionTests(unittest.TestCase):
         final_stop = valid_state(
             "BLOCKED",
             2,
+            latest_decision="PASS",
             stop_origin_phase="FINAL_VERIFICATION",
             stop_origin_category="FINAL_VERIFICATION_BLOCK",
             stop_reason="A final local gate cannot proceed.",
@@ -2679,12 +2896,70 @@ class TransitionTests(unittest.TestCase):
                 valid_state(
                     "FINAL_VERIFICATION",
                     2,
+                    latest_decision="PASS",
                     stop_sequence=1,
                     resolution_evidence="The unavailable local gate is restored.",
                     resolution_stop_sequence=1,
                 ),
             ),
             [],
+        )
+
+    def test_final_verification_stop_preserves_reviewed_report_bindings(self) -> None:
+        bindings = {
+            "active_requirements_digest": "sha256:" + "a" * 64,
+            "active_report_digest": "sha256:" + "b" * 64,
+            "current_snapshot_digest": "sha256:" + "c" * 64,
+            "active_review_packet_digest": "sha256:" + "d" * 64,
+            "reviewed_snapshot_digest": "sha256:" + "c" * 64,
+            "last_consumed_packet_digest": REVIEW_ENVELOPE_DIGEST,
+            "last_consumed_review_envelope_digest": REVIEW_ENVELOPE_DIGEST,
+        }
+        final_verification = valid_state(
+            "FINAL_VERIFICATION",
+            2,
+            latest_decision="PASS",
+            **bindings,
+        )
+        stopped = valid_state(
+            "BLOCKED",
+            2,
+            latest_decision="PASS",
+            stop_origin_phase="FINAL_VERIFICATION",
+            stop_origin_category="FINAL_VERIFICATION_BLOCK",
+            stop_reason="A final local gate cannot proceed.",
+            stop_sequence=1,
+            **bindings,
+        )
+        self.assertEqual(validate_transition(final_verification, stopped), [])
+
+        swapped_on_entry = dict(
+            stopped,
+            active_report_digest="sha256:" + "e" * 64,
+        )
+        self.assertIn(
+            "active_report_digest: final verification stop must preserve final-gate bindings",
+            validate_transition(final_verification, swapped_on_entry),
+        )
+
+        resumed = valid_state(
+            "FINAL_VERIFICATION",
+            2,
+            latest_decision="PASS",
+            stop_sequence=1,
+            resolution_evidence="The unavailable local gate is restored.",
+            resolution_stop_sequence=1,
+            **bindings,
+        )
+        self.assertEqual(validate_transition(stopped, resumed), [])
+
+        swapped_on_resume = dict(
+            resumed,
+            current_snapshot_digest="sha256:" + "f" * 64,
+        )
+        self.assertIn(
+            "current_snapshot_digest: final verification stop must preserve final-gate bindings",
+            validate_transition(stopped, swapped_on_resume),
         )
 
     def test_resume_consumes_stop_provenance_and_resolution_is_one_shot(self) -> None:

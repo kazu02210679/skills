@@ -45,6 +45,17 @@ REQUIRED_ACTIONS = frozenset(
     }
 )
 FINDING_SEVERITIES = frozenset({"BLOCKER", "HIGH", "MEDIUM", "LOW"})
+FINDING_CATEGORIES = frozenset(
+    {
+        "CORRECTNESS",
+        "TEST_COVERAGE",
+        "INSUFFICIENT_EVIDENCE",
+        "SCOPE",
+        "REQUIREMENTS",
+        "SAFETY",
+        "OTHER",
+    }
+)
 MATERIAL_CHANGE_FIELDS = (
     "behavior_changed",
     "scope_changed",
@@ -220,6 +231,17 @@ FINAL_GATE_FIELDS = (
     "local_checks_passed",
     "scope_gate_passed",
     "artifact_hygiene_passed",
+)
+FINAL_GATE_BINDING_STATE_FIELDS = (
+    "active_requirements_digest",
+    "active_report_digest",
+    "current_snapshot_digest",
+    "active_review_packet_digest",
+    "reviewed_snapshot_digest",
+    "last_consumed_packet_digest",
+    "last_consumed_review_envelope_digest",
+    "latest_decision",
+    "required_actions",
 )
 REVIEW_TRANSITION_CONTEXT_FIELDS = (
     "envelope",
@@ -784,17 +806,6 @@ def _result_statuses(results: object, errors: list[str]) -> dict[str, dict[str, 
     return normalized
 
 
-def _finding_requests_code_change(required_change: object) -> bool:
-    if isinstance(required_change, str):
-        return "CODE_CHANGE" in required_change
-    if isinstance(required_change, dict):
-        return any(
-            isinstance(value, str) and "CODE_CHANGE" in value
-            for value in required_change.values()
-        )
-    return False
-
-
 def derive_root_cause_fingerprint(finding: dict[str, object]) -> str:
     """Derive the controller-owned root-cause fingerprint from Pro source fields."""
     return canonical_digest(
@@ -899,6 +910,7 @@ def validate_review(packet, requirements, report):
                 "required_action",
                 "evidence",
                 "required_change",
+                "required_evidence",
             ),
             errors,
             path=path,
@@ -913,6 +925,13 @@ def validate_review(packet, requirements, report):
             or finding.get("severity") not in FINDING_SEVERITIES
         ):
             errors.append(f"{path}.severity: must be BLOCKER, HIGH, MEDIUM, or LOW")
+        if (
+            not isinstance(finding.get("category"), str)
+            or finding.get("category") not in FINDING_CATEGORIES
+        ):
+            errors.append(
+                f"{path}.category: must be a supported finding category"
+            )
         acceptance_id = finding.get("acceptance_id")
         if (
             isinstance(acceptance_id, str)
@@ -922,8 +941,33 @@ def validate_review(packet, requirements, report):
         action = finding.get("required_action")
         if not isinstance(action, str) or action not in REQUIRED_ACTIONS:
             errors.append(f"{path}.required_action: invalid required action")
-        if action == "PROVIDE_EVIDENCE" and _finding_requests_code_change(finding.get("required_change")):
-            errors.append(f"{path}.required_change: PROVIDE_EVIDENCE cannot request a code change")
+        if action == "PROVIDE_EVIDENCE":
+            if "required_change" in finding:
+                errors.append(
+                    f"{path}.required_change: PROVIDE_EVIDENCE cannot request a code change"
+                )
+            if not _is_nonempty_string(finding.get("required_evidence")):
+                errors.append(
+                    f"{path}.required_evidence: required for PROVIDE_EVIDENCE"
+                )
+        elif isinstance(action, str) and action in {"CODE_CHANGE", "TEST_CHANGE"}:
+            if not _is_nonempty_string(finding.get("required_change")):
+                message = (
+                    f"{path}.required_change: required for {action}"
+                    if "required_change" not in finding
+                    else f"{path}.required_change: must be a non-empty string"
+                )
+                errors.append(message)
+            if "required_evidence" in finding:
+                errors.append(
+                    f"{path}.required_evidence: allowed only for PROVIDE_EVIDENCE"
+                )
+        else:
+            for field in ("required_change", "required_evidence"):
+                if field in finding:
+                    errors.append(
+                        f"{path}.{field}: not allowed for {action}"
+                    )
         if review.get("decision") == "PASS" and finding.get("severity") == "BLOCKER":
             errors.append("decision: PASS cannot leave a blocking finding")
     scope_violations = _require_list(review, "scope_violations", errors)
@@ -1198,11 +1242,32 @@ def validate_review_context(
     return _errors_sorted(errors)
 
 
-def validate_final_gate(evidence, state) -> list[str]:
+def validate_final_gate(
+    evidence,
+    state,
+    report=None,
+    requirements=None,
+) -> list[str]:
     """Validate explicit completion evidence against trusted local state."""
     errors: list[str] = []
     gate = _as_mapping(evidence, "final_gate", errors)
     trusted_state = _as_mapping(state, "state", errors)
+    if not isinstance(report, dict):
+        errors.append(
+            "report: final gate requires the active implementation report"
+        )
+        active_report: dict[str, object] = {}
+    else:
+        active_report = report
+    if not isinstance(requirements, dict):
+        errors.append(
+            "requirements: final gate requires the active requirements packet"
+        )
+        active_requirements: dict[str, object] = {}
+    else:
+        active_requirements = requirements
+    if isinstance(report, dict) and isinstance(requirements, dict):
+        errors.extend(validate_report(active_report, active_requirements))
     if isinstance(state, dict):
         _validate_state_fields(trusted_state, "state", errors)
         _phase(trusted_state, "state", errors)
@@ -1246,6 +1311,49 @@ def validate_final_gate(evidence, state) -> list[str]:
         "state.active_report_digest",
         errors,
     )
+    report_digest = _canonical_digest_checked(
+        active_report,
+        "report",
+        errors,
+    )
+    if (
+        report_digest is not None
+        and report_digest != trusted_state.get("active_report_digest")
+    ):
+        errors.append(
+            "report: canonical digest does not match state.active_report_digest"
+        )
+    if active_report.get("requirements_digest") != gate.get(
+        "requirements_digest"
+    ):
+        errors.append(
+            "report.requirements_digest: does not match final gate requirements"
+        )
+    if active_report.get("snapshot_digest") != gate.get(
+        "current_snapshot_digest"
+    ):
+        errors.append(
+            "report.snapshot_digest: does not match the final product snapshot"
+        )
+    test_commands = active_report.get("test_commands")
+    if not isinstance(test_commands, list) or not test_commands:
+        errors.append(
+            "report.test_commands: final gate requires at least one local check"
+        )
+    else:
+        for index, command in enumerate(test_commands):
+            if (
+                not isinstance(command, dict)
+                or command.get("outcome") != "PASS"
+            ):
+                errors.append(
+                    f"report.test_commands.{index}.outcome: final gate requires PASS"
+                )
+    for field in ("omissions", "unresolved_risks_or_blockers"):
+        if active_report.get(field) != []:
+            errors.append(
+                f"report.{field}: final gate requires an empty list"
+            )
     if trusted_state.get("pending_review_envelope_digest") is not None:
         errors.append(
             "state.pending_review_envelope_digest: final gate requires consumed review identity"
@@ -1867,6 +1975,12 @@ def _validate_stop_entry(
                 errors.append(
                     f"{field}: requirements approval stop must preserve the proposed revision"
                 )
+    if expected_category == "FINAL_VERIFICATION_BLOCK":
+        for field in FINAL_GATE_BINDING_STATE_FIELDS:
+            if current_state.get(field) != previous_state.get(field):
+                errors.append(
+                    f"{field}: final verification stop must preserve final-gate bindings"
+                )
 
 
 def _resume_target_description(targets: tuple[str, ...]) -> str:
@@ -1936,6 +2050,12 @@ def _validate_stop_resume(
         errors.append(
             "latest_requirements_decision: resume must clear the prior requirements decision"
         )
+    if category == "FINAL_VERIFICATION_BLOCK" and current_phase == "FINAL_VERIFICATION":
+        for field in FINAL_GATE_BINDING_STATE_FIELDS:
+            if current_state.get(field) != previous_state.get(field):
+                errors.append(
+                    f"{field}: final verification stop must preserve final-gate bindings"
+                )
     material_approval_promotion = (
         category == "REQUIREMENTS_NEED_USER_INPUT"
         and current_phase == "REQUIREMENTS_FROZEN"
@@ -2561,6 +2681,8 @@ def validate_transition(
     requirements_context=None,
     review_context=None,
     final_gate_evidence=None,
+    final_gate_report=None,
+    final_gate_requirements=None,
 ):
     """Validate trusted local state movement and explicit packet receipts."""
     errors: list[str] = []
@@ -2965,7 +3087,12 @@ def validate_transition(
                 )
             else:
                 errors.extend(
-                    validate_final_gate(final_gate_evidence, previous_state)
+                    validate_final_gate(
+                        final_gate_evidence,
+                        previous_state,
+                        final_gate_report,
+                        final_gate_requirements,
+                    )
                 )
         elif final_gate_evidence is not None:
             errors.append(
@@ -3022,12 +3149,16 @@ def main(argv: list[str] | None = None) -> int:
     final_gate_parser = subparsers.add_parser("final-gate")
     final_gate_parser.add_argument("evidence")
     final_gate_parser.add_argument("--state", required=True)
+    final_gate_parser.add_argument("--report", required=True)
+    final_gate_parser.add_argument("--requirements", required=True)
     transition_parser = subparsers.add_parser("transition")
     transition_parser.add_argument("previous")
     transition_parser.add_argument("current")
     transition_parser.add_argument("--requirements-context")
     transition_parser.add_argument("--review-context")
     transition_parser.add_argument("--final-gate")
+    transition_parser.add_argument("--final-report")
+    transition_parser.add_argument("--final-requirements")
     args = parser.parse_args(argv)
     try:
         if args.command == "extract":
@@ -3079,7 +3210,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.command == "final-gate":
             value = _load_json(args.evidence)
-            errors = validate_final_gate(value, _load_json(args.state))
+            errors = validate_final_gate(
+                value,
+                _load_json(args.state),
+                _load_json(args.report),
+                _load_json(args.requirements),
+            )
         else:
             value = {"previous": _load_json(args.previous), "current": _load_json(args.current)}
             errors = validate_transition(
@@ -3098,6 +3234,16 @@ def main(argv: list[str] | None = None) -> int:
                 final_gate_evidence=(
                     _load_json(args.final_gate)
                     if args.final_gate
+                    else None
+                ),
+                final_gate_report=(
+                    _load_json(args.final_report)
+                    if args.final_report
+                    else None
+                ),
+                final_gate_requirements=(
+                    _load_json(args.final_requirements)
+                    if args.final_requirements
                     else None
                 ),
             )
