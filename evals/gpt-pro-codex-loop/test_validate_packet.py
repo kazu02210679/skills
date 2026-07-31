@@ -576,6 +576,10 @@ def bind_requirements_transition_context(
         if has_pending_revision
         else None
     )
+    decision = current.get("latest_requirements_decision")
+    if decision not in {"PLAN_READY", "NEED_USER_INPUT", "BLOCK"}:
+        decision = "PLAN_READY"
+        current["latest_requirements_decision"] = decision
     requirements = valid_requirements(
         requirements_revision=revision,
         supersedes_digest=supersedes_digest,
@@ -593,7 +597,7 @@ def bind_requirements_transition_context(
             "prior_evidence_invalidated"
         ),
         review_round_reset=previous.get("review_round_reset"),
-        decision=current.get("latest_requirements_decision"),
+        decision=decision,
     )
     requirements_digest = canonical_digest(requirements)
     chain_head = previous.get("last_consumed_packet_digest")
@@ -629,10 +633,15 @@ def bind_requirements_transition_context(
                 active_requirements_digest=requirements_digest,
             )
     else:
-        previous.update(
-            active_requirements_revision=revision,
-            active_requirements_digest=requirements_digest,
+        initial_unbound = (
+            previous.get("active_requirements_revision") is None
+            and previous.get("active_requirements_digest") is None
         )
+        if not initial_unbound:
+            previous.update(
+                active_requirements_revision=revision,
+                active_requirements_digest=requirements_digest,
+            )
         current.update(
             active_requirements_revision=revision,
             active_requirements_digest=requirements_digest,
@@ -2507,11 +2516,55 @@ class TransitionTests(unittest.TestCase):
             validate_transition(valid_state("PREFLIGHT", 0), injected),
         )
 
-    def test_active_requirements_provenance_is_initialized_once_after_preflight(self) -> None:
+    def test_initial_requirements_pending_may_remain_unbound(self) -> None:
+        previous = valid_state("PREFLIGHT", 0)
+        current = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+            pending_requirements_envelope_digest=None,
+        )
+        self.assertEqual(validate_transition(previous, current), [])
+
+    def test_unbound_requirements_are_rejected_outside_initial_pending(self) -> None:
+        for phase in ("REQUIREMENTS_FROZEN", "IMPLEMENTING", "LOCAL_VERIFICATION"):
+            with self.subTest(phase=phase):
+                state = valid_state(
+                    phase,
+                    0,
+                    active_requirements_revision=None,
+                    active_requirements_digest=None,
+                )
+                self.assertTrue(
+                    any(
+                        "active_requirements" in error
+                        for error in validate_transition(state, state)
+                    )
+                )
+
+    def test_first_requirements_packet_binds_the_unbound_initial_state(self) -> None:
+        previous = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+            pending_requirements_envelope_digest=None,
+        )
+        current = valid_state("REQUIREMENTS_FROZEN", 0)
+        self.assertEqual(validate_bound_requirements_transition(previous, current), [])
+
+    def test_active_requirements_provenance_is_initialized_once_after_initial_requirements(self) -> None:
         self.assertEqual(
             validate_transition(
                 valid_state("PREFLIGHT", 0),
-                valid_state("REQUIREMENTS_PENDING", 0),
+                valid_state(
+                    "REQUIREMENTS_PENDING",
+                    0,
+                    active_requirements_revision=None,
+                    active_requirements_digest=None,
+                    pending_requirements_envelope_digest=None,
+                ),
             ),
             [],
         )
@@ -2530,7 +2583,7 @@ class TransitionTests(unittest.TestCase):
             active_requirements_digest=None,
         )
         self.assertIn(
-            "current.active_requirements: revision and digest are required after preflight",
+            "current.active_requirements: revision and digest are required after initial requirements",
             validate_transition(null_pending, null_frozen),
         )
 
@@ -2547,7 +2600,7 @@ class TransitionTests(unittest.TestCase):
             active_requirements_digest="sha256:" + "b" * 64,
         )
         self.assertIn(
-            "active_requirements: may be initialized only when preflight enters requirements pending",
+            "active_requirements: may be initialized only when initial requirements are frozen",
             validate_transition(late_source, late_injection),
         )
 
@@ -3075,7 +3128,13 @@ class TransitionTests(unittest.TestCase):
             bound_conversation_url=None,
             visible_model_label=None,
         )
-        bound = valid_state("REQUIREMENTS_PENDING", 0)
+        bound = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+            pending_requirements_envelope_digest=None,
+        )
         self.assertEqual(validate_transition(unbound, bound), [])
 
         for field, value in (

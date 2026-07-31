@@ -1401,6 +1401,18 @@ def _has_pending_requirements_provenance(state: dict[str, object]) -> bool:
     )
 
 
+def _is_initial_unbound_requirements(state: dict[str, object]) -> bool:
+    """Return whether state is the sole post-preflight unbound requirements state."""
+    return (
+        state.get("phase") == "REQUIREMENTS_PENDING"
+        and state.get("review_round") == 0
+        and state.get("active_requirements_revision") is None
+        and state.get("active_requirements_digest") is None
+        and state.get("last_consumed_packet_digest") is None
+        and not _has_pending_requirements_provenance(state)
+    )
+
+
 def _validate_conversation_binding(
     state: dict[str, object], name: str, errors: list[str]
 ) -> bool:
@@ -1652,6 +1664,8 @@ def _validate_state_fields(
             errors.append(
                 f"{name}.active_requirements: must be null during preflight"
             )
+    elif _is_initial_unbound_requirements(state):
+        pass
     elif (
         not isinstance(active_revision, int)
         or isinstance(active_revision, bool)
@@ -1660,7 +1674,7 @@ def _validate_state_fields(
         or not DIGEST_PATTERN.fullmatch(active_digest)
     ):
         errors.append(
-            f"{name}.active_requirements: revision and digest are required after preflight"
+            f"{name}.active_requirements: revision and digest are required after initial requirements"
         )
     pending_revision = state.get("pending_requirements_revision")
     pending_digest = state.get("pending_requirements_digest")
@@ -2556,6 +2570,7 @@ def _validate_requirements_transition_context(
     has_pending_revision = (
         pending_revision is not None or pending_digest is not None
     )
+    initial_unbound = _is_initial_unbound_requirements(previous_state)
     if has_pending_revision:
         if requirements_packet.get("requirements_revision") != pending_revision:
             errors.append(
@@ -2579,6 +2594,15 @@ def _validate_requirements_transition_context(
                 errors.append(
                     f"requirements_context.{field}: does not match pending requirements provenance"
                 )
+    elif initial_unbound:
+        if requirements_packet.get("requirements_revision") != 1:
+            errors.append(
+                "requirements_context.requirements_revision: initial requirements must be revision 1"
+            )
+        if requirements_packet.get("supersedes_digest") is not None:
+            errors.append(
+                "requirements_context.supersedes_digest: initial requirements must not supersede a digest"
+            )
     else:
         if (
             requirements_packet.get("requirements_revision")
@@ -2963,16 +2987,27 @@ def validate_transition(
             "active_requirements_revision"
         )
         current_active_digest = current_state.get("active_requirements_digest")
-        initial_active_binding = (
+        initial_preflight_state = (
             previous_phase == "PREFLIGHT"
             and current_phase == "REQUIREMENTS_PENDING"
             and previous_active_revision is None
             and previous_active_digest is None
+            and current_active_revision is None
+            and current_active_digest is None
+        )
+        initial_requirements_binding = (
+            previous_phase == "REQUIREMENTS_PENDING"
+            and current_phase == "REQUIREMENTS_FROZEN"
+            and _is_initial_unbound_requirements(previous_state)
             and current_active_revision == 1
             and isinstance(current_active_digest, str)
             and bool(DIGEST_PATTERN.fullmatch(current_active_digest))
         )
-        if not promotion_attempt and not initial_active_binding:
+        if (
+            not promotion_attempt
+            and not initial_preflight_state
+            and not initial_requirements_binding
+        ):
             if (
                 previous_active_revision is None
                 and previous_active_digest is None
@@ -2982,7 +3017,7 @@ def validate_transition(
                 )
             ):
                 errors.append(
-                    "active_requirements: may be initialized only when preflight enters requirements pending"
+                    "active_requirements: may be initialized only when initial requirements are frozen"
                 )
             if (
                 current_active_revision
