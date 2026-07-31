@@ -244,6 +244,7 @@ def test_status_is_read_only_and_reports_lock_and_orphan_transaction(self) -> No
     status = controller.status_run(self.repository, "controller-test")
     self.assertTrue(status["lock_present"])
     self.assertEqual(status["orphan_transactions"], ["orphan"])
+    self.assertEqual(status["next_commands"], ["prepare-requirements"])
     self.assertEqual(paths.state.read_bytes(), original)
 ```
 
@@ -397,7 +398,17 @@ Use a phase-to-command function so a review-origin user stop cannot be mistaken
 for a requirements approval:
 
 ```python
-def next_commands(state: Mapping[str, object]) -> list[str]:
+def next_commands(
+    state: Mapping[str, object],
+    outstanding_attempt: Mapping[str, object] | None,
+) -> list[str]:
+    if outstanding_attempt is not None:
+        packet_type = outstanding_attempt["expected_header"]["packet_type"]
+        if packet_type == "requirements" and state["phase"] == "REQUIREMENTS_PENDING":
+            return ["accept-requirements", "abandon-attempt"]
+        if packet_type == "review" and state["phase"] == "REVIEW_PENDING":
+            return ["accept-review", "abandon-attempt"]
+        return []
     if state["phase"] == "USER_DECISION_REQUIRED":
         return (
             ["approve-requirements"]
@@ -409,7 +420,7 @@ def next_commands(state: Mapping[str, object]) -> list[str]:
         "REQUIREMENTS_FROZEN": ["build-report"],
         "IMPLEMENTING": ["build-report"],
         "LOCAL_VERIFICATION": ["build-report", "prepare-review"],
-        "REVIEW_PENDING": ["prepare-review", "accept-review"],
+        "REVIEW_PENDING": ["prepare-review"],
         "FINAL_VERIFICATION": ["final-verify"],
         "COMPLETE": [],
         "BLOCKED": [],
@@ -420,6 +431,9 @@ def next_commands(state: Mapping[str, object]) -> list[str]:
 Return only phase, revision, review round, safe conversation/model summary,
 actions, stop category, outstanding attempt names, lock presence, orphan
 transaction names, unreachable artifact names, and permitted commands.
+`status_run` passes the single discovered outstanding attempt, or `None`, to
+`next_commands`; it never returns both `prepare-*` and `accept-*` for one
+semantic turn.
 
 - [ ] **Step 6: Run Task 1 tests and existing suites**
 
@@ -518,6 +532,10 @@ def test_prepare_requirements_persists_expected_header_before_return(self) -> No
     self.assertEqual(
         expected["prompt_digest"],
         result["prompt_digest"],
+    )
+    self.assertEqual(
+        controller.status_run(self.repository, "controller-test")["next_commands"],
+        ["accept-requirements", "abandon-attempt"],
     )
 
 def test_second_outstanding_attempt_is_refused(self) -> None:
@@ -1076,7 +1094,11 @@ The local evidence object is closed:
 Add fixture helpers:
 
 ```python
-def _write_local_evidence(self, intents: dict[str, str]) -> Path:
+def _write_local_evidence(
+    self,
+    intents: dict[str, str],
+    **overrides: object,
+) -> Path:
     path = self.repository / "local-evidence.json"
     value = {
         "schema_version": 1,
@@ -1094,6 +1116,7 @@ def _write_local_evidence(self, intents: dict[str, str]) -> Path:
         "omissions": [],
         "unresolved_risks_or_blockers": [],
     }
+    value.update(overrides)
     path.write_text(
         json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -1101,10 +1124,13 @@ def _write_local_evidence(self, intents: dict[str, str]) -> Path:
     return path
 
 
-def _build_valid_report(self) -> dict[str, object]:
+def _build_valid_report(self, **evidence_overrides: object) -> dict[str, object]:
     self._freeze_initial_requirements()
     (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
-    evidence = self._write_local_evidence({"example.py": "Implement AC-1."})
+    evidence = self._write_local_evidence(
+        {"example.py": "Implement AC-1."},
+        **evidence_overrides,
+    )
     return controller.build_report(
         self.repository, "controller-test", evidence
     )
@@ -1153,6 +1179,10 @@ def test_prepare_review_binds_active_requirements_report_and_snapshot(self) -> N
         self._state()["last_consumed_packet_digest"],
     )
     self.assertIn(self._state()["active_requirements_digest"], prompt)
+    self.assertEqual(
+        controller.status_run(self.repository, "controller-test")["next_commands"],
+        ["accept-review", "abandon-attempt"],
+    )
 ```
 
 - [ ] **Step 2: Run report tests and verify RED**
@@ -1303,8 +1333,8 @@ def _valid_changes_review(
     return value
 
 
-def _prepare_valid_review(self) -> dict[str, object]:
-    self._build_valid_report()
+def _prepare_valid_review(self, **evidence_overrides: object) -> dict[str, object]:
+    self._build_valid_report(**evidence_overrides)
     return controller.prepare_review(self.repository, "controller-test")
 
 
@@ -1317,8 +1347,8 @@ def _write_review_response(
     return raw
 
 
-def _accept_pass_review(self) -> dict[str, object]:
-    attempt = self._prepare_valid_review()
+def _accept_pass_review(self, **evidence_overrides: object) -> dict[str, object]:
+    attempt = self._prepare_valid_review(**evidence_overrides)
     raw = self._write_review_response(attempt, self._valid_pass_review())
     return controller.accept_review(
         self.repository,
@@ -1327,13 +1357,6 @@ def _accept_pass_review(self) -> dict[str, object]:
         self._state()["bound_conversation_url"],
         "Pro",
     )
-
-
-def _replace_report_test_outcome(self, outcome: str) -> None:
-    path = sorted(self._run_dir().glob("implementation-report-*.json"))[-1]
-    report = controller.load_json(path)
-    report["test_commands"][0]["outcome"] = outcome
-    controller.write_json_atomic(path, report)
 ```
 
 Add tests:
@@ -1404,9 +1427,67 @@ def test_final_verify_derives_gate_and_completes_unchanged_snapshot(self) -> Non
         )
     ))
 
-def test_final_verify_rejects_failed_report_without_state_change(self) -> None:
+def test_final_verify_rejects_bound_failed_report_without_state_change(self) -> None:
+    self._accept_pass_review(
+        test_commands=[
+            {
+                "command": "python -m unittest test_example.py -v",
+                "outcome": "FAIL",
+                "output_summary": "1 test failed.",
+            }
+        ]
+    )
+    before = self._state_bytes()
+    with self.assertRaises(controller.ControllerError):
+        controller.final_verify(self.repository, "controller-test")
+    self.assertEqual(self._state_bytes(), before)
+
+def test_final_verify_rejects_bound_report_with_omission(self) -> None:
+    self._accept_pass_review(omissions=["AC-1 edge case was not exercised."])
+    before = self._state_bytes()
+    with self.assertRaises(controller.ControllerError):
+        controller.final_verify(self.repository, "controller-test")
+    self.assertEqual(self._state_bytes(), before)
+
+def test_final_verify_rejects_bound_report_with_blocker(self) -> None:
+    self._accept_pass_review(
+        unresolved_risks_or_blockers=["Required dependency is unavailable."]
+    )
+    before = self._state_bytes()
+    with self.assertRaises(controller.ControllerError):
+        controller.final_verify(self.repository, "controller-test")
+    self.assertEqual(self._state_bytes(), before)
+
+def test_pass_with_scope_violation_is_rejected_before_final_gate(self) -> None:
+    attempt = self._prepare_valid_review()
+    review = self._valid_pass_review()
+    review["scope_violations"] = ["example.py changed outside the frozen scope."]
+    raw = self._write_review_response(attempt, review)
+    before = self._state_bytes()
+    with self.assertRaises(controller.ControllerError):
+        controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+    self.assertEqual(self._state_bytes(), before)
+
+def test_final_verify_rejects_tracked_or_staged_run_metadata(self) -> None:
     self._accept_pass_review()
-    self._replace_report_test_outcome("FAIL")
+    subprocess.run(
+        [
+            "git",
+            "add",
+            "-f",
+            ".ai-pro-loop/controller-test/state.json",
+        ],
+        cwd=self.repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     before = self._state_bytes()
     with self.assertRaises(controller.ControllerError):
         controller.final_verify(self.repository, "controller-test")
@@ -1524,8 +1605,8 @@ validate_packet.validate_transition(
     state,
     complete_candidate,
     final_gate_evidence=gate,
-    final_report=report,
-    final_requirements=requirements,
+    final_gate_report=report,
+    final_gate_requirements=requirements,
 ) == []
 ```
 

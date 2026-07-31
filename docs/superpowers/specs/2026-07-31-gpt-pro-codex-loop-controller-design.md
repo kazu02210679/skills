@@ -365,7 +365,13 @@ Read only. Print canonical JSON containing:
 - conversation/model binding summary without credentials;
 - pending actions and stop category;
 - outstanding attempt, if any;
-- the exact next controller commands permitted by the phase.
+- the exact next controller commands permitted by the combination of phase and
+  outstanding-attempt state.
+
+When no attempt is outstanding, a pending requirements or review phase offers
+only its matching `prepare-*` command. When an attempt is outstanding, `status`
+offers only the matching `accept-*` command and `abandon-attempt`; it must not
+also offer a `prepare-*` command that is guaranteed to fail.
 
 `status` must work when an orphan transaction or lock exists and report it
 without deleting it.
