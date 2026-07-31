@@ -27,8 +27,8 @@ python skills/gpt-pro-codex-loop/scripts/validate_packet.py report-context REPOR
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py review-context REVIEW_ENVELOPE.json --requirements REQUIREMENTS.json --report REPORT.json --state STATE.json --snapshot SNAPSHOT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-context REQUIREMENTS_CONTEXT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --review-context REVIEW_CONTEXT.json
-python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --final-gate FINAL_GATE.json
-python skills/gpt-pro-codex-loop/scripts/validate_packet.py final-gate FINAL_GATE.json --state STATE.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --final-gate FINAL_GATE.json --final-report REPORT.json --final-requirements REQUIREMENTS.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py final-gate FINAL_GATE.json --state STATE.json --report REPORT.json --requirements REQUIREMENTS.json
 python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py inspect-preflight REPOSITORY BASELINE
 python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py validate-preflight PREFLIGHT.json --approved-existing-path PATH
 python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py capture REPOSITORY BASELINE --preflight PREFLIGHT.json
@@ -137,7 +137,15 @@ Complete report matching the examples in this reference:
 
 ## Review findings and locally derived fingerprint
 
-A v1 Pro finding is closed and requires `id`, `acceptance_id`, `root_cause_key`, `severity`, `category`, `required_action`, and `evidence`; `required_change` is optional. `acceptance_id` must name an active criterion. Pro supplies only these stable source fields. Codex computes:
+A v1 Pro finding is closed and requires `id`, `acceptance_id`, `root_cause_key`, `severity`, `category`, `required_action`, and `evidence`. `category` is exactly one of `CORRECTNESS`, `TEST_COVERAGE`, `INSUFFICIENT_EVIDENCE`, `SCOPE`, `REQUIREMENTS`, `SAFETY`, or `OTHER`. `acceptance_id` must name an active criterion.
+
+Action payloads are structural:
+
+- `CODE_CHANGE` and `TEST_CHANGE` require one non-empty `required_change` string and forbid `required_evidence`.
+- `PROVIDE_EVIDENCE` requires one non-empty `required_evidence` string and forbids `required_change`.
+- `REQUIREMENTS_REVISION` and `USER_DECISION` forbid both action-detail fields.
+
+Pro supplies only these stable source fields. Codex computes:
 
 ```python
 canonical_digest({
@@ -178,6 +186,8 @@ This PASS example refers to the requirements payload above and a report whose sn
   }
 }
 ```
+
+The visible model label is a UI attestation used to detect an obvious silent downgrade. It is not a cryptographic proof of the underlying model identity and may require a contract update when ChatGPT UI labels or localization change.
 
 `PASS` is invalid unless every acceptance item is present and `PASS`, findings and scope violations are empty, evidence is sufficient, and both digests match. `PROVIDE_EVIDENCE` never authorizes product changes.
 
@@ -310,4 +320,4 @@ Completion requires this closed object:
 }
 ```
 
-Every digest must match trusted active state and every boolean must be JSON `true`. Product drift invalidates Pro `PASS`, requires a new report/snapshot, and returns to fresh review.
+Every digest must match trusted active state and every boolean must be JSON `true`. The final gate revalidates the exact active requirements packet and the full report schema, then requires the report canonical digest to equal `state.active_report_digest`; every `test_commands[].outcome` must be `PASS`, `omissions` and `unresolved_risks_or_blockers` must be empty, and the report requirements/snapshot digests must match the gate. A `FINAL_VERIFICATION_BLOCK` stop preserves all reviewed report, snapshot, review, and consumption bindings when entering the stop or resuming directly to final verification. Product drift or a changed report invalidates Pro `PASS`, requires a new report/snapshot, and returns to fresh review.

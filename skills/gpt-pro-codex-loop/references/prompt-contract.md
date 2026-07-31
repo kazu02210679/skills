@@ -99,7 +99,9 @@ schema_version=1; requirements_digest={{REQUIREMENTS_DIGEST}}; reviewed_snapshot
 
 Each acceptance_results value is exactly {status, evidence}. status is PASS, FAIL, or UNVERIFIED. evidence is one non-empty string, never an array or object.
 
-Each finding has exactly id, acceptance_id, root_cause_key, severity, category, required_action, evidence, and optional required_change. severity is exactly BLOCKER, HIGH, MEDIUM, or LOW. acceptance_id names an active criterion. root_cause_key is a stable descriptive key, not a digest. Do not include root_cause_fingerprint; Codex derives it locally after validation. Allowed actions: CODE_CHANGE, TEST_CHANGE, PROVIDE_EVIDENCE, REQUIREMENTS_REVISION, USER_DECISION.
+Each finding has exactly id, acceptance_id, root_cause_key, severity, category, required_action, evidence, plus only the action-specific detail described below. severity is exactly BLOCKER, HIGH, MEDIUM, or LOW. category is exactly CORRECTNESS, TEST_COVERAGE, INSUFFICIENT_EVIDENCE, SCOPE, REQUIREMENTS, SAFETY, or OTHER. acceptance_id names an active criterion. root_cause_key is a stable descriptive key, not a digest. Do not include root_cause_fingerprint; Codex derives it locally after validation. Allowed actions: CODE_CHANGE, TEST_CHANGE, PROVIDE_EVIDENCE, REQUIREMENTS_REVISION, USER_DECISION.
+
+For CODE_CHANGE or TEST_CHANGE, include exactly one non-empty required_change string and omit required_evidence. For PROVIDE_EVIDENCE, include exactly one non-empty required_evidence string and omit required_change. For REQUIREMENTS_REVISION or USER_DECISION, omit both fields. Never imply a product or test change in evidence-only fields.
 
 PASS requires every acceptance result PASS, findings=[], scope_violations=[], exact digests, and sufficient supplied evidence.
 

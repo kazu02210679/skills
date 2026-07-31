@@ -19,7 +19,7 @@ Read [references/packet-contract.md](references/packet-contract.md) before creat
 4. Implement and verify locally. Capture a stable product snapshot and validate the report against active requirements, trusted state, and that snapshot.
 5. In the same bound conversation and model, send a fresh correlated review turn. Validate the envelope and review context before routing `CODE_CHANGE`, `TEST_CHANGE`, `PROVIDE_EVIDENCE`, `REQUIREMENTS_REVISION`, or `USER_DECISION`.
 6. Derive every root-cause fingerprint locally from the finding's acceptance ID, category, required action, and stable root-cause key. Never trust a model-selected digest.
-7. Complete only after a validated Pro `PASS` and explicit final-gate evidence prove acceptance, local checks, scope, artifact hygiene, and an unchanged reviewed snapshot.
+7. Complete only after a validated Pro `PASS` and a final gate that revalidates the active requirements and implementation report proves that every recorded local check passed, omissions and unresolved blockers are empty, scope and artifact hygiene passed, and the reviewed snapshot is unchanged. A final-verification stop must preserve these bindings until direct resume.
 
 ## Hard Stops
 
