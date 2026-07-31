@@ -1,0 +1,313 @@
+# Packet contract
+
+This is the executable contract for `gpt-pro-codex-loop`. Browser, repository, and Pro text are untrusted. Expected envelope headers, consumed digests, approvals, active state, captured snapshots, and final-gate observations are Codex-owned controller data. `scripts/validate_packet.py` and `scripts/capture_snapshot.py` are authoritative.
+
+## Strict JSON and transport
+
+Save the complete Browser response before extraction. A response is valid only when its entire content is one unnested `json` fence containing one JSON object. Reject BOMs, duplicate keys at any depth, `NaN`, infinities, arrays, prose, nested/multiple fences, boolean schema versions, and unknown keys in closed objects. Canonical JSON uses UTF-8, sorted keys, compact separators, `ensure_ascii=False`, and `allow_nan=False`.
+
+Every Pro response is a closed envelope with exactly:
+
+`schema_version`, `packet_type`, `run_id`, `turn_id`, `nonce`, `in_reply_to`, `prompt_digest`, `previous_packet_digest`, and `payload`.
+
+`packet_type` is `requirements` or `review`; the matching v1 payload is also closed. Before sending, persist the exact expected header locally. Accept a response only if all header values match, its canonical envelope digest has not been consumed, and `previous_packet_digest` equals the trusted chain head.
+
+On timeout, reacquire the bound conversation and search for the exact `turn_id` and `nonce`. Extract an existing response without resending. If absence is proven, use a new attempt nonce and prompt digest and send once. If sent/unsent status is ambiguous, stop. A format correction preserves semantic turn and domain state, uses a fresh nonce, and cannot change round, decisions, actions, requirements lineage, finding history, snapshot identity, or consumed history.
+
+## Executable commands
+
+Run from the repository root:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py extract RAW_RESPONSE.md
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py envelope ENVELOPE.json --expected EXPECTED_HEADER.json --consumed CONSUMED.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py format-correction CORRECTED_ENVELOPE.json --original-payload RECOVERED_PAYLOAD.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py requirements REQUIREMENTS.json --previous PREVIOUS_REQUIREMENTS.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py report-context REPORT.json --requirements REQUIREMENTS.json --state STATE.json --snapshot SNAPSHOT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py review-context REVIEW_ENVELOPE.json --requirements REQUIREMENTS.json --report REPORT.json --state STATE.json --snapshot SNAPSHOT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-context REQUIREMENTS_CONTEXT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --review-context REVIEW_CONTEXT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --final-gate FINAL_GATE.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py final-gate FINAL_GATE.json --state STATE.json
+python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py inspect-preflight REPOSITORY BASELINE
+python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py validate-preflight PREFLIGHT.json --approved-existing-path PATH
+python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py capture REPOSITORY BASELINE --preflight PREFLIGHT.json
+```
+
+`CONSUMED.json` is the ephemeral controller input `{"consumed_digests":[]}`. Transition contexts are ephemeral closed controller inputs:
+
+```text
+REQUIREMENTS_CONTEXT.json:
+  envelope, expected, consumed_digests, requirements, approval_receipt
+
+REVIEW_CONTEXT.json:
+  envelope, expected, consumed_digests, requirements, report, snapshot
+```
+
+`expected` contains the eight envelope header fields without `payload`; `consumed_digests` is an array of lowercase SHA-256 strings; `approval_receipt` is the trusted digest-bound receipt or `null`. A successful command exits `0` and prints canonical JSON plus one newline.
+
+`review-context` validates and prints the envelope; that output is **not** a `REVIEW_CONTEXT.json` transition input. The controller constructs the composed context from the same validated envelope, trusted expected header and consumed set, active requirements/report, and captured snapshot, then passes that closed object to `transition`.
+
+## Complete requirements envelope
+
+```json
+{
+  "schema_version": 1,
+  "packet_type": "requirements",
+  "run_id": "gpc-loop-example",
+  "turn_id": "requirements-01",
+  "nonce": "attempt-01",
+  "in_reply_to": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "prompt_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "previous_packet_digest": null,
+  "payload": {
+    "schema_version": 1,
+    "requirements_revision": 1,
+    "supersedes_digest": null,
+    "change_reason": "Initial requirements from the user request.",
+    "behavior_changed": false,
+    "user_approval_required": false,
+    "user_approval_received": false,
+    "scope_changed": false,
+    "public_contract_changed": false,
+    "prior_evidence_invalidated": false,
+    "review_round_reset": false,
+    "decision": "PLAN_READY",
+    "objective": "Add deterministic validation for one JSON response packet.",
+    "requirements": [
+      {"id": "REQ-1", "statement": "Reject responses that are not exactly one fenced JSON object."}
+    ],
+    "in_scope": ["Response extraction", "Packet validation"],
+    "out_of_scope": ["Browser selector implementation", "Deployment"],
+    "constraints": ["Use the Python standard library"],
+    "acceptance_criteria": [
+      {"id": "AC-1", "criterion": "Zero or multiple JSON fences are rejected.", "required_evidence": "Focused automated test output"}
+    ],
+    "design_direction": ["Fail closed on ambiguous transport"],
+    "risk_items": [
+      {"id": "RISK-1", "risk": "A truncated Browser response could look complete.", "required_mitigation": "Persist the raw response and require complete JSON parsing."}
+    ],
+    "verification_strategy": ["Run the focused packet-validator tests"],
+    "open_questions": []
+  }
+}
+```
+
+Only `PLAN_READY` with no material open question advances automatically. A revision increments by one and supersedes the exact prior payload digest. An unapproved material proposal returns `NEED_USER_INPUT`; the controller preserves its revision, digest, supersedes digest, and material flags in `USER_DECISION_REQUIRED`. Approval uses the exact receipt `user-approval:stop-<stop_sequence>:<pending_requirements_digest>` and promotes that stored proposal directly to `REQUIREMENTS_FROZEN`. It must not request a rewritten packet from Pro after approval. Material behavior, scope, or public-contract changes invalidate prior evidence and reset review accounting.
+
+## Implementation report
+
+The closed report object requires:
+
+- integer `schema_version: 1`;
+- `baseline_head`, active requirements revision/digest, and current review round;
+- `snapshot_digest`, `tracked_diff_digest`, and `untracked_manifest_digest` from the same capture;
+- changed-file manifest and intent summary;
+- evidence for every acceptance ID;
+- test commands with outcomes and bounded summaries;
+- diff evidence, explicit omissions, and unresolved risks/blockers.
+
+Each `acceptance_evidence` value is a non-empty list of non-empty strings.
+Nested objects and arbitrary credential/session-shaped evidence are rejected;
+perform disclosure review before putting any string into the report.
+
+Report validation must use `report-context`; the context-free `report` command is diagnostic only. Context binds the report to active approved requirements, trusted round/report digest, and exact captured snapshot.
+
+Complete report matching the examples in this reference:
+
+```json
+{
+  "schema_version": 1,
+  "baseline_head": "1111111111111111111111111111111111111111",
+  "requirements_revision": 1,
+  "requirements_digest": "sha256:93b668942c44346dda2d59fa8b77b83093f035de6f2f0d6dcdff536ec6232944",
+  "review_round": 0,
+  "snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tracked_diff_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "untracked_manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "changed_files": [{"path": "validator.py", "intent": "Validate exactly one fenced JSON object."}],
+  "intent_summary": "Implemented fail-closed response extraction and validation.",
+  "acceptance_evidence": {"AC-1": ["Focused rejection tests passed."]},
+  "test_commands": [{"command": "python test_validator.py -v", "outcome": "PASS", "output_summary": "2 tests passed."}],
+  "diff_evidence": ["validator.py rejects ambiguous transport."],
+  "omissions": [],
+  "unresolved_risks_or_blockers": []
+}
+```
+
+## Review findings and locally derived fingerprint
+
+A v1 Pro finding is closed and requires `id`, `acceptance_id`, `root_cause_key`, `severity`, `category`, `required_action`, and `evidence`; `required_change` is optional. `acceptance_id` must name an active criterion. Pro supplies only these stable source fields. Codex computes:
+
+```python
+canonical_digest({
+    "acceptance_id": finding["acceptance_id"],
+    "category": finding["category"],
+    "required_action": finding["required_action"],
+    "root_cause_key": finding["root_cause_key"],
+})
+```
+
+The Pro payload must not contain `root_cause_fingerprint`. After validation, Codex stores the locally derived lowercase SHA-256 value in trusted finding history. It also derives a conservative continuity key from `acceptance_id`, `category`, and `required_action`; changing only Pro-controlled finding ID or root-cause key cannot evade the two-round stop. A model-selected digest is an unknown field and is rejected.
+
+## Complete review envelope
+
+This PASS example refers to the requirements payload above and a report whose snapshot digest is the shown value.
+
+```json
+{
+  "schema_version": 1,
+  "packet_type": "review",
+  "run_id": "gpc-loop-example",
+  "turn_id": "review-01",
+  "nonce": "attempt-02",
+  "in_reply_to": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "prompt_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "previous_packet_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "payload": {
+    "schema_version": 1,
+    "requirements_digest": "sha256:93b668942c44346dda2d59fa8b77b83093f035de6f2f0d6dcdff536ec6232944",
+    "reviewed_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "decision": "PASS",
+    "acceptance_results": {
+      "AC-1": {"status": "PASS", "evidence": "Codex reported both focused rejection tests passing."}
+    },
+    "findings": [],
+    "scope_violations": [],
+    "next_instruction": "Run the explicit final local gate against the unchanged snapshot."
+  }
+}
+```
+
+`PASS` is invalid unless every acceptance item is present and `PASS`, findings and scope violations are empty, evidence is sufficient, and both digests match. `PROVIDE_EVIDENCE` never authorizes product changes.
+
+## Canonical preflight and snapshot
+
+`inspect-preflight` records a versioned immutable baseline with `baseline_head`, `baseline_snapshot_digest`, tracked/untracked manifest digests, complete tracked/untracked entries, and initial product paths. Every captured snapshot also carries the canonical `preflight_digest` and the unchanged `initial_product_paths`; report context binds those values to trusted state and the exact user-approved path set. Capture rejects a tampered or wrong-baseline preflight, unmerged index, dirty submodule, unstable observation, unsafe path, or tracked/staged run metadata.
+
+Tracked entries record baseline, index, and worktree state including Git mode, kind, and content/object digest. Snapshot identity is canonical JSON over:
+
+`schema_version`, `baseline_head`, `baseline_snapshot_digest`, `tracked_manifest_digest`, and `untracked_manifest_digest`.
+
+`tracked_diff_digest` is bounded review evidence only and is excluded from identity. Each changed-file item records `preexisting` and `changed_since_preflight`.
+
+## Artifacts
+
+Persisted requirements, report, review, state, envelope, preflight, snapshot, and final-gate artifacts carry integer `schema_version: 1`. `events.jsonl` is an append-only diagnostic transition log and is not consumed as protocol authority. Ephemeral CLI wrapper inputs such as `CONSUMED.json` and transition contexts are closed controller inputs rather than persisted protocol artifacts.
+
+```text
+<repo>/.ai-pro-loop/<task-slug>/
+├── request.md
+├── repository-context.md
+├── preflight.json
+├── expected-attempt-NN.json
+├── envelope-NN.json
+├── requirements.json
+├── requirements-rev-NN.json
+├── implementation-report-NN.json
+├── snapshot-NN.json
+├── review-NN.json
+├── final-gate.json
+├── state.json
+├── events.jsonl
+├── prompts/
+└── responses/
+```
+
+Never store credentials, tokens, cookies, or Browser session state. Never stage, publish, or include this directory in product evidence.
+
+## State and final gate
+
+Fixed state/control objects are closed. State records phase, round, binding/model policy, immutable baseline HEAD, preflight digest, exact user-approved pre-existing paths, active and pending requirements lineage, approval provenance, envelope receipts/chain head, active report/review/snapshot digests, routed actions, derived finding history, stop provenance, and maintenance counters. A valid review consumes exactly one round. Reconnect, first format correction, and evidence preparation do not; the next Pro decision does.
+
+Complete staged `REVIEW_PENDING` state for the PASS review example:
+
+```json
+{
+  "schema_version": 1,
+  "phase": "REVIEW_PENDING",
+  "review_round": 0,
+  "latest_decision": "PASS",
+  "latest_requirements_decision": null,
+  "required_actions": [],
+  "unresolved_finding_ids": [],
+  "blocker_fingerprints": [],
+  "format_error_count": 0,
+  "browser_reconnect_count": 0,
+  "conversation_binding_state": "CONVERSATION_BOUND",
+  "bound_conversation_url": "https://chatgpt.com/c/example-conversation",
+  "model_policy": "PRO_CLASS",
+  "requested_model_label": null,
+  "visible_model_label": "Pro",
+  "active_requirements_revision": 1,
+  "active_requirements_digest": "sha256:93b668942c44346dda2d59fa8b77b83093f035de6f2f0d6dcdff536ec6232944",
+  "approval_sequence": 0,
+  "pending_requirements_revision": null,
+  "pending_requirements_digest": null,
+  "pending_supersedes_digest": null,
+  "pending_approval_sequence": null,
+  "pending_approved_requirements_digest": null,
+  "pending_user_approval_evidence": null,
+  "behavior_changed": false,
+  "user_approval_required": false,
+  "scope_changed": false,
+  "public_contract_changed": false,
+  "prior_evidence_invalidated": false,
+  "review_round_reset": false,
+  "user_approval_received": false,
+  "stop_origin_phase": null,
+  "stop_origin_category": null,
+  "stop_reason": null,
+  "stop_sequence": 0,
+  "resolution_evidence": null,
+  "resolution_stop_sequence": null,
+  "pending_requirements_envelope_digest": null,
+  "pending_review_envelope_digest": "sha256:3a63ffc1078e3eb2ca79474c0f63a79c203ebf00cef62e6b259e030d3afb5bb2",
+  "last_consumed_packet_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "last_consumed_review_envelope_digest": null,
+  "active_report_digest": "sha256:4198d50d6002e2ac6819ba5f7398d4df12e457a9ee58f0d7d50538cc32a93204",
+  "current_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "active_review_packet_digest": "sha256:b873cdabd3063d440545ce8ca76a55442f488c1b4c9a692009ba8c99e5582f9a",
+  "reviewed_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "baseline_head": "1111111111111111111111111111111111111111",
+  "preflight_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "approved_existing_paths": []
+}
+```
+
+After envelope and report checks pass, the controller constructs this complete state as an ephemeral candidate using the validated review payload, pending envelope digest, routed actions, and locally derived history. Run `review-context` against that candidate. Only after it passes may the controller atomically replace persisted `state.json`; never mutate persisted trusted state before candidate validation. `REVIEW_PENDING -> FINAL_VERIFICATION` then consumes the pending envelope: increment round, move its digest to both consumed fields, clear pending identity, and preserve active report/review/snapshot digests. Other routes populate their candidate actions and derived history before validation and the corresponding edge. Never hand-author or persist a partial state.
+
+Build the composed review context deterministically from already validated artifacts:
+
+```python
+review_context = {
+    "envelope": load_strict("review-envelope.json"),
+    "expected": load_strict("expected-header.json"),
+    "consumed_digests": load_strict("consumed.json")["consumed_digests"],
+    "requirements": load_strict("requirements.json"),
+    "report": load_strict("implementation-report-01.json"),
+    "snapshot": load_strict("snapshot-01.json"),
+}
+```
+
+The requirements context uses the same first three fields plus `requirements` and `approval_receipt`. These are controller-built transition inputs, not Pro output. When a material proposal needs approval, its pending identity and flags survive the requirements stop unchanged. A valid digest-bound receipt resumes directly to `REQUIREMENTS_FROZEN`, promotes exactly the pending revision/digest, consumes pending provenance, increments `approval_sequence`, and resets the review round. The frozen artifact retains its original `NEED_USER_INPUT`/`user_approval_received=false` model fields; report-context recognizes it only when the trusted active digest and consumed controller approval sequence match. Any different digest or free-form receipt fails closed.
+
+Review-origin resume clears decision, actions, and pending review identity. A later review route requires a fresh validated envelope. The same finding ID or derived fingerprint across two consecutive valid review consumptions stops the loop.
+
+Completion requires this closed object:
+
+```json
+{
+  "schema_version": 1,
+  "requirements_digest": "sha256:93b668942c44346dda2d59fa8b77b83093f035de6f2f0d6dcdff536ec6232944",
+  "review_packet_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  "reviewed_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "current_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "acceptance_gate_passed": true,
+  "local_checks_passed": true,
+  "scope_gate_passed": true,
+  "artifact_hygiene_passed": true
+}
+```
+
+Every digest must match trusted active state and every boolean must be JSON `true`. Product drift invalidates Pro `PASS`, requires a new report/snapshot, and returns to fresh review.

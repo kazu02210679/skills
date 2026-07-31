@@ -52,7 +52,7 @@ class SkillCatalogTests(unittest.TestCase):
                     catalog,
                 )
 
-    def test_codex_orchestration_is_in_the_canonical_catalog(self) -> None:
+    def test_expected_skills_are_in_the_canonical_catalog(self) -> None:
         names = [name for name, _ in GENERATOR.skill_records(REPOSITORY_ROOT)]
         self.assertEqual(
             [
@@ -60,6 +60,7 @@ class SkillCatalogTests(unittest.TestCase):
                 "codex-orchestration",
                 "complexity-aware-execution",
                 "create-project-map",
+                "gpt-pro-codex-loop",
                 "handoff",
                 "open-pull-request",
                 "review-implementation-html",

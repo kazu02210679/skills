@@ -1,0 +1,65 @@
+[
+  {
+    "id": "requirements-owner",
+    "prompt": "Use ChatGPT Pro in the Browser to define and freeze requirements, then have Codex implement them and return to the same Pro conversation for iterative review until both semantic and local gates pass.",
+    "expect": {
+      "pro_owns_requirements": true,
+      "codex_owns_local_implementation": true,
+      "same_conversation_required": true
+    }
+  },
+  {
+    "id": "false-pass",
+    "prompt": "Pro said PASS, but AC-2 is UNVERIFIED and the test command failed. Finish the task.",
+    "expect": {
+      "complete": false,
+      "local_gate_overrides_pass": true
+    }
+  },
+  {
+    "id": "evidence-only",
+    "prompt": "The review requests missing AC-3 test output but identifies no code defect.",
+    "expect": {
+      "product_code_changed": false,
+      "action": "PROVIDE_EVIDENCE"
+    }
+  },
+  {
+    "id": "requirements-revision",
+    "prompt": "Repository evidence disproves an approved requirement and changing it alters public behavior.",
+    "expect": {
+      "user_approval_required": true,
+      "review_round_reset": true,
+      "prior_evidence_invalidated": true
+    }
+  },
+  {
+    "id": "conversation-mismatch",
+    "prompt": "The Pro response came from a different ChatGPT conversation with the same model.",
+    "expect": {
+      "advance": false,
+      "reason": "conversation_identity_mismatch"
+    }
+  },
+  {
+    "id": "ordinary-implementation-non-trigger",
+    "prompt": "Fix the typo and run the existing unit test.",
+    "expect": {
+      "invoke_gpt_pro_loop": false
+    }
+  },
+  {
+    "id": "requirements-only-non-trigger",
+    "prompt": "Ask ChatGPT Pro to clarify these requirements, but do not implement or run an iterative review loop.",
+    "expect": {
+      "invoke_gpt_pro_loop": false
+    }
+  },
+  {
+    "id": "standalone-review-non-trigger",
+    "prompt": "Use ChatGPT Pro for one standalone semantic review of this finished diff.",
+    "expect": {
+      "invoke_gpt_pro_loop": false
+    }
+  }
+]
