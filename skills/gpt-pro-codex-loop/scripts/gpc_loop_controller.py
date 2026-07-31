@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import tempfile
@@ -21,6 +23,47 @@ import validate_packet
 
 SCHEMA_VERSION = 1
 TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
+TEMPLATE_TOKEN = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+ATTEMPT_NAME = re.compile(r"(?:expected|abandoned)-attempt-(\d+)\.json\Z")
+MAX_ABANDON_EVIDENCE_BYTES = 8192
+
+TEMPLATE_TOKENS = {
+    "Shared envelope instruction": {
+        "PACKET_TYPE",
+        "RUN_ID",
+        "TURN_ID",
+        "NONCE",
+        "IN_REPLY_TO_DIGEST",
+        "PROMPT_DIGEST",
+        "PREVIOUS_PACKET_DIGEST_OR_NULL",
+    },
+    "Initial requirements": {
+        "USER_REQUEST",
+        "REPOSITORY_EVIDENCE",
+        "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REQUIREMENTS",
+    },
+    "Requirements revision": {
+        "PREVIOUS_REQUIREMENTS_JSON",
+        "PREVIOUS_REQUIREMENTS_DIGEST",
+        "CONFLICT_EVIDENCE",
+        "APPROVAL_RECEIPT_OR_NULL",
+        "NEXT_REVISION",
+        "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REQUIREMENTS",
+    },
+    "Implementation review": {
+        "REQUIREMENTS_JSON",
+        "REQUIREMENTS_DIGEST",
+        "IMPLEMENTATION_REPORT_JSON",
+        "SNAPSHOT_DIGEST",
+        "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REVIEW",
+    },
+    "Evidence-only supplementation": {
+        "SNAPSHOT_DIGEST",
+        "REQUIREMENTS_JSON",
+        "PRIOR_REVIEW_JSON",
+        "SUPPLEMENTAL_EVIDENCE",
+    },
+}
 
 
 class ControllerError(RuntimeError):
@@ -33,6 +76,16 @@ class ControllerError(RuntimeError):
         self.code = code
         self.message = message
         self.details = tuple(details)
+
+
+@dataclass(frozen=True)
+class Token:
+    name: str
+
+
+@dataclass(frozen=True)
+class Template:
+    parts: tuple[str | Token, ...]
 
 
 @dataclass(frozen=True)
@@ -151,6 +204,121 @@ def write_text_atomic(path: Path, value: str) -> None:
     if not isinstance(value, str):
         raise ControllerError("INVALID_TEXT", "Controller text artifact must be a string.")
     _write_bytes_atomic(path, value.encode("utf-8"))
+
+
+def _normalize_text(value: str) -> str:
+    if not isinstance(value, str):
+        raise ControllerError("INVALID_TEXT", "Prompt text must be a string.")
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _normalize_prompt(value: str) -> str:
+    return _normalize_text(value).rstrip("\n") + "\n"
+
+
+def sha256_bytes(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _parse_template(
+    raw: str, required_tokens: set[str], allow_repeated: bool
+) -> Template:
+    normalized = _normalize_prompt(raw)
+    for placeholder in re.finditer(r"\{\{[^{}\n]*\}\}", normalized):
+        if TEMPLATE_TOKEN.fullmatch(placeholder.group(0)) is None:
+            raise ControllerError("UNKNOWN_TEMPLATE_TOKEN", "Template contains an unknown token.")
+    parts: list[str | Token] = []
+    present: set[str] = set()
+    position = 0
+    for match in TEMPLATE_TOKEN.finditer(normalized):
+        name = match.group(1)
+        if name not in required_tokens:
+            raise ControllerError("UNKNOWN_TEMPLATE_TOKEN", "Template contains an unknown token.")
+        if name in present and not allow_repeated:
+            raise ControllerError("DUPLICATE_TEMPLATE_TOKEN", "Template contains a duplicate token.")
+        if match.start() > position:
+            parts.append(normalized[position : match.start()])
+        parts.append(Token(name))
+        present.add(name)
+        position = match.end()
+    if position < len(normalized):
+        parts.append(normalized[position:])
+    missing = required_tokens - present
+    if missing:
+        raise ControllerError("MISSING_TEMPLATE_TOKEN", "Template is missing a required token.")
+    return Template(tuple(parts))
+
+
+def parse_template(raw: str, required_tokens: set[str]) -> Template:
+    """Parse one closed template without treating future values as syntax."""
+    return _parse_template(raw, required_tokens, allow_repeated=False)
+
+
+def load_template(contract: Path, heading: str) -> Template:
+    """Load the first text fence immediately following one exact heading."""
+    required_tokens = TEMPLATE_TOKENS.get(heading)
+    if required_tokens is None:
+        raise ControllerError("UNKNOWN_TEMPLATE", "Prompt template heading is not supported.")
+    try:
+        source = _normalize_text(Path(contract).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise ControllerError("TEMPLATE_READ_FAILED", "Could not read prompt contract.") from exc
+    heading_match = re.search(rf"(?m)^## {re.escape(heading)}[ \t]*$", source)
+    if heading_match is None:
+        raise ControllerError("TEMPLATE_NOT_FOUND", "Prompt template fence was not found.")
+    next_heading = re.search(r"(?m)^## ", source[heading_match.end() :])
+    section_end = (
+        heading_match.end() + next_heading.start()
+        if next_heading is not None
+        else len(source)
+    )
+    match = re.search(
+        r"(?m)^```text[ \t]*\n(.*?)\n```",
+        source[heading_match.end() : section_end],
+        re.DOTALL,
+    )
+    if match is None:
+        raise ControllerError("TEMPLATE_NOT_FOUND", "Prompt template fence was not found.")
+    # Contract templates deliberately repeat a few bound digests in prose and
+    # schema reminders. Values are still parsed only once, before rendering.
+    return _parse_template(match.group(1), required_tokens, allow_repeated=True)
+
+
+def _render_nodes(
+    parts: Sequence[str | Token],
+    values: Mapping[str, str | Template],
+    prompt_digest: str,
+) -> str:
+    rendered: list[str] = []
+    for part in parts:
+        if isinstance(part, str):
+            rendered.append(part)
+            continue
+        if part.name == "PROMPT_DIGEST":
+            rendered.append(prompt_digest)
+            continue
+        value = values.get(part.name)
+        if value is None:
+            raise ControllerError("MISSING_TEMPLATE_VALUE", "Prompt value is missing for a template token.")
+        if isinstance(value, Template):
+            rendered.append(_render_nodes(value.parts, values, prompt_digest))
+        elif isinstance(value, str):
+            rendered.append(_normalize_text(value))
+        else:
+            raise ControllerError("INVALID_TEMPLATE_VALUE", "Prompt template value must be text or a template.")
+    return "".join(rendered)
+
+
+def render_prompt(
+    template: Template, values: Mapping[str, str | Template]
+) -> dict[str, str]:
+    """Render and digest an exact UTF-8 prompt without reparsing values."""
+    digest_source = _normalize_prompt(
+        _render_nodes(template.parts, values, "{{PROMPT_DIGEST}}")
+    )
+    prompt_digest = sha256_bytes(digest_source.encode("utf-8"))
+    prompt = _normalize_prompt(_render_nodes(template.parts, values, prompt_digest))
+    return {"prompt": prompt, "prompt_digest": prompt_digest}
 
 
 @contextmanager
@@ -470,6 +638,291 @@ def initialize_run(
     return status_run(paths.repository, task_slug)
 
 
+def _prompt_contract_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "references" / "prompt-contract.md"
+
+
+def _canonical_prompt_json(value: object) -> str:
+    try:
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise ControllerError("INVALID_PROMPT_VALUE", "Prompt value is not canonical JSON.") from exc
+
+
+def _attempt_number(paths: RunPaths) -> int:
+    numbers: list[int] = []
+    for path in paths.run.iterdir():
+        match = ATTEMPT_NAME.fullmatch(path.name)
+        if match is not None:
+            numbers.append(int(match.group(1)))
+    return max(numbers, default=0) + 1
+
+
+def _expected_header(
+    task_slug: str,
+    packet_type: str,
+    semantic_sequence: int,
+    source_digest: str,
+    previous_packet_digest: object,
+) -> dict[str, object]:
+    run_id = f"gpc-loop-{task_slug}"
+    turn_id = f"{packet_type}-{semantic_sequence:02d}"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": packet_type,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "nonce": secrets.token_hex(16),
+        "in_reply_to": validate_packet.canonical_digest(
+            {"run_id": run_id, "turn_id": turn_id, "source_digest": source_digest}
+        ),
+        "prompt_digest": "",
+        "previous_packet_digest": previous_packet_digest,
+    }
+
+
+def _save_attempt(
+    paths: RunPaths, attempt_number: int, turn_id: str, prompt: str, expected: Mapping[str, object]
+) -> tuple[Path, Path]:
+    prompts = paths.run / "prompts"
+    prompts.mkdir(exist_ok=True)
+    prompt_path = prompts / f"{turn_id}-attempt-{attempt_number:02d}.md"
+    expected_path = paths.run / f"expected-attempt-{attempt_number:02d}.json"
+    transaction = paths.transactions / f"prepare-{os.getpid()}-{time.time_ns()}"
+    transaction.mkdir()
+    prompt_stage = transaction / prompt_path.name
+    expected_stage = transaction / expected_path.name
+    staged: list[tuple[Path, os.stat_result]] = []
+    committed: list[tuple[Path, os.stat_result]] = []
+    try:
+        write_text_atomic(prompt_stage, prompt)
+        staged.append(_owned_path(prompt_stage))
+        write_json_atomic(expected_stage, dict(expected))
+        staged.append(_owned_path(expected_stage))
+        os.replace(prompt_stage, prompt_path)
+        committed.append(_owned_path(prompt_path))
+        os.replace(expected_stage, expected_path)
+        committed.append(_owned_path(expected_path))
+    except OSError as exc:
+        _unlink_owned(committed)
+        raise ControllerError("WRITE_FAILED", "Could not persist the pre-send attempt.") from exc
+    finally:
+        _cleanup_owned_transaction(transaction, staged)
+    return prompt_path, expected_path
+
+
+def _revision_prompt_values(
+    paths: RunPaths, state: Mapping[str, object], conflict_evidence_path: Path
+) -> tuple[dict[str, str | Template], int, str]:
+    if not conflict_evidence_path.is_file():
+        raise ControllerError("INPUT_READ_FAILED", "Could not read conflict evidence input.")
+    conflict = _read_input(conflict_evidence_path, "conflict evidence")
+    if not conflict.strip():
+        raise ControllerError("INVALID_CONFLICT_EVIDENCE", "Conflict evidence must not be empty.")
+    previous_digest = state.get("active_requirements_digest")
+    revision = state.get("active_requirements_revision")
+    if not isinstance(previous_digest, str) or not isinstance(revision, int):
+        raise ControllerError("INVALID_STATE", "Requirements revision lacks active trusted requirements.")
+    previous_path = paths.run / "requirements.json"
+    previous = load_json(previous_path)
+    next_revision = revision + 1
+    approval = state.get("pending_user_approval_evidence")
+    values: dict[str, str | Template] = {
+        "PREVIOUS_REQUIREMENTS_JSON": _canonical_prompt_json(previous),
+        "PREVIOUS_REQUIREMENTS_DIGEST": previous_digest,
+        "CONFLICT_EVIDENCE": conflict,
+        "APPROVAL_RECEIPT_OR_NULL": _canonical_prompt_json(approval),
+        "NEXT_REVISION": str(next_revision),
+    }
+    source_digest = validate_packet.canonical_digest(
+        {
+            "previous_requirements_digest": previous_digest,
+            "conflict_evidence": _normalize_text(conflict),
+            "approval_receipt": approval,
+        }
+    )
+    return values, next_revision, source_digest
+
+
+def prepare_requirements(
+    repository: Path,
+    task_slug: str,
+    conflict_evidence_path: Path | None = None,
+) -> dict[str, object]:
+    """Persist one correlated requirements prompt and its expected header."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        state = load_json(paths.state)
+        if state.get("phase") != "REQUIREMENTS_PENDING":
+            raise ControllerError("INVALID_PHASE", "Requirements can be prepared only when pending.")
+        attempts = _outstanding_attempts(paths)
+        if attempts:
+            raise ControllerError("OUTSTANDING_ATTEMPT", "A requirements attempt is already outstanding.")
+
+        shared = load_template(_prompt_contract_path(), "Shared envelope instruction")
+        if state.get("active_requirements_digest") is None:
+            if conflict_evidence_path is not None:
+                raise ControllerError("INVALID_PHASE", "Initial requirements do not accept conflict evidence.")
+            request = _read_input(paths.run / "request.md", "request")
+            repository_evidence = _read_input(
+                paths.run / "repository-context.md", "repository context"
+            )
+            values: dict[str, str | Template] = {
+                "USER_REQUEST": request,
+                "REPOSITORY_EVIDENCE": repository_evidence,
+            }
+            template = load_template(_prompt_contract_path(), "Initial requirements")
+            semantic_sequence = 1
+            source_digest = validate_packet.canonical_digest(
+                {
+                    "user_request": _normalize_text(request),
+                    "repository_evidence": _normalize_text(repository_evidence),
+                }
+            )
+        else:
+            if conflict_evidence_path is None:
+                raise ControllerError("CONFLICT_EVIDENCE_REQUIRED", "Requirements revision needs conflict evidence.")
+            values, semantic_sequence, source_digest = _revision_prompt_values(
+                paths, state, conflict_evidence_path
+            )
+            template = load_template(_prompt_contract_path(), "Requirements revision")
+
+        attempt_number = _attempt_number(paths)
+        previous_packet_digest = state.get("last_consumed_packet_digest")
+        if previous_packet_digest is not None and not isinstance(previous_packet_digest, str):
+            raise ControllerError("INVALID_STATE", "Trusted packet-chain head is invalid.")
+        expected = _expected_header(
+            task_slug,
+            "requirements",
+            semantic_sequence,
+            source_digest,
+            previous_packet_digest,
+        )
+        values.update(
+            {
+                "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REQUIREMENTS": shared,
+                "PACKET_TYPE": "requirements",
+                "RUN_ID": str(expected["run_id"]),
+                "TURN_ID": str(expected["turn_id"]),
+                "NONCE": str(expected["nonce"]),
+                "IN_REPLY_TO_DIGEST": str(expected["in_reply_to"]),
+                "PREVIOUS_PACKET_DIGEST_OR_NULL": (
+                    previous_packet_digest if previous_packet_digest is not None else "null"
+                ),
+            }
+        )
+        rendered = render_prompt(template, values)
+        expected["prompt_digest"] = rendered["prompt_digest"]
+        prompt_path, expected_path = _save_attempt(
+            paths, attempt_number, str(expected["turn_id"]), rendered["prompt"], expected
+        )
+    return {
+        "prompt_path": str(prompt_path),
+        "expected_header_path": str(expected_path),
+        "prompt_digest": expected["prompt_digest"],
+        "nonce": expected["nonce"],
+        "turn_id": expected["turn_id"],
+    }
+
+
+def _matches_sent_artifact(paths: RunPaths, expected: Mapping[str, object]) -> bool:
+    nonce = expected.get("nonce")
+    turn_id = expected.get("turn_id")
+    if not isinstance(nonce, str) or not isinstance(turn_id, str):
+        return True
+    response_directory = paths.run / "responses"
+    if response_directory.exists():
+        if not response_directory.is_dir():
+            return True
+        for response in response_directory.iterdir():
+            if not response.is_file():
+                return True
+            try:
+                text = response.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                return True
+            if nonce in text or turn_id in text:
+                return True
+    for envelope_path in paths.run.glob("envelope-*.json"):
+        try:
+            envelope = load_json(envelope_path)
+        except ControllerError:
+            return True
+        if envelope.get("nonce") == nonce or envelope.get("turn_id") == turn_id:
+            return True
+    return False
+
+
+def abandon_attempt(
+    repository: Path,
+    task_slug: str,
+    send_status: str,
+    evidence_path: Path,
+) -> dict[str, object]:
+    """Close an unambiguously unsent expected attempt without changing state."""
+    if send_status != "NOT_SENT":
+        raise ControllerError("SEND_STATUS_REQUIRED", "Attempt abandonment requires NOT_SENT status.")
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    evidence = _read_input(evidence_path, "not-sent evidence")
+    evidence = _normalize_prompt(evidence)
+    if not evidence.strip():
+        raise ControllerError("EMPTY_EVIDENCE", "Not-sent evidence must not be empty.")
+    bounded_evidence = evidence.encode("utf-8")[:MAX_ABANDON_EVIDENCE_BYTES].decode(
+        "utf-8", errors="ignore"
+    )
+    with run_lock(paths.lock):
+        attempts = _outstanding_attempts(paths)
+        if len(attempts) != 1:
+            raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
+        expected_path = paths.run / str(attempts[0]["name"])
+        expected = attempts[0]["expected_header"]
+        header_fields = {
+            "schema_version", "packet_type", "run_id", "turn_id", "nonce", "in_reply_to",
+            "prompt_digest", "previous_packet_digest",
+        }
+        if not isinstance(expected, dict) or set(expected) != header_fields:
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding attempt header is invalid.")
+        if _matches_sent_artifact(paths, expected):
+            raise ControllerError("AMBIGUOUS_SEND", "Attempt may have been sent or received.")
+        match = ATTEMPT_NAME.fullmatch(expected_path.name)
+        if match is None:
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding attempt name is invalid.")
+        abandoned_path = expected_path
+        abandoned = {
+            "schema_version": SCHEMA_VERSION,
+            "status": "ABANDONED_NOT_SENT",
+            "expected_header": expected,
+            "expected_header_digest": validate_packet.canonical_digest(expected),
+            "nonce": expected["nonce"],
+            "prompt_digest": expected["prompt_digest"],
+            "evidence": bounded_evidence,
+            "abandoned_at_unix": int(time.time()),
+        }
+        transaction = paths.transactions / f"abandon-{os.getpid()}-{time.time_ns()}"
+        transaction.mkdir()
+        staged = transaction / abandoned_path.name
+        staged_paths: list[tuple[Path, os.stat_result]] = []
+        try:
+            write_json_atomic(staged, abandoned)
+            staged_paths.append(_owned_path(staged))
+            os.replace(staged, abandoned_path)
+        except OSError as exc:
+            raise ControllerError("WRITE_FAILED", "Could not atomically abandon the attempt.") from exc
+        finally:
+            _cleanup_owned_transaction(transaction, staged_paths)
+    return {
+        "abandoned_attempt_path": str(abandoned_path),
+        "nonce": expected["nonce"],
+        "prompt_digest": expected["prompt_digest"],
+    }
+
+
 def next_commands(
     state: Mapping[str, object],
     outstanding_attempt: Mapping[str, object] | None,
@@ -511,6 +964,8 @@ def _outstanding_attempts(paths: RunPaths) -> list[dict[str, object]]:
             artifact = load_json(path)
         except ControllerError:
             attempts.append({"name": path.name, "expected_header": {}})
+            continue
+        if artifact.get("status") == "ABANDONED_NOT_SENT":
             continue
         expected = artifact.get("expected_header", artifact)
         attempts.append(

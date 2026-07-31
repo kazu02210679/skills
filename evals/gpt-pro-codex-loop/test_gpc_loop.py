@@ -204,3 +204,79 @@ class ControllerCase(unittest.TestCase):
             None,
         )
         self.assertEqual(result["phase"], "REQUIREMENTS_PENDING")
+
+    def test_template_rendering_is_platform_stable_and_does_not_reparse_values(self) -> None:
+        template = controller.Template(
+            (
+                "Request:\n",
+                controller.Token("USER_REQUEST"),
+                "\nDigest:",
+                controller.Token("PROMPT_DIGEST"),
+                "\n",
+            )
+        )
+        value = "literal {{PROMPT_DIGEST}}\r\nline"
+        first = controller.render_prompt(template, {"USER_REQUEST": value})
+        second = controller.render_prompt(
+            template, {"USER_REQUEST": value.replace("\r\n", "\n")}
+        )
+        self.assertEqual(first, second)
+        self.assertIn("literal {{PROMPT_DIGEST}}", first["prompt"])
+        self.assertRegex(first["prompt_digest"], r"sha256:[0-9a-f]{64}")
+
+    def test_template_rejects_missing_duplicate_and_unknown_tokens(self) -> None:
+        with self.assertRaisesRegex(controller.ControllerError, "duplicate"):
+            controller.parse_template("{{USER_REQUEST}}{{USER_REQUEST}}\n", {"USER_REQUEST"})
+        with self.assertRaisesRegex(controller.ControllerError, "unknown"):
+            controller.parse_template("{{UNSUPPORTED}}\n", {"USER_REQUEST"})
+        with self.assertRaisesRegex(controller.ControllerError, "unknown"):
+            controller.parse_template("{{BAD-TOKEN}}\n", {"USER_REQUEST"})
+        with self.assertRaisesRegex(controller.ControllerError, "missing"):
+            controller.parse_template("plain\n", {"USER_REQUEST"})
+
+    def test_prepare_requirements_persists_expected_header_before_return(self) -> None:
+        self._init_run()
+        result = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(result["expected_header_path"]))
+        self.assertEqual(expected["packet_type"], "requirements")
+        self.assertEqual(expected["previous_packet_digest"], None)
+        self.assertTrue(Path(result["prompt_path"]).is_file())
+        self.assertEqual(expected["prompt_digest"], result["prompt_digest"])
+        self.assertEqual(
+            controller.status_run(self.repository, "controller-test")["next_commands"],
+            ["accept-requirements", "abandon-attempt"],
+        )
+
+    def test_second_outstanding_attempt_is_refused(self) -> None:
+        self._init_run()
+        controller.prepare_requirements(self.repository, "controller-test")
+        with self.assertRaisesRegex(controller.ControllerError, "outstanding"):
+            controller.prepare_requirements(self.repository, "controller-test")
+
+    def test_abandon_requires_proven_not_sent_and_preserves_state(self) -> None:
+        self._init_run()
+        controller.prepare_requirements(self.repository, "controller-test")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        original = paths.state.read_bytes()
+        evidence = self.repository / "not-sent.txt"
+        evidence.write_text(
+            "The composer remained empty; no send action occurred.\n", encoding="utf-8"
+        )
+        with self.assertRaisesRegex(controller.ControllerError, "NOT_SENT"):
+            controller.abandon_attempt(
+                self.repository, "controller-test", "AMBIGUOUS", evidence
+            )
+        result = controller.abandon_attempt(
+            self.repository, "controller-test", "NOT_SENT", evidence
+        )
+        self.assertEqual(paths.state.read_bytes(), original)
+        self.assertTrue(Path(result["abandoned_attempt_path"]).is_file())
+        self.assertEqual(
+            Path(result["abandoned_attempt_path"]), paths.run / "expected-attempt-01.json"
+        )
+        self.assertEqual(
+            controller.load_json(Path(result["abandoned_attempt_path"]))["status"],
+            "ABANDONED_NOT_SENT",
+        )
+        replacement = controller.prepare_requirements(self.repository, "controller-test")
+        self.assertNotEqual(result["nonce"], replacement["nonce"])
