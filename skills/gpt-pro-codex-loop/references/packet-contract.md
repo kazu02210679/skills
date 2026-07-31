@@ -25,6 +25,7 @@ python skills/gpt-pro-codex-loop/scripts/validate_packet.py format-correction CO
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py requirements REQUIREMENTS.json --previous PREVIOUS_REQUIREMENTS.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py report-context REPORT.json --requirements REQUIREMENTS.json --state STATE.json --snapshot SNAPSHOT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py review-context REVIEW_ENVELOPE.json --requirements REQUIREMENTS.json --report REPORT.json --state STATE.json --snapshot SNAPSHOT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-preparation-context REQUIREMENTS_PREPARATION_CONTEXT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-context REQUIREMENTS_CONTEXT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --review-context REVIEW_CONTEXT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --final-gate FINAL_GATE.json --final-report REPORT.json --final-requirements REQUIREMENTS.json
@@ -47,6 +48,8 @@ REVIEW_CONTEXT.json:
 `expected` contains the eight envelope header fields without `payload`; `consumed_digests` is an array of lowercase SHA-256 strings; `approval_receipt` is the trusted digest-bound receipt or `null`. A successful command exits `0` and prints canonical JSON plus one newline.
 
 `review-context` validates and prints the envelope; that output is **not** a `REVIEW_CONTEXT.json` transition input. The controller constructs the composed context from the same validated envelope, trusted expected header and consumed set, active requirements/report, and captured snapshot, then passes that closed object to `transition`.
+
+`requirements-preparation-context` is a closed, controller-built local authorization for changing the pending requirements expected-header anchor. It contains exactly the new expected header and either `null` for the first attempt or the complete matching `ABANDONED_NOT_SENT` receipt for the previous anchor. A same-phase anchor replacement or clear without that proof fails closed.
 
 ## Controller CLI
 

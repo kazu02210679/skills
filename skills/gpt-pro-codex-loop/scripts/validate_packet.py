@@ -32,6 +32,20 @@ TRANSPORT_HEADER_FIELDS = (
 )
 TRANSPORT_ENVELOPE_FIELDS = (*TRANSPORT_HEADER_FIELDS, "payload")
 TRANSPORT_PACKET_TYPES = frozenset({"requirements", "review"})
+REQUIREMENTS_PREPARATION_CONTEXT_FIELDS = (
+    "expected",
+    "abandoned_attempt",
+)
+ABANDONED_ATTEMPT_FIELDS = (
+    "schema_version",
+    "status",
+    "expected_header",
+    "expected_header_digest",
+    "nonce",
+    "prompt_digest",
+    "evidence",
+    "abandoned_at_unix",
+)
 REQUIREMENTS_DECISIONS = frozenset({"PLAN_READY", "NEED_USER_INPUT", "BLOCK"})
 REVIEW_DECISIONS = frozenset({"PASS", "CHANGES_REQUESTED", "BLOCK"})
 ACCEPTANCE_STATUSES = frozenset({"PASS", "FAIL", "UNVERIFIED"})
@@ -2882,10 +2896,154 @@ def _validate_requirements_transition_context(
     return _errors_sorted(errors)
 
 
+def _validate_requirements_expected_header(
+    value: object,
+    path: str,
+    errors: list[str],
+) -> dict[str, object]:
+    local_errors: list[str] = []
+    expected = _as_mapping(value, path, local_errors)
+    _require_fields(expected, TRANSPORT_HEADER_FIELDS, local_errors)
+    _reject_unknown_fields(expected, TRANSPORT_HEADER_FIELDS, local_errors)
+    _require_schema_version(expected, local_errors)
+    if expected.get("packet_type") != "requirements":
+        local_errors.append("packet_type: must be requirements")
+    for field in ("run_id", "turn_id", "nonce"):
+        _require_nonempty_string(expected, field, local_errors)
+    for field in ("in_reply_to", "prompt_digest"):
+        _require_digest(expected.get(field), field, local_errors)
+    _require_digest(
+        expected.get("previous_packet_digest"),
+        "previous_packet_digest",
+        local_errors,
+        nullable=True,
+    )
+    prefix = f"{path}."
+    errors.extend(
+        error if error.startswith(f"{path}:") else prefix + error
+        for error in local_errors
+    )
+    return expected
+
+
+def _validate_abandoned_requirements_attempt(
+    value: object,
+    errors: list[str],
+) -> dict[str, object]:
+    path = "requirements_preparation_context.abandoned_attempt"
+    local_errors: list[str] = []
+    receipt = _as_mapping(value, path, local_errors)
+    _require_fields(receipt, ABANDONED_ATTEMPT_FIELDS, local_errors)
+    _reject_unknown_fields(receipt, ABANDONED_ATTEMPT_FIELDS, local_errors)
+    _require_schema_version(receipt, local_errors)
+    if receipt.get("status") != "ABANDONED_NOT_SENT":
+        local_errors.append("status: must be ABANDONED_NOT_SENT")
+    expected = _validate_requirements_expected_header(
+        receipt.get("expected_header"),
+        f"{path}.expected_header",
+        errors,
+    )
+    expected_digest = _canonical_digest_checked(
+        expected,
+        f"{path}.expected_header",
+        errors,
+    )
+    _require_digest(
+        receipt.get("expected_header_digest"),
+        "expected_header_digest",
+        local_errors,
+    )
+    if (
+        expected_digest is not None
+        and receipt.get("expected_header_digest") != expected_digest
+    ):
+        local_errors.append(
+            "expected_header_digest: does not match the abandoned expected header"
+        )
+    for field in ("nonce", "prompt_digest"):
+        if receipt.get(field) != expected.get(field):
+            local_errors.append(f"{field}: does not match the abandoned expected header")
+    if not _is_nonempty_string(receipt.get("evidence")):
+        local_errors.append("evidence: must be a non-empty string")
+    abandoned_at = receipt.get("abandoned_at_unix")
+    if (
+        not isinstance(abandoned_at, int)
+        or isinstance(abandoned_at, bool)
+        or abandoned_at < 0
+    ):
+        local_errors.append("abandoned_at_unix: must be a non-negative integer")
+    errors.extend(
+        error if error.startswith(f"{path}:") else f"{path}.{error}"
+        for error in local_errors
+    )
+    return receipt
+
+
+def _validate_requirements_preparation_context(
+    context: object,
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(context, dict):
+        return [
+            "requirements_preparation_context: explicit closed context is required for requirements anchor updates"
+        ]
+    _require_fields(context, REQUIREMENTS_PREPARATION_CONTEXT_FIELDS, errors)
+    _reject_unknown_fields(
+        context,
+        REQUIREMENTS_PREPARATION_CONTEXT_FIELDS,
+        errors,
+        path="requirements_preparation_context",
+    )
+    expected = _validate_requirements_expected_header(
+        context.get("expected"),
+        "requirements_preparation_context.expected",
+        errors,
+    )
+    expected_digest = _canonical_digest_checked(
+        expected,
+        "requirements_preparation_context.expected",
+        errors,
+    )
+    current_anchor = current_state.get(
+        "pending_requirements_expected_header_digest"
+    )
+    if expected_digest is not None and current_anchor != expected_digest:
+        errors.append(
+            "requirements_preparation_context.expected: digest does not match the current requirements anchor"
+        )
+
+    previous_anchor = previous_state.get(
+        "pending_requirements_expected_header_digest"
+    )
+    abandoned_value = context.get("abandoned_attempt")
+    if previous_anchor is None:
+        if abandoned_value is not None:
+            errors.append(
+                "requirements_preparation_context.abandoned_attempt: must be null for the first requirements attempt"
+            )
+    elif abandoned_value is None:
+        errors.append(
+            "requirements_preparation_context.abandoned_attempt: a matching abandoned attempt is required to replace the requirements anchor"
+        )
+    else:
+        abandoned = _validate_abandoned_requirements_attempt(
+            abandoned_value,
+            errors,
+        )
+        if abandoned.get("expected_header_digest") != previous_anchor:
+            errors.append(
+                "requirements_preparation_context.abandoned_attempt.expected_header_digest: does not match the previous requirements anchor"
+            )
+    return _errors_sorted(errors)
+
+
 def validate_transition(
     previous,
     current,
     *,
+    requirements_preparation_context=None,
     requirements_context=None,
     review_context=None,
     final_gate_evidence=None,
@@ -3005,6 +3163,13 @@ def validate_transition(
             or same_phase_requirements_preparation
         )
         if same_phase_requirements_preparation:
+            errors.extend(
+                _validate_requirements_preparation_context(
+                    requirements_preparation_context,
+                    previous_state,
+                    current_state,
+                )
+            )
             for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):
                 if (
                     field != "pending_requirements_expected_header_digest"
@@ -3013,6 +3178,10 @@ def validate_transition(
                     errors.append(
                         f"{field}: requirements attempt preparation must preserve trusted state"
                     )
+        elif requirements_preparation_context is not None:
+            errors.append(
+                "requirements_preparation_context: allowed only for a requirements anchor update"
+            )
         if same_phase_format_correction:
             for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):
                 if (
@@ -3406,6 +3575,7 @@ def main(argv: list[str] | None = None) -> int:
     transition_parser = subparsers.add_parser("transition")
     transition_parser.add_argument("previous")
     transition_parser.add_argument("current")
+    transition_parser.add_argument("--requirements-preparation-context")
     transition_parser.add_argument("--requirements-context")
     transition_parser.add_argument("--review-context")
     transition_parser.add_argument("--final-gate")
@@ -3473,6 +3643,11 @@ def main(argv: list[str] | None = None) -> int:
             errors = validate_transition(
                 value["previous"],
                 value["current"],
+                requirements_preparation_context=(
+                    _load_json(args.requirements_preparation_context)
+                    if args.requirements_preparation_context
+                    else None
+                ),
                 requirements_context=(
                     _load_json(args.requirements_context)
                     if args.requirements_context

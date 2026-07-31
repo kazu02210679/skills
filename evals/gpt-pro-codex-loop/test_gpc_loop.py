@@ -876,6 +876,7 @@ class ControllerCase(unittest.TestCase):
             self.repository, "controller-test", "NOT_SENT", evidence
         )
         self.assertEqual(paths.state.read_bytes(), original)
+        residual_anchor = self._state()["pending_requirements_expected_header_digest"]
         self.assertTrue(Path(result["abandoned_attempt_path"]).is_file())
         self.assertEqual(
             Path(result["abandoned_attempt_path"]), paths.run / "expected-attempt-01.json"
@@ -886,6 +887,39 @@ class ControllerCase(unittest.TestCase):
         )
         replacement = controller.prepare_requirements(self.repository, "controller-test")
         self.assertNotEqual(result["nonce"], replacement["nonce"])
+        self.assertNotEqual(
+            self._state()["pending_requirements_expected_header_digest"],
+            residual_anchor,
+        )
+
+    def test_abandon_rejects_state_change_before_attempt_replacement(self) -> None:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        expected_path = Path(attempt["expected_header_path"])
+        expected_bytes = expected_path.read_bytes()
+        evidence = self.repository / "not-sent-race.txt"
+        evidence.write_text("The prompt was verified not sent.\n", encoding="utf-8")
+        external = self._state()
+        external["format_error_count"] = 1
+        real_check = controller._require_state_digest
+        checks = 0
+
+        def inject_state_change(run_paths: object, digest: object) -> None:
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                controller.write_json_atomic(paths.state, external)
+            real_check(run_paths, digest)
+
+        with patch.object(controller, "_require_state_digest", new=inject_state_change):
+            with self.assertRaisesRegex(controller.ControllerError, "state"):
+                controller.abandon_attempt(
+                    self.repository, "controller-test", "NOT_SENT", evidence
+                )
+        self.assertEqual(checks, 2)
+        self.assertEqual(expected_path.read_bytes(), expected_bytes)
+        self.assertEqual(paths.state.read_bytes(), controller._canonical_json_bytes(external))
 
     def test_tampered_abandoned_receipts_keep_the_semantic_turn_blocked(self) -> None:
         self._init_run()

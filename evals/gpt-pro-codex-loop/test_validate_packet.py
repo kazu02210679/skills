@@ -180,6 +180,19 @@ def expected_envelope(envelope: dict[str, object]) -> dict[str, object]:
     }
 
 
+def valid_abandoned_attempt(expected: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "ABANDONED_NOT_SENT",
+        "expected_header": expected,
+        "expected_header_digest": canonical_digest(expected),
+        "nonce": expected["nonce"],
+        "prompt_digest": expected["prompt_digest"],
+        "evidence": "The prompt was verified not sent.\n",
+        "abandoned_at_unix": 1,
+    }
+
+
 _UNSET_STATE_VALUE = object()
 
 
@@ -1853,6 +1866,64 @@ class TransitionTests(unittest.TestCase):
         self.assertIn(
             "active_report_digest: requirements attempt preparation must preserve trusted state",
             validate_transition(previous, current),
+        )
+
+    def test_requirements_anchor_update_requires_preparation_authorization(self) -> None:
+        previous = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            pending_requirements_expected_header_digest="sha256:" + "6" * 64,
+        )
+        for value in ("sha256:" + "7" * 64, None):
+            with self.subTest(value=value):
+                current = dict(previous)
+                current["pending_requirements_expected_header_digest"] = value
+                self.assertIn(
+                    "requirements_preparation_context: explicit closed context is required for requirements anchor updates",
+                    validate_transition(previous, current),
+                )
+
+    def test_requirements_preparation_context_authorizes_first_and_fresh_attempts(self) -> None:
+        first_expected = expected_envelope(valid_envelope("requirements", valid_requirements()))
+        first_previous = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            pending_requirements_envelope_digest=None,
+            pending_requirements_expected_header_digest=None,
+        )
+        first_current = dict(first_previous)
+        first_current["pending_requirements_expected_header_digest"] = canonical_digest(
+            first_expected
+        )
+        self.assertEqual(
+            validate_transition(
+                first_previous,
+                first_current,
+                requirements_preparation_context={
+                    "expected": first_expected,
+                    "abandoned_attempt": None,
+                },
+            ),
+            [],
+        )
+
+        replacement_expected = dict(first_expected)
+        replacement_expected["nonce"] = "requirements-attempt-02"
+        replacement_expected["prompt_digest"] = "sha256:" + "7" * 64
+        replacement_current = dict(first_current)
+        replacement_current["pending_requirements_expected_header_digest"] = canonical_digest(
+            replacement_expected
+        )
+        self.assertEqual(
+            validate_transition(
+                first_current,
+                replacement_current,
+                requirements_preparation_context={
+                    "expected": replacement_expected,
+                    "abandoned_attempt": valid_abandoned_attempt(first_expected),
+                },
+            ),
+            [],
         )
 
     def test_requirements_context_rejects_coordinated_header_tampering(self) -> None:

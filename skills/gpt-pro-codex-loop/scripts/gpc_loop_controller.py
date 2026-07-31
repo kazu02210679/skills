@@ -765,6 +765,40 @@ def _attempt_number(paths: RunPaths) -> int:
     return max(numbers, default=0) + 1
 
 
+def _requirements_preparation_context(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    expected: Mapping[str, object],
+) -> dict[str, object]:
+    """Bind an anchor replacement to the exact locally abandoned attempt."""
+    previous_anchor = state.get("pending_requirements_expected_header_digest")
+    abandoned: dict[str, object] | None = None
+    if previous_anchor is not None:
+        matches: list[dict[str, object]] = []
+        for path in sorted(paths.run.glob("expected-attempt-*.json")):
+            artifact = load_json(path)
+            if artifact.get("status") != "ABANDONED_NOT_SENT":
+                continue
+            _validate_abandoned_attempt_receipt(artifact)
+            header = artifact.get("expected_header")
+            if (
+                artifact.get("expected_header_digest") == previous_anchor
+                and isinstance(header, dict)
+                and header.get("packet_type") == "requirements"
+            ):
+                matches.append(artifact)
+        if len(matches) != 1:
+            raise ControllerError(
+                "INVALID_ABANDONED_ATTEMPT",
+                "Requirements anchor replacement requires one matching abandoned attempt.",
+            )
+        abandoned = matches[0]
+    return {
+        "expected": dict(expected),
+        "abandoned_attempt": abandoned,
+    }
+
+
 def _expected_header(
     task_slug: str,
     packet_type: str,
@@ -961,7 +995,15 @@ def prepare_requirements(
         _raise_validation(
             "INVALID_TRANSITION",
             "Requirements preparation failed state validation.",
-            validate_packet.validate_transition(state, candidate),
+            validate_packet.validate_transition(
+                state,
+                candidate,
+                requirements_preparation_context=_requirements_preparation_context(
+                    paths,
+                    state,
+                    expected,
+                ),
+            ),
         )
         prompt_path = paths.run / "prompts" / f"{expected['turn_id']}-attempt-{attempt_number:02d}.md"
         expected_path = paths.run / f"expected-attempt-{attempt_number:02d}.json"
@@ -2743,6 +2785,7 @@ def abandon_attempt(
     )
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
         attempts = _outstanding_attempts(paths)
         if len(attempts) != 1:
             raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
@@ -2750,6 +2793,17 @@ def abandon_attempt(
         expected = attempts[0]["expected_header"]
         if not _valid_expected_header(expected):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding attempt header is invalid.")
+        expected_digest = validate_packet.canonical_digest(expected)
+        anchor_field = (
+            "pending_requirements_expected_header_digest"
+            if expected.get("packet_type") == "requirements"
+            else "pending_review_expected_header_digest"
+        )
+        if state.get(anchor_field) != expected_digest:
+            raise ControllerError(
+                "INVALID_EXPECTED_ATTEMPT",
+                "Outstanding attempt does not match trusted state.",
+            )
         if _matches_sent_artifact(paths, expected):
             raise ControllerError("AMBIGUOUS_SEND", "Attempt may have been sent or received.")
         match = ATTEMPT_NAME.fullmatch(expected_path.name)
@@ -2760,7 +2814,7 @@ def abandon_attempt(
             "schema_version": SCHEMA_VERSION,
             "status": "ABANDONED_NOT_SENT",
             "expected_header": expected,
-            "expected_header_digest": validate_packet.canonical_digest(expected),
+            "expected_header_digest": expected_digest,
             "nonce": expected["nonce"],
             "prompt_digest": expected["prompt_digest"],
             "evidence": bounded_evidence,
@@ -2773,6 +2827,7 @@ def abandon_attempt(
         try:
             write_json_atomic(staged, abandoned)
             staged_paths.append(_owned_path(staged))
+            _require_state_digest(paths, loaded_state_digest)
             os.replace(staged, abandoned_path)
         except OSError as exc:
             raise ControllerError("WRITE_FAILED", "Could not atomically abandon the attempt.") from exc
