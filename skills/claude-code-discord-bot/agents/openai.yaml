@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Code Discord Bot"
+  short_description: "Drive Claude Code from Discord with approvals"
+  default_prompt: "Use $claude-code-discord-bot to bridge Claude Code to Discord for instructions, notifications, and human approval."

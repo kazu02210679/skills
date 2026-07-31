@@ -64,6 +64,7 @@ class HostCompatibilityTests(unittest.TestCase):
         }
         self.assertEqual(
             {
+                "claude-code-discord-bot",
                 "co-create-plan",
                 "codex-orchestration",
                 "complexity-aware-execution",

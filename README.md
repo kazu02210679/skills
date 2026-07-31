@@ -1,12 +1,13 @@
 # Agent Engineering Skills
 
-This repository is the canonical catalog for nine independent reusable Skills.
+This repository is the canonical catalog for ten independent reusable Skills.
 The catalog is generated from each Skill's frontmatter; regenerate it with
 `python scripts/generate-skill-catalog.py` after changing a description.
 
 <!-- BEGIN SKILL CATALOG -->
 | Skill | 説明 |
 |---|---|
+| [`claude-code-discord-bot`](skills/claude-code-discord-bot/README.md) | Set up a Discord bridge in front of Claude Code so the user can send instructions from Discord, receive progress and completion notifications, and approve or deny tool use from a phone. Use when the user asks to turn Claude Code into a Discord bot, drive Claude Code from Discord or a phone, get a Discord ping when Claude Code finishes or needs input, or add a human-in-the-loop approval channel for an agent running on their own machine. Does not apply to Slack or other chat platforms, to chat bots unrelated to Claude Code, or to hosting one bot for other people to share. |
 | [`co-create-plan`](skills/co-create-plan/README.md) | Have Claude Code and OpenAI Codex jointly create an evidence-backed implementation plan as equal planning peers. Use when the user asks Claude and Codex to discuss, debate, challenge assumptions, reach consensus, or make a plan together; when a second-model planning review is wanted before implementation; or when a plan must be handed directly to the codex-orchestration workflow without rerunning specification phases. |
 | [`codex-orchestration`](skills/codex-orchestration/README.md) | Delegate implementation from Claude Code to OpenAI Codex while Claude remains the requirements owner and acceptance reviewer. Use in Claude Code when the user asks to let Codex implement a sizeable change, have Claude direct and verify Codex, or continue a Codex run with targeted guidance after a blocker. In Codex, use only to inspect or maintain this orchestration workflow; do not recursively delegate to another Codex session unless the user explicitly requests it. |
 | [`complexity-aware-execution`](skills/complexity-aware-execution/README.md) | Use for code edits, bug fixes, tests, repository exploration, and local configuration or build changes when the agent should right-size its effort. Apply Estimate / Execute / Expand: estimate task complexity and the minimum evidence needed, take the smallest reliable path, verify early, and expand investigation only when verification fails or evidence contradicts the hypothesis. Do not minimize exploration for security, authentication, permissions, secrets, destructive operations, production changes, broad refactors, or explicitly exhaustive audits. |

@@ -43,6 +43,18 @@ Claude Code may inspect or maintain this Skill only. It cannot execute the
 Browser-backed runtime loop, and it must not imitate ChatGPT Pro locally or
 silently substitute a different transport.
 
+## `claude-code-discord-bot`
+
+This Skill sets up an external bridge process that fronts the Claude Code CLI or
+the Claude Agent SDK. Both hosts can run the setup workflow, because the work is
+writing config, a bridge program, and hook entries rather than executing an agent
+loop. The bridge itself always targets Claude Code; do not substitute another
+agent runtime behind the same Discord surface without saying so.
+
+Hook wiring is Claude Code specific. `.claude/settings.json` hook entries have no
+Codex equivalent, so a Codex session maintaining this Skill edits those files as
+data and cannot verify that the hooks fire.
+
 ## Host-specific metadata
 
 `agents/openai.yaml` provides Codex UI metadata. Claude Code does not consume

@@ -56,6 +56,7 @@ class SkillCatalogTests(unittest.TestCase):
         names = [name for name, _ in GENERATOR.skill_records(REPOSITORY_ROOT)]
         self.assertEqual(
             [
+                "claude-code-discord-bot",
                 "co-create-plan",
                 "codex-orchestration",
                 "complexity-aware-execution",
