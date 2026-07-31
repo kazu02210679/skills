@@ -12,6 +12,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from urllib.parse import urlparse
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -910,6 +911,344 @@ def prepare_requirements(
     }
 
 
+REQUIREMENTS_TARGETS = {
+    "PLAN_READY": "REQUIREMENTS_FROZEN",
+    "NEED_USER_INPUT": "USER_DECISION_REQUIRED",
+    "BLOCK": "BLOCKED",
+}
+
+
+def observed_browser_errors(
+    state: Mapping[str, object],
+    observed_url: str,
+    observed_model_label: str,
+    allow_initial_binding: bool,
+) -> list[str]:
+    """Return deterministic identity-policy errors for an observed conversation."""
+    errors: list[str] = []
+    if not isinstance(observed_url, str) or not observed_url:
+        errors.append("conversation URL is missing")
+    if not isinstance(observed_model_label, str) or not observed_model_label:
+        errors.append("model label is missing")
+    policy = state.get("model_policy")
+    requested = state.get("requested_model_label")
+    required_label = "Pro" if policy == "PRO_CLASS" else requested
+    if not isinstance(required_label, str) or observed_model_label != required_label:
+        errors.append("observed model does not satisfy the requested model policy")
+
+    bound_url = state.get("bound_conversation_url")
+    bound_label = state.get("visible_model_label")
+    if state.get("conversation_binding_state") == "CONVERSATION_BOUND":
+        if observed_url != bound_url:
+            errors.append("observed conversation URL does not match the bound conversation")
+        if observed_model_label != bound_label:
+            errors.append("observed model does not match the bound model")
+    elif allow_initial_binding:
+        parsed = urlparse(observed_url) if isinstance(observed_url, str) else None
+        if (
+            parsed is None
+            or parsed.scheme != "https"
+            or parsed.netloc != "chatgpt.com"
+            or not parsed.path.startswith("/c/")
+            or parsed.path == "/c/"
+        ):
+            errors.append("initial conversation URL must be an HTTPS chatgpt.com/c/ URL")
+    else:
+        errors.append("conversation is not bound")
+    return errors
+
+
+def consumed_chain_heads(state: Mapping[str, object]) -> set[str]:
+    """Return only packet identities explicitly consumed by trusted state."""
+    return {
+        value
+        for value in (
+            state.get("last_consumed_packet_digest"),
+            state.get("last_consumed_review_envelope_digest"),
+        )
+        if isinstance(value, str)
+    }
+
+
+def _requirements_context(
+    envelope: dict[str, object],
+    expected: dict[str, object],
+    consumed: set[str],
+    requirements: dict[str, object],
+    approval_receipt: str | None = None,
+) -> dict[str, object]:
+    return {
+        "envelope": envelope,
+        "expected": expected,
+        "consumed_digests": sorted(consumed),
+        "requirements": requirements,
+        "approval_receipt": approval_receipt,
+    }
+
+
+def _raise_validation(code: str, message: str, errors: Sequence[str]) -> None:
+    if errors:
+        raise ControllerError(code, message, errors)
+
+
+def _requirements_revision_path(paths: RunPaths, revision: int) -> Path:
+    return paths.run / f"requirements-revision-{revision:02d}.json"
+
+
+def _commit_artifacts_then_state(
+    paths: RunPaths,
+    artifacts: Sequence[tuple[Path, str | dict[str, object]]],
+    state: dict[str, object],
+    consumed_attempt: Path | None = None,
+    replaceable_artifacts: frozenset[Path] = frozenset(),
+) -> None:
+    """Atomically stage all artifacts and publish state only after they exist."""
+    transaction = paths.transactions / f"consume-{os.getpid()}-{time.time_ns()}"
+    transaction.mkdir()
+    staged: list[tuple[Path, os.stat_result]] = []
+    try:
+        for destination, value in artifacts:
+            if destination.exists() and destination not in replaceable_artifacts:
+                raise ControllerError("ARTIFACT_EXISTS", "Controller artifact already exists.")
+            destination.parent.mkdir(exist_ok=True)
+            stage = transaction / destination.name
+            if isinstance(value, str):
+                write_text_atomic(stage, value)
+            else:
+                write_json_atomic(stage, value)
+            staged.append(_owned_path(stage))
+            os.replace(stage, destination)
+        state_stage = transaction / "state.json"
+        write_json_atomic(state_stage, state)
+        staged.append(_owned_path(state_stage))
+        if consumed_attempt is not None:
+            consumed_name = consumed_attempt.name.replace("expected-", "consumed-")
+            os.replace(consumed_attempt, paths.run / consumed_name)
+        os.replace(state_stage, paths.state)
+    except OSError as exc:
+        raise ControllerError("WRITE_FAILED", "Could not commit controller acceptance artifacts.") from exc
+    finally:
+        _cleanup_owned_transaction(transaction, staged)
+
+
+def accept_requirements(
+    repository: Path,
+    task_slug: str,
+    raw_response_path: Path,
+    observed_conversation_url: str,
+    observed_model_label: str,
+) -> dict[str, object]:
+    """Validate, consume, and route one correlated requirements response."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        state = load_json(paths.state)
+        if state.get("phase") != "REQUIREMENTS_PENDING":
+            raise ControllerError("INVALID_PHASE", "Requirements can be accepted only when pending.")
+        browser_errors = observed_browser_errors(
+            state,
+            observed_conversation_url,
+            observed_model_label,
+            allow_initial_binding=True,
+        )
+        _raise_validation(
+            "BROWSER_IDENTITY_MISMATCH",
+            "Observed browser or model identity is invalid.",
+            browser_errors,
+        )
+        attempts = _outstanding_attempts(paths)
+        if len(attempts) != 1:
+            raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
+        expected_path = paths.run / str(attempts[0]["name"])
+        expected = attempts[0]["expected_header"]
+        if not _valid_expected_header(expected) or expected.get("packet_type") != "requirements":
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding requirements attempt is invalid.")
+        raw = _read_input(raw_response_path, "requirements response")
+        try:
+            envelope = validate_packet.extract_single_json_object(raw)
+        except ValueError as exc:
+            raise ControllerError("INVALID_RESPONSE", "Requirements response is not one strict JSON envelope.") from exc
+        transport_errors = validate_packet.validate_transport_envelope(
+            envelope, expected, consumed_chain_heads(state)
+        )
+        _raise_validation("INVALID_RESPONSE", "Requirements response envelope is invalid.", transport_errors)
+        requirements = envelope.get("payload")
+        if not isinstance(requirements, dict):
+            raise ControllerError("INVALID_RESPONSE", "Requirements response payload is invalid.")
+        previous_requirements = None
+        if state.get("active_requirements_digest") is not None:
+            previous_requirements = load_json(paths.run / "requirements.json")
+        requirements_errors = validate_packet.validate_requirements(
+            requirements, previous_requirements
+        )
+        _raise_validation("INVALID_RESPONSE", "Requirements response payload is invalid.", requirements_errors)
+        decision = requirements["decision"]
+        target = REQUIREMENTS_TARGETS.get(decision)
+        if target is None:
+            raise ControllerError("INVALID_RESPONSE", "Requirements response has an invalid decision.")
+
+        envelope_digest = validate_packet.canonical_digest(envelope)
+        requirements_digest = validate_packet.canonical_digest(requirements)
+        staged_previous = dict(state)
+        staged_previous["pending_requirements_envelope_digest"] = envelope_digest
+        is_revision = state.get("active_requirements_digest") is not None
+        if is_revision:
+            staged_previous.update(
+                pending_requirements_revision=requirements["requirements_revision"],
+                pending_requirements_digest=requirements_digest,
+                pending_supersedes_digest=requirements["supersedes_digest"],
+                **{
+                    field: requirements[field]
+                    for field in validate_packet.MATERIAL_REVISION_FLAGS
+                },
+            )
+        candidate = dict(staged_previous)
+        candidate.update(
+            phase=target,
+            latest_requirements_decision=decision,
+            pending_requirements_envelope_digest=None,
+            last_consumed_packet_digest=envelope_digest,
+        )
+        if state.get("conversation_binding_state") == "CONVERSATION_UNBOUND":
+            candidate.update(
+                conversation_binding_state="CONVERSATION_BOUND",
+                bound_conversation_url=observed_conversation_url,
+                visible_model_label=observed_model_label,
+            )
+            staged_previous.update(
+                conversation_binding_state="CONVERSATION_BOUND",
+                bound_conversation_url=observed_conversation_url,
+                visible_model_label=observed_model_label,
+            )
+        if target in {"USER_DECISION_REQUIRED", "BLOCKED"}:
+            candidate.update(
+                stop_origin_phase="REQUIREMENTS_PENDING",
+                stop_origin_category=(
+                    "REQUIREMENTS_NEED_USER_INPUT"
+                    if decision == "NEED_USER_INPUT"
+                    else "REQUIREMENTS_BLOCK"
+                ),
+                stop_reason=requirements["change_reason"],
+                stop_sequence=state["stop_sequence"] + 1,
+            )
+        if target == "REQUIREMENTS_FROZEN":
+            candidate.update(
+                active_requirements_revision=requirements["requirements_revision"],
+                active_requirements_digest=requirements_digest,
+                pending_requirements_revision=None,
+                pending_requirements_digest=None,
+                pending_supersedes_digest=None,
+                pending_approval_sequence=None,
+                pending_approved_requirements_digest=None,
+                pending_user_approval_evidence=None,
+                **{field: False for field in validate_packet.MATERIAL_REVISION_FLAGS},
+            )
+        context = _requirements_context(
+            envelope, expected, consumed_chain_heads(state), requirements
+        )
+        transition_errors = validate_packet.validate_transition(
+            staged_previous, candidate, requirements_context=context
+        )
+        _raise_validation("INVALID_TRANSITION", "Requirements acceptance failed state validation.", transition_errors)
+        revision = requirements["requirements_revision"]
+        artifacts: list[tuple[Path, str | dict[str, object]]] = [
+            (paths.run / "responses" / f"{expected['turn_id']}.raw.md", raw),
+            (paths.run / f"envelope-{revision:02d}.json", envelope),
+            (_requirements_revision_path(paths, revision), requirements),
+        ]
+        if target == "REQUIREMENTS_FROZEN":
+            artifacts.append((paths.run / "requirements.json", requirements))
+        _commit_artifacts_then_state(
+            paths,
+            artifacts,
+            candidate,
+            expected_path,
+            frozenset({paths.run / "requirements.json"})
+            if target == "REQUIREMENTS_FROZEN"
+            else frozenset(),
+        )
+    return status_run(paths.repository, task_slug)
+
+
+def approve_requirements(
+    repository: Path,
+    task_slug: str,
+    approval_evidence_path: Path,
+) -> dict[str, object]:
+    """Promote one exact stopped material proposal with local approval evidence."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        state = load_json(paths.state)
+        if (
+            state.get("phase") != "USER_DECISION_REQUIRED"
+            or state.get("stop_origin_category") != "REQUIREMENTS_NEED_USER_INPUT"
+        ):
+            raise ControllerError(
+                "INVALID_PHASE", "Requirements approval is available only for a stopped proposal."
+            )
+        evidence = _read_input(approval_evidence_path, "approval evidence")
+        if not evidence.strip():
+            raise ControllerError("INVALID_APPROVAL", "Approval evidence must not be empty.")
+        revision = state.get("pending_requirements_revision")
+        digest = state.get("pending_requirements_digest")
+        if not isinstance(revision, int) or isinstance(revision, bool) or not isinstance(digest, str):
+            raise ControllerError("INVALID_STATE", "Stopped proposal lacks trusted requirements provenance.")
+        proposal = load_json(_requirements_revision_path(paths, revision))
+        if validate_packet.canonical_digest(proposal) != digest:
+            raise ControllerError("INVALID_STATE", "Stored proposal does not match trusted requirements digest.")
+        envelope = load_json(paths.run / f"envelope-{revision:02d}.json")
+        if envelope.get("payload") != proposal or validate_packet.canonical_digest(envelope) != state.get(
+            "last_consumed_packet_digest"
+        ):
+            raise ControllerError("INVALID_STATE", "Stored proposal envelope does not match trusted state.")
+        receipt = f"user-approval:stop-{state['stop_sequence']}:{digest}"
+        candidate = dict(state)
+        candidate.update(
+            phase="REQUIREMENTS_FROZEN",
+            latest_requirements_decision=None,
+            active_requirements_revision=revision,
+            active_requirements_digest=digest,
+            approval_sequence=state["approval_sequence"] + 1,
+            pending_requirements_revision=None,
+            pending_requirements_digest=None,
+            pending_supersedes_digest=None,
+            pending_approval_sequence=None,
+            pending_approved_requirements_digest=None,
+            pending_user_approval_evidence=None,
+            **{field: False for field in validate_packet.MATERIAL_REVISION_FLAGS},
+            stop_origin_phase=None,
+            stop_origin_category=None,
+            stop_reason=None,
+            resolution_evidence=receipt,
+            resolution_stop_sequence=state["stop_sequence"],
+            review_round=0,
+        )
+        context = _requirements_context(
+            envelope,
+            {key: envelope[key] for key in EXPECTED_HEADER_FIELDS},
+            consumed_chain_heads(state),
+            proposal,
+            receipt,
+        )
+        transition_errors = validate_packet.validate_transition(
+            state, candidate, requirements_context=context
+        )
+        _raise_validation("INVALID_TRANSITION", "Requirements approval failed state validation.", transition_errors)
+        _commit_artifacts_then_state(
+            paths,
+            [
+                (paths.run / f"approval-stop-{state['stop_sequence']:02d}.txt", evidence),
+                (paths.run / "requirements.json", proposal),
+            ],
+            candidate,
+            replaceable_artifacts=frozenset({paths.run / "requirements.json"}),
+        )
+    return status_run(paths.repository, task_slug)
+
+
 def _matches_sent_artifact(paths: RunPaths, expected: Mapping[str, object]) -> bool:
     nonce = expected.get("nonce")
     turn_id = expected.get("turn_id")
@@ -1079,7 +1418,9 @@ def _unreachable_artifacts(
     }
     unreachable: list[str] = []
     for path in paths.run.iterdir():
-        if path.name in allowed_names or path.name.startswith("expected-attempt-"):
+        if path.name in allowed_names or path.name.startswith(
+            ("expected-attempt-", "consumed-attempt-", "approval-stop-")
+        ):
             continue
         if path.is_file() and path.suffix == ".json":
             try:

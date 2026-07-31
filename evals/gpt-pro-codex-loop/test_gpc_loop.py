@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import subprocess
 import sys
 import threading
@@ -21,6 +22,56 @@ SCRIPT_DIR = (
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import gpc_loop_controller as controller  # noqa: E402
+
+
+def write_raw_envelope(
+    path: Path,
+    expected: dict[str, object],
+    payload: dict[str, object],
+) -> dict[str, object]:
+    envelope = {**expected, "payload": payload}
+    path.write_text(
+        "```json\n" + json.dumps(envelope, ensure_ascii=False, sort_keys=True) + "\n```\n",
+        encoding="utf-8",
+    )
+    return envelope
+
+
+def valid_requirements(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "requirements_revision": 1,
+        "supersedes_digest": None,
+        "change_reason": "Initial requirements.",
+        "behavior_changed": False,
+        "user_approval_required": False,
+        "user_approval_received": False,
+        "scope_changed": False,
+        "public_contract_changed": False,
+        "prior_evidence_invalidated": False,
+        "review_round_reset": False,
+        "decision": "PLAN_READY",
+        "objective": "Implement deterministic behavior.",
+        "requirements": [{"id": "REQ-1", "statement": "Behavior is deterministic."}],
+        "in_scope": ["example.py"],
+        "out_of_scope": ["deployment"],
+        "constraints": ["standard library"],
+        "acceptance_criteria": [{
+            "id": "AC-1",
+            "criterion": "The focused test passes.",
+            "required_evidence": "Focused unittest output.",
+        }],
+        "design_direction": ["Keep the implementation small."],
+        "risk_items": [{
+            "id": "RISK-1",
+            "risk": "Evidence may be incomplete.",
+            "required_mitigation": "Require AC-1 evidence.",
+        }],
+        "verification_strategy": ["Run the focused unittest."],
+        "open_questions": [],
+    }
+    value.update(overrides)
+    return value
 
 
 class ControllerCase(unittest.TestCase):
@@ -79,6 +130,40 @@ class ControllerCase(unittest.TestCase):
 
     def _state_bytes(self) -> bytes:
         return (self._run_dir() / "state.json").read_bytes()
+
+    def _freeze_initial_requirements(self) -> dict[str, object]:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.repository / "requirements.raw.md"
+        write_raw_envelope(raw, expected, valid_requirements())
+        return controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            "Pro",
+        )
+
+    def _seed_requirements_revision_pending(self) -> None:
+        state = self._state()
+        state.update(
+            phase="REQUIREMENTS_PENDING",
+            latest_decision="CHANGES_REQUESTED",
+            latest_requirements_decision=None,
+            required_actions=["REQUIREMENTS_REVISION"],
+            pending_requirements_envelope_digest=None,
+            pending_review_envelope_digest=None,
+        )
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+
+    def _write_conflict(self) -> Path:
+        path = self.repository / "conflict.txt"
+        path.write_text(
+            "Repository evidence requires a material behavior revision.\n",
+            encoding="utf-8",
+        )
+        return path
 
     def test_resolve_run_rejects_traversal_and_separator_slugs(self) -> None:
         for slug in ("../escape", r"a\b", "a/b", ".", "..", "a\nb"):
@@ -335,3 +420,89 @@ class ControllerCase(unittest.TestCase):
         )
         with self.assertRaisesRegex(controller.ControllerError, "abandoned"):
             controller.prepare_requirements(self.repository, "controller-test")
+
+    def test_accept_initial_requirements_binds_browser_and_freezes(self) -> None:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.repository / "requirements.raw.md"
+        envelope = write_raw_envelope(raw, expected, valid_requirements())
+        result = controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            "Pro",
+        )
+        self.assertEqual(result["phase"], "REQUIREMENTS_FROZEN")
+        state = self._state()
+        self.assertEqual(
+            state["last_consumed_packet_digest"],
+            controller.validate_packet.canonical_digest(envelope),
+        )
+        self.assertEqual(
+            state["bound_conversation_url"],
+            "https://chatgpt.com/c/controller-test",
+        )
+
+    def test_accept_requirements_rejects_wrong_observed_browser_without_state_change(self) -> None:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.repository / "requirements.raw.md"
+        write_raw_envelope(raw, expected, valid_requirements())
+        before = self._state_bytes()
+        with self.assertRaisesRegex(controller.ControllerError, "model"):
+            controller.accept_requirements(
+                self.repository,
+                "controller-test",
+                raw,
+                "https://chatgpt.com/c/controller-test",
+                "Standard",
+            )
+        self.assertEqual(self._state_bytes(), before)
+
+    def test_orphan_envelope_does_not_enter_consumed_history(self) -> None:
+        self._init_run()
+        paths = controller.resolve_run(self.repository, "controller-test")
+        (paths.run / "envelope-99.json").write_text(
+            json.dumps({"schema_version": 1}) + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(controller.consumed_chain_heads(self._state()), set())
+
+    def test_material_proposal_requires_digest_bound_local_approval(self) -> None:
+        self._freeze_initial_requirements()
+        self._seed_requirements_revision_pending()
+        attempt = controller.prepare_requirements(
+            self.repository,
+            "controller-test",
+            conflict_evidence_path=self._write_conflict(),
+        )
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        proposal = valid_requirements(
+            requirements_revision=2,
+            supersedes_digest=self._state()["active_requirements_digest"],
+            decision="NEED_USER_INPUT",
+            behavior_changed=True,
+            user_approval_required=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        raw = self.repository / "revision.raw.md"
+        write_raw_envelope(raw, expected, proposal)
+        stopped = controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        self.assertEqual(stopped["phase"], "USER_DECISION_REQUIRED")
+        evidence = self.repository / "approval.txt"
+        evidence.write_text("The user approved this exact proposal.\n", encoding="utf-8")
+        frozen = controller.approve_requirements(
+            self.repository, "controller-test", evidence
+        )
+        self.assertEqual(frozen["phase"], "REQUIREMENTS_FROZEN")
+        self.assertEqual(frozen["review_round"], 0)
