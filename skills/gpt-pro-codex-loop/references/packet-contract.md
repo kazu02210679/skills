@@ -30,7 +30,7 @@ python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --final-gate FINAL_GATE.json --final-report REPORT.json --final-requirements REQUIREMENTS.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py final-gate FINAL_GATE.json --state STATE.json --report REPORT.json --requirements REQUIREMENTS.json
 python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py inspect-preflight REPOSITORY BASELINE
-python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py validate-preflight PREFLIGHT.json --approved-existing-path PATH
+python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py validate-preflight PREFLIGHT.json --repository REPOSITORY --approved-existing-path PATH
 python skills/gpt-pro-codex-loop/scripts/capture_snapshot.py capture REPOSITORY BASELINE --preflight PREFLIGHT.json
 ```
 

@@ -401,7 +401,10 @@ def _initial_paths(
     )
 
 
-def _preflight_errors(preflight: object) -> list[str]:
+def _preflight_errors(
+    preflight: object,
+    repository: Path | None = None,
+) -> list[str]:
     if not isinstance(preflight, dict):
         return ["preflight: must be an object"]
     errors: list[str] = []
@@ -436,7 +439,7 @@ def _preflight_errors(preflight: object) -> list[str]:
 
     def is_canonical_manifest_path(path: str) -> bool:
         candidate = PurePosixPath(path)
-        return (
+        structurally_valid = (
             bool(path)
             and "\\" not in path
             and not candidate.is_absolute()
@@ -444,8 +447,17 @@ def _preflight_errors(preflight: object) -> list[str]:
             and not candidate.parts[0].endswith(":")
             and all(part not in {"", ".", ".."} for part in candidate.parts)
             and "/".join(candidate.parts) == path
-            and candidate.parts[0].casefold() != METADATA_DIRECTORY.casefold()
         )
+        if not structurally_valid:
+            return False
+        if candidate.parts[0].casefold() != METADATA_DIRECTORY.casefold():
+            return True
+        if repository is None:
+            return False
+        try:
+            return not _is_metadata_path(repository, path)
+        except SnapshotError:
+            return False
 
     for index, entry in enumerate(tracked):
         prefix = f"preflight.tracked_files.{index}"
@@ -602,10 +614,13 @@ def _normalize_approval_path(value: object, field: str, errors: list[str]) -> st
 
 
 def validate_preflight(
-    preflight: dict[str, object], approved_existing_paths: Sequence[str]
+    preflight: dict[str, object],
+    approved_existing_paths: Sequence[str],
+    repository: Path | None = None,
 ) -> list[str]:
     """Validate immutable preflight structure, digests, and exact path approval."""
-    errors = _preflight_errors(preflight)
+    root = _repository_root(repository) if repository is not None else None
+    errors = _preflight_errors(preflight, root)
     if errors:
         return errors
     if isinstance(approved_existing_paths, (str, bytes)):
@@ -778,7 +793,7 @@ def capture_snapshot(
     """Capture state bound to an immutable, validated preflight."""
     root = _repository_root(repository)
     baseline = _baseline_commit(root, baseline_head)
-    structural_errors = _preflight_errors(preflight)
+    structural_errors = _preflight_errors(preflight, root)
     if structural_errors:
         raise SnapshotError("invalid preflight: " + "; ".join(structural_errors))
     if preflight["baseline_head"] != baseline:
@@ -836,6 +851,7 @@ def _parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("baseline")
     validate_parser = subparsers.add_parser("validate-preflight")
     validate_parser.add_argument("preflight_json", type=Path)
+    validate_parser.add_argument("--repository", type=Path, required=True)
     validate_parser.add_argument(
         "--approved-existing-path", action="append", default=[]
     )
@@ -853,7 +869,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = inspect_preflight(args.repository, args.baseline)
         elif args.command == "validate-preflight":
             loaded = _load_json(args.preflight_json)
-            errors = validate_preflight(loaded, args.approved_existing_path)
+            errors = validate_preflight(
+                loaded,
+                args.approved_existing_path,
+                args.repository,
+            )
             if errors:
                 raise SnapshotError("; ".join(errors))
             result = loaded

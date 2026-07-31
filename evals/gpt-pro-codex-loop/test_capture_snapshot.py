@@ -590,7 +590,14 @@ class CaptureSnapshotTests(unittest.TestCase):
         packet.write_bytes(inspect.stdout)
 
         validate = subprocess.run(
-            [sys.executable, str(script), "validate-preflight", str(packet)],
+            [
+                sys.executable,
+                str(script),
+                "validate-preflight",
+                str(packet),
+                "--repository",
+                str(self.repo),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -632,7 +639,14 @@ class CaptureSnapshotTests(unittest.TestCase):
         packet = Path(self.temporary_directory.name) / "dirty-preflight.json"
         packet.write_text(json.dumps(preflight), encoding="utf-8")
         rejected = subprocess.run(
-            [sys.executable, str(script), "validate-preflight", str(packet)],
+            [
+                sys.executable,
+                str(script),
+                "validate-preflight",
+                str(packet),
+                "--repository",
+                str(self.repo),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
@@ -646,6 +660,8 @@ class CaptureSnapshotTests(unittest.TestCase):
                 str(script),
                 "validate-preflight",
                 str(packet),
+                "--repository",
+                str(self.repo),
                 "--approved-existing-path",
                 "app.py",
             ],
