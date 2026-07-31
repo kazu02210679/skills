@@ -398,6 +398,14 @@ def load_json(path: Path) -> dict[str, object]:
     return value
 
 
+def _load_mutator_state(paths: RunPaths) -> tuple[dict[str, object], str]:
+    """Load canonical trusted state and bind this command to those exact bytes."""
+    state = load_json(paths.state)
+    digest = sha256_bytes(_canonical_json_bytes(state))
+    _require_state_digest(paths, digest)
+    return state, digest
+
+
 def _normalize_approved_paths(approved_existing_paths: Sequence[str]) -> list[str]:
     if isinstance(approved_existing_paths, (str, bytes)):
         return []
@@ -647,7 +655,7 @@ def initialize_run(
                             "Could not commit initialized controller artifacts.",
                         ) from exc
                     initialized = True
-                    _record_events(paths, [{
+                    _record_events_best_effort(paths, [{
                         "schema_version": SCHEMA_VERSION,
                         "event": "RUN_INITIALIZED",
                         "at_unix": int(time.time()),
@@ -878,7 +886,7 @@ def prepare_requirements(
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
-        state = load_json(paths.state)
+        state, loaded_state_digest = _load_mutator_state(paths)
         if state.get("phase") != "REQUIREMENTS_PENDING":
             raise ControllerError("INVALID_PHASE", "Requirements can be prepared only when pending.")
         attempts = _outstanding_attempts(paths)
@@ -961,7 +969,7 @@ def prepare_requirements(
             paths,
             [(prompt_path, rendered["prompt"]), (expected_path, expected)],
             candidate,
-            expected_state_digest=_file_digest(paths.state),
+            expected_state_digest=loaded_state_digest,
         )
     return {
         "prompt_path": str(prompt_path),
@@ -1137,8 +1145,11 @@ def _snapshot_changed_file_intents(
     return changed_files
 
 
-def _advance_report_phase(state: Mapping[str, object]) -> dict[str, object]:
+def _advance_report_phase(
+    state: Mapping[str, object],
+) -> tuple[dict[str, object], list[tuple[str, str]]]:
     current = dict(state)
+    edges: list[tuple[str, str]] = []
     routes = {
         "REQUIREMENTS_FROZEN": "IMPLEMENTING",
         "IMPLEMENTING": "LOCAL_VERIFICATION",
@@ -1152,15 +1163,11 @@ def _advance_report_phase(state: Mapping[str, object]) -> dict[str, object]:
             "Report construction failed state validation.",
             validate_packet.validate_transition(current, candidate),
         )
+        edges.append((str(current["phase"]), str(candidate["phase"])))
         current = candidate
     if current.get("phase") != "REVIEW_PENDING":
         raise ControllerError("INVALID_PHASE", "A report can be built only before review.")
-    return current
-
-
-def _append_event(paths: RunPaths, event: Mapping[str, object]) -> str:
-    prior = _read_input(paths.events, "controller events")
-    return prior + _canonical_json_bytes(dict(event)).decode("utf-8")
+    return current, edges
 
 
 def _record_events(paths: RunPaths, events: Sequence[Mapping[str, object]]) -> None:
@@ -1169,6 +1176,15 @@ def _record_events(paths: RunPaths, events: Sequence[Mapping[str, object]]) -> N
     for event in events:
         content += _canonical_json_bytes(dict(event)).decode("utf-8")
     write_text_atomic(paths.events, content)
+
+
+def _record_events_best_effort(
+    paths: RunPaths, events: Sequence[Mapping[str, object]]
+) -> None:
+    try:
+        _record_events(paths, events)
+    except (ControllerError, OSError):
+        pass
 
 
 def build_report(
@@ -1182,7 +1198,7 @@ def build_report(
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
-        state = load_json(paths.state)
+        state, loaded_state_digest = _load_mutator_state(paths)
         if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
             raise ControllerError(
                 "REVIEW_ROUND_LIMIT",
@@ -1217,7 +1233,7 @@ def build_report(
             "omissions": evidence["omissions"],
             "unresolved_risks_or_blockers": evidence["unresolved_risks_or_blockers"],
         }
-        candidate = _advance_report_phase(state)
+        candidate, phase_edges = _advance_report_phase(state)
         candidate.update(
             active_report_digest=validate_packet.canonical_digest(report),
             current_snapshot_digest=snapshot["snapshot_digest"],
@@ -1235,28 +1251,20 @@ def build_report(
             [(snapshot_path, snapshot), (report_path, report)],
             candidate,
             replaceable_artifacts=frozenset({snapshot_path, report_path}),
+            expected_state_digest=loaded_state_digest,
         )
-        _record_events(
+        _record_events_best_effort(
             paths,
             [
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "event": "REPORT_PHASE_ADVANCED",
-                    "from_phase": state["phase"],
-                    "to_phase": "IMPLEMENTING",
-                },
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "event": "REPORT_PHASE_ADVANCED",
-                    "from_phase": "IMPLEMENTING",
-                    "to_phase": "LOCAL_VERIFICATION",
-                },
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "event": "REPORT_PHASE_ADVANCED",
-                    "from_phase": "LOCAL_VERIFICATION",
-                    "to_phase": "REVIEW_PENDING",
-                },
+                *(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "event": "REPORT_PHASE_ADVANCED",
+                        "from_phase": source,
+                        "to_phase": target,
+                    }
+                    for source, target in phase_edges
+                ),
                 {
                     "schema_version": SCHEMA_VERSION,
                     "event": "REPORT_BUILT",
@@ -1357,13 +1365,19 @@ def _save_review_attempt_with_state(
     expected: Mapping[str, object],
     prompt: str,
     state: dict[str, object],
+    expected_state_digest: str,
 ) -> tuple[Path, Path]:
     turn_id = expected.get("turn_id")
     if not isinstance(turn_id, str):
         raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Review attempt is invalid.")
     prompt_path = paths.run / "prompts" / f"{turn_id}-attempt-{attempt_number:02d}.md"
     expected_path = paths.run / f"expected-attempt-{attempt_number:02d}.json"
-    _commit_artifacts_then_state(paths, [(prompt_path, prompt), (expected_path, dict(expected))], state)
+    _commit_artifacts_then_state(
+        paths,
+        [(prompt_path, prompt), (expected_path, dict(expected))],
+        state,
+        expected_state_digest=expected_state_digest,
+    )
     return prompt_path, expected_path
 
 
@@ -1378,7 +1392,7 @@ def prepare_review(
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
-        state = load_json(paths.state)
+        state, loaded_state_digest = _load_mutator_state(paths)
         if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
             raise ControllerError(
                 "REVIEW_ROUND_LIMIT",
@@ -1471,7 +1485,12 @@ def prepare_review(
             validate_packet.canonical_digest(expected)
         )
         prompt_path, expected_path = _save_review_attempt_with_state(
-            paths, attempt_number, expected, rendered["prompt"], candidate
+            paths,
+            attempt_number,
+            expected,
+            rendered["prompt"],
+            candidate,
+            loaded_state_digest,
         )
     return {
         "prompt_path": str(prompt_path),
@@ -1685,13 +1704,17 @@ def _recover_transaction(paths: RunPaths, transaction: Path) -> None:
         parsed.append((destination, stage, backup, new_digest, old_digest))
 
     attempt = manifest.get("attempt_rename")
-    attempt_paths: tuple[Path, Path] | None = None
+    attempt_paths: tuple[Path, Path, str] | None = None
     if attempt is not None:
-        if not isinstance(attempt, dict) or set(attempt) != {"source", "destination"}:
+        if not isinstance(attempt, dict) or set(attempt) != {"source", "destination", "digest"}:
             raise ControllerError("INVALID_TRANSACTION", "Attempt rename is invalid.")
+        attempt_digest = attempt["digest"]
+        if not isinstance(attempt_digest, str) or DIGEST.fullmatch(attempt_digest) is None:
+            raise ControllerError("INVALID_TRANSACTION", "Attempt rename digest is invalid.")
         attempt_paths = (
             _manifest_run_path(paths, attempt["source"]),
             _manifest_run_path(paths, attempt["destination"]),
+            attempt_digest,
         )
     old_state_digest = manifest.get("old_state_digest")
     new_state_digest = manifest.get("new_state_digest")
@@ -1709,8 +1732,12 @@ def _recover_transaction(paths: RunPaths, transaction: Path) -> None:
                     "Committed transaction is missing a published artifact.",
                 )
         if attempt_paths is not None:
-            source, destination = attempt_paths
-            if source.exists() or not destination.is_file():
+            source, destination, attempt_digest = attempt_paths
+            if (
+                source.exists()
+                or not destination.is_file()
+                or _file_digest(destination) != attempt_digest
+            ):
                 raise ControllerError(
                     "TRANSACTION_RECOVERY_FAILED",
                     "Committed transaction has an incomplete attempt rename.",
@@ -1724,31 +1751,41 @@ def _recover_transaction(paths: RunPaths, transaction: Path) -> None:
         )
 
     if attempt_paths is not None:
-        source, destination = attempt_paths
+        source, destination, attempt_digest = attempt_paths
         if destination.exists() and not source.exists():
+            if _file_digest(destination) != attempt_digest:
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Foreign-modified attempt blocks transaction rollback.",
+                )
             os.replace(destination, source)
         elif destination.exists() and source.exists():
             raise ControllerError(
                 "TRANSACTION_RECOVERY_FAILED", "Attempt rename has two live copies."
             )
-    for destination, _, backup, new_digest, old_digest in reversed(parsed):
+        elif not source.exists():
+            raise ControllerError(
+                "TRANSACTION_RECOVERY_FAILED",
+                "Attempt rename provenance is missing.",
+            )
+    for destination, stage, backup, new_digest, old_digest in reversed(parsed):
         if backup is None:
-            if destination.exists():
-                if _file_digest(destination) != new_digest:
-                    raise ControllerError(
-                        "TRANSACTION_RECOVERY_FAILED",
-                        "Unowned artifact blocks transaction rollback.",
-                    )
-                destination.unlink()
+            if stage.exists() and not destination.exists():
+                continue
+            if not destination.exists() or _file_digest(destination) != new_digest:
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Unowned artifact blocks transaction rollback.",
+                )
+            destination.unlink()
             continue
         if backup.exists():
-            if destination.exists():
-                if _file_digest(destination) != new_digest:
-                    raise ControllerError(
-                        "TRANSACTION_RECOVERY_FAILED",
-                        "Replaceable artifact changed during transaction rollback.",
-                    )
-                destination.unlink()
+            if not destination.exists() or _file_digest(destination) != new_digest:
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Replaceable artifact changed during transaction rollback.",
+                )
+            destination.unlink()
             os.replace(backup, destination)
         if not destination.is_file() or _file_digest(destination) != old_digest:
             raise ControllerError(
@@ -1768,11 +1805,38 @@ def _reconcile_incomplete_transactions(paths: RunPaths) -> None:
 
 def _require_manual_recovery(paths: RunPaths) -> None:
     """Keep interrupted transactions visible; normal commands never repair them."""
-    if paths.transactions.is_dir() and any(paths.transactions.iterdir()):
+    transactions = _orphan_transaction_paths(paths)
+    if transactions:
         raise ControllerError(
             "RECOVERY_REQUIRED",
-            "An interrupted transaction requires manual recovery before mutation.",
+            "Manual recovery is required: inspect interrupted transactions and escalate before mutation.",
+            _recovery_details(paths, transactions),
         )
+
+
+def _orphan_transaction_paths(paths: RunPaths) -> list[Path]:
+    if not paths.transactions.is_dir():
+        return []
+    return sorted(
+        (path for path in paths.transactions.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+    )
+
+
+def _recovery_details(paths: RunPaths, transactions: Sequence[Path]) -> list[str]:
+    return [
+        *(f"transaction_path:{path}" for path in transactions),
+        (
+            "status_command:python skills/gpt-pro-codex-loop/scripts/gpc_loop.py "
+            f"status --repo {paths.repository} --task {paths.task_slug}"
+        ),
+        (
+            "validator_command:python skills/gpt-pro-codex-loop/scripts/validate_packet.py "
+            "transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-context REQUIREMENTS_CONTEXT.json"
+        ),
+        "preserve_artifacts:true",
+        "user_escalation_required:true",
+    ]
 
 
 def _require_state_digest(paths: RunPaths, expected: str) -> None:
@@ -1793,8 +1857,20 @@ def _rollback_uncommitted_transaction(paths: RunPaths, transaction: Path) -> Non
     if isinstance(attempt, dict):
         source = _manifest_run_path(paths, attempt.get("source"))
         destination = _manifest_run_path(paths, attempt.get("destination"))
-        if destination.exists() and not source.exists():
+        attempt_digest = attempt.get("digest")
+        if (
+            destination.exists()
+            and not source.exists()
+            and isinstance(attempt_digest, str)
+            and _file_digest(destination) == attempt_digest
+        ):
             os.replace(destination, source)
+        elif destination.exists() or not source.exists():
+            raise ControllerError(
+                "RECOVERY_REQUIRED",
+                "Manual recovery is required because a foreign-modified attempt blocks safe rollback.",
+                [str(transaction)],
+            )
     for operation in reversed(operations):
         if not isinstance(operation, dict):
             raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not roll back transaction artifacts.")
@@ -1803,11 +1879,25 @@ def _rollback_uncommitted_transaction(paths: RunPaths, transaction: Path) -> Non
         if backup_name is None:
             if destination.exists() and _file_digest(destination) == operation.get("new_digest"):
                 destination.unlink()
+            else:
+                raise ControllerError(
+                    "RECOVERY_REQUIRED",
+                    "Manual recovery is required because a foreign-modified artifact blocks safe rollback.",
+                    [str(transaction), str(destination)],
+                )
             continue
         backup = _transaction_file(transaction, backup_name)
-        if backup.exists() and destination.exists() and _file_digest(destination) == operation.get("new_digest"):
-            destination.unlink()
         if backup.exists():
+            if (
+                not destination.exists()
+                or _file_digest(destination) != operation.get("new_digest")
+            ):
+                raise ControllerError(
+                    "RECOVERY_REQUIRED",
+                    "Manual recovery is required because a foreign-modified artifact blocks safe rollback.",
+                    [str(transaction), str(destination)],
+                )
+            destination.unlink()
             os.replace(backup, destination)
     _cleanup_transaction_files(
         transaction,
@@ -1821,14 +1911,16 @@ def _commit_artifacts_then_state(
     state: dict[str, object],
     consumed_attempt: Path | None = None,
     replaceable_artifacts: frozenset[Path] = frozenset(),
-    expected_state_digest: str | None = None,
+    *,
+    expected_state_digest: str,
 ) -> None:
     """Publish a recoverable artifact transaction with trusted state last."""
-    if expected_state_digest is None:
-        expected_state_digest = _file_digest(paths.state)
+    if not isinstance(expected_state_digest, str) or DIGEST.fullmatch(expected_state_digest) is None:
+        raise ControllerError("INVALID_STATE_DIGEST", "Loaded state digest is invalid.")
     transaction = paths.transactions / f"consume-{os.getpid()}-{time.time_ns()}"
     transaction.mkdir()
     operations: list[dict[str, object]] = []
+    publication_started = False
     try:
         for index, (destination, value) in enumerate(artifacts):
             destination_relative = _run_relative_path(paths, destination)
@@ -1864,6 +1956,7 @@ def _commit_artifacts_then_state(
             attempt_rename = {
                 "source": source_relative,
                 "destination": destination_relative,
+                "digest": _file_digest(consumed_attempt),
             }
         manifest = {
             "schema_version": SCHEMA_VERSION,
@@ -1874,6 +1967,7 @@ def _commit_artifacts_then_state(
         }
         write_json_atomic(transaction / "manifest.json", manifest)
         _require_state_digest(paths, expected_state_digest)
+        publication_started = True
         for operation in operations:
             destination = _manifest_run_path(paths, operation["destination"])
             stage = _transaction_file(transaction, operation["stage"])
@@ -1893,7 +1987,13 @@ def _commit_artifacts_then_state(
         raise ControllerError("WRITE_FAILED", "Could not commit controller acceptance artifacts.") from exc
     except ControllerError as exc:
         if exc.code == "STATE_CHANGED":
-            _rollback_uncommitted_transaction(paths, transaction)
+            if publication_started:
+                _rollback_uncommitted_transaction(paths, transaction)
+            else:
+                _cleanup_transaction_files(
+                    transaction,
+                    {path.name for path in transaction.iterdir() if path.is_file()},
+                )
         else:
             _recover_transaction(paths, transaction)
         raise
@@ -1913,7 +2013,7 @@ def accept_requirements(
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
-        state = load_json(paths.state)
+        state, loaded_state_digest = _load_mutator_state(paths)
         if state.get("phase") != "REQUIREMENTS_PENDING":
             raise ControllerError("INVALID_PHASE", "Requirements can be accepted only when pending.")
         browser_errors = observed_browser_errors(
@@ -2080,8 +2180,9 @@ def accept_requirements(
             frozenset({paths.run / "requirements.json"})
             if target == "REQUIREMENTS_FROZEN"
             else frozenset(),
+            expected_state_digest=loaded_state_digest,
         )
-        _record_events(paths, [{
+        _record_events_best_effort(paths, [{
             "schema_version": SCHEMA_VERSION,
             "event": "REQUIREMENTS_ACCEPTED",
             "requirements_digest": requirements_digest,
@@ -2203,7 +2304,7 @@ def accept_review(
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
-        state = load_json(paths.state)
+        state, loaded_state_digest = _load_mutator_state(paths)
         if state.get("phase") != "REVIEW_PENDING":
             raise ControllerError("INVALID_PHASE", "Review can be accepted only when pending.")
         _raise_validation(
@@ -2385,8 +2486,9 @@ def accept_review(
             candidate,
             expected_path,
             frozenset({paths.run / "review.json"}),
+            expected_state_digest=loaded_state_digest,
         )
-        _record_events(paths, [{
+        _record_events_best_effort(paths, [{
             "schema_version": SCHEMA_VERSION,
             "event": "REVIEW_ACCEPTED",
             "review_digest": review_digest,
@@ -2420,7 +2522,7 @@ def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
-        state = load_json(paths.state)
+        state, loaded_state_digest = _load_mutator_state(paths)
         if state.get("phase") != "FINAL_VERIFICATION":
             raise ControllerError("INVALID_PHASE", "Final verification is available only after PASS review.")
         requirements, report, _bound_snapshot = _active_report_context(
@@ -2485,8 +2587,9 @@ def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
             ],
             candidate,
             replaceable_artifacts=frozenset({paths.run / "snapshot.json"}),
+            expected_state_digest=loaded_state_digest,
         )
-        _record_events(paths, [{
+        _record_events_best_effort(paths, [{
             "schema_version": SCHEMA_VERSION,
             "event": "FINAL_VERIFIED",
             "final_gate_digest": validate_packet.canonical_digest(gate),
@@ -2506,7 +2609,7 @@ def approve_requirements(
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
-        state = load_json(paths.state)
+        state, loaded_state_digest = _load_mutator_state(paths)
         if (
             state.get("phase") != "USER_DECISION_REQUIRED"
             or state.get("stop_origin_category") != "REQUIREMENTS_NEED_USER_INPUT"
@@ -2580,8 +2683,9 @@ def approve_requirements(
             ],
             candidate,
             replaceable_artifacts=frozenset({paths.run / "requirements.json"}),
+            expected_state_digest=loaded_state_digest,
         )
-        _record_events(paths, [{
+        _record_events_best_effort(paths, [{
             "schema_version": SCHEMA_VERSION,
             "event": "MATERIAL_REQUIREMENTS_APPROVED",
             "requirements_digest": digest,
@@ -2791,11 +2895,10 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
     state = load_json(paths.state)
     attempts = _outstanding_attempts(paths)
     outstanding = attempts[0] if len(attempts) == 1 else None
-    orphan_transactions = (
-        sorted(path.name for path in paths.transactions.iterdir() if path.is_dir())
-        if paths.transactions.is_dir()
-        else []
-    )
+    orphan_transaction_paths = _orphan_transaction_paths(paths)
+    orphan_transactions = [path.name for path in orphan_transaction_paths]
+    recovery_required = bool(orphan_transaction_paths)
+    recovery_details = _recovery_details(paths, orphan_transaction_paths) if recovery_required else []
     return {
         "phase": state.get("phase"),
         "active_requirements_revision": state.get("active_requirements_revision"),
@@ -2816,6 +2919,9 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
         "outstanding_attempts": [attempt["name"] for attempt in attempts],
         "lock_present": paths.lock.exists(),
         "orphan_transactions": orphan_transactions,
+        "recovery_required": recovery_required,
+        "recovery_transaction_paths": [str(path) for path in orphan_transaction_paths],
+        "recovery_guidance": " ".join(recovery_details),
         "unreachable_artifacts": _unreachable_artifacts(paths, state),
-        "next_commands": next_commands(state, outstanding),
+        "next_commands": [] if recovery_required else next_commands(state, outstanding),
     }

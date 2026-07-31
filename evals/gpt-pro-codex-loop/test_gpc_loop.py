@@ -409,7 +409,12 @@ class ControllerCase(unittest.TestCase):
         status = controller.status_run(self.repository, "controller-test")
         self.assertTrue(status["lock_present"])
         self.assertEqual(status["orphan_transactions"], ["orphan"])
-        self.assertEqual(status["next_commands"], ["prepare-requirements"])
+        self.assertEqual(status["next_commands"], [])
+        self.assertTrue(status["recovery_required"])
+        self.assertEqual(
+            status["recovery_transaction_paths"],
+            [str(paths.transactions / "orphan")],
+        )
         self.assertEqual(paths.state.read_bytes(), original)
 
     def test_cli_status_prints_one_canonical_json_object(self) -> None:
@@ -1971,6 +1976,33 @@ class ControllerCase(unittest.TestCase):
             controller.prepare_requirements(self.repository, "controller-test")
         self.assertTrue(orphan.is_dir())
         self.assertEqual(paths.state.read_bytes(), state)
+        status = controller.status_run(self.repository, "controller-test")
+        self.assertEqual(status["next_commands"], [])
+        self.assertEqual(status["recovery_required"], True)
+        self.assertEqual(status["recovery_transaction_paths"], [str(orphan)])
+        self.assertIn("validate_packet.py", status["recovery_guidance"])
+
+    def test_state_mutation_immediately_before_commit_helper_is_rejected(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        external = self._state()
+        external["format_error_count"] = 1
+        real_commit = controller._commit_artifacts_then_state
+
+        def mutate_before_helper(*args: object, **kwargs: object) -> None:
+            controller.write_json_atomic(paths.state, external)
+            real_commit(*args, **kwargs)
+
+        with patch.object(controller, "_commit_artifacts_then_state", new=mutate_before_helper):
+            with self.assertRaisesRegex(controller.ControllerError, "state"):
+                controller.build_report(
+                    self.repository,
+                    "controller-test",
+                    self._write_local_evidence({"example.py": "Implement AC-1."}),
+                )
+        self.assertEqual(paths.state.read_bytes(), controller._canonical_json_bytes(external))
+        self.assertFalse((paths.run / "implementation-report.json").exists())
 
     def test_state_race_before_replace_preserves_external_state(self) -> None:
         self._freeze_initial_requirements()
@@ -1984,7 +2016,7 @@ class ControllerCase(unittest.TestCase):
         def inject_race(run_paths: object, digest: object) -> None:
             nonlocal checks
             checks += 1
-            if checks == 2:
+            if checks == 3:
                 controller.write_json_atomic(paths.state, external)
             real_check(run_paths, digest)
 
@@ -1995,8 +2027,36 @@ class ControllerCase(unittest.TestCase):
                     "controller-test",
                     self._write_local_evidence({"example.py": "Implement AC-1."}),
                 )
-        self.assertEqual(checks, 2)
+        self.assertEqual(checks, 3)
         self.assertEqual(paths.state.read_bytes(), controller._canonical_json_bytes(external))
+
+    def test_race_rollback_does_not_overwrite_foreign_artifact(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        external_state = self._state()
+        external_state["format_error_count"] = 1
+        foreign_snapshot = b'{"foreign":true}\n'
+        real_check = controller._require_state_digest
+        checks = 0
+
+        def inject_foreign_changes(run_paths: object, digest: object) -> None:
+            nonlocal checks
+            checks += 1
+            if checks == 3:
+                controller.write_json_atomic(paths.state, external_state)
+                (paths.run / "snapshot.json").write_bytes(foreign_snapshot)
+            real_check(run_paths, digest)
+
+        with patch.object(controller, "_require_state_digest", new=inject_foreign_changes):
+            with self.assertRaisesRegex(controller.ControllerError, "state|recovery"):
+                controller.build_report(
+                    self.repository,
+                    "controller-test",
+                    self._write_local_evidence({"example.py": "Implement AC-1."}),
+                )
+        self.assertEqual((paths.run / "snapshot.json").read_bytes(), foreign_snapshot)
+        self.assertNotEqual(list(paths.transactions.iterdir()), [])
 
     def test_event_is_not_published_when_state_commit_fails(self) -> None:
         self._freeze_initial_requirements()
@@ -2018,16 +2078,56 @@ class ControllerCase(unittest.TestCase):
                 )
         self.assertEqual(paths.events.read_bytes(), before_events)
 
-    def test_event_failure_after_state_commit_may_omit_only_event(self) -> None:
+    def test_event_failure_after_state_commit_returns_success(self) -> None:
         self._freeze_initial_requirements()
         (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
         paths = controller.resolve_run(self.repository, "controller-test")
         before_events = paths.events.read_bytes()
         with patch.object(controller, "_record_events", side_effect=OSError("interrupted")):
-            with self.assertRaises(OSError):
+            result = controller.build_report(
+                self.repository, "controller-test",
+                self._write_local_evidence({"example.py": "Implement AC-1."}),
+            )
+        self.assertTrue(Path(result["report_path"]).is_file())
+        self.assertEqual(self._state()["phase"], "REVIEW_PENDING")
+        self.assertEqual(paths.events.read_bytes(), before_events)
+
+    def test_report_events_include_only_traversed_phase_edges(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        paths = controller.resolve_run(self.repository, "controller-test")
+        frozen = self._state()
+        expected_edges = {
+            "REQUIREMENTS_FROZEN": [
+                ("REQUIREMENTS_FROZEN", "IMPLEMENTING"),
+                ("IMPLEMENTING", "LOCAL_VERIFICATION"),
+                ("LOCAL_VERIFICATION", "REVIEW_PENDING"),
+            ],
+            "IMPLEMENTING": [
+                ("IMPLEMENTING", "LOCAL_VERIFICATION"),
+                ("LOCAL_VERIFICATION", "REVIEW_PENDING"),
+            ],
+            "LOCAL_VERIFICATION": [
+                ("LOCAL_VERIFICATION", "REVIEW_PENDING"),
+            ],
+        }
+        for phase, expected in expected_edges.items():
+            with self.subTest(phase=phase):
+                state = dict(frozen)
+                state["phase"] = phase
+                controller.write_json_atomic(paths.state, state)
+                before = len(paths.events.read_text(encoding="utf-8").splitlines())
                 controller.build_report(
                     self.repository, "controller-test",
                     self._write_local_evidence({"example.py": "Implement AC-1."}),
                 )
-        self.assertEqual(self._state()["phase"], "REVIEW_PENDING")
-        self.assertEqual(paths.events.read_bytes(), before_events)
+                records = [
+                    json.loads(line)
+                    for line in paths.events.read_text(encoding="utf-8").splitlines()[before:]
+                ]
+                actual = [
+                    (event["from_phase"], event["to_phase"])
+                    for event in records
+                    if event["event"] == "REPORT_PHASE_ADVANCED"
+                ]
+                self.assertEqual(actual, expected)

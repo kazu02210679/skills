@@ -229,6 +229,7 @@ REQUIRED_STATE_FIELDS = (
     "resolution_evidence",
     "resolution_stop_sequence",
     "pending_requirements_envelope_digest",
+    "pending_requirements_expected_header_digest",
     "pending_review_envelope_digest",
     "pending_review_expected_header_digest",
     "last_consumed_packet_digest",
@@ -242,7 +243,7 @@ REQUIRED_STATE_FIELDS = (
     "nonce_derivation_key",
     "approved_existing_paths",
 )
-OPTIONAL_STATE_FIELDS: tuple[str, ...] = ("pending_requirements_expected_header_digest",)
+OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
 FINAL_GATE_FIELDS = (
     "schema_version",
     "requirements_digest",
@@ -2483,16 +2484,15 @@ def _validate_requirements_envelope_consumption(
         errors.append(
             "pending_requirements_envelope_digest: must clear after requirements consumption"
         )
-    if "pending_requirements_expected_header_digest" in previous_state:
-        _require_digest(
-            previous_state.get("pending_requirements_expected_header_digest"),
-            "pending_requirements_expected_header_digest",
-            errors,
+    _require_digest(
+        previous_state.get("pending_requirements_expected_header_digest"),
+        "pending_requirements_expected_header_digest",
+        errors,
+    )
+    if current_state.get("pending_requirements_expected_header_digest") is not None:
+        errors.append(
+            "pending_requirements_expected_header_digest: must clear after requirements consumption"
         )
-        if current_state.get("pending_requirements_expected_header_digest") is not None:
-            errors.append(
-                "pending_requirements_expected_header_digest: must clear after requirements consumption"
-            )
 
 
 def _validate_review_envelope_consumption(
@@ -2720,8 +2720,7 @@ def _validate_requirements_transition_context(
         context["expected"], "requirements_context.expected", errors
     )
     if (
-        isinstance(previous_state.get("pending_requirements_expected_header_digest"), str)
-        and expected_digest is not None
+        expected_digest is not None
         and previous_state.get("pending_requirements_expected_header_digest")
         != expected_digest
     ):
@@ -2994,16 +2993,26 @@ def validate_transition(
             and not isinstance(previous_reconnects, bool)
             and reconnects == previous_reconnects + 1
         )
+        same_phase_requirements_preparation = (
+            previous_phase == current_phase == "REQUIREMENTS_PENDING"
+            and current_state.get("pending_requirements_expected_header_digest")
+            != previous_state.get("pending_requirements_expected_header_digest")
+        )
         same_phase_maintenance = (
             same_phase_format_correction
             or same_phase_browser_reconnect
             or initial_binding_transition
-            or (
-                previous_phase == current_phase == "REQUIREMENTS_PENDING"
-                and current_state.get("pending_requirements_expected_header_digest")
-                != previous_state.get("pending_requirements_expected_header_digest")
-            )
+            or same_phase_requirements_preparation
         )
+        if same_phase_requirements_preparation:
+            for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):
+                if (
+                    field != "pending_requirements_expected_header_digest"
+                    and current_state.get(field) != previous_state.get(field)
+                ):
+                    errors.append(
+                        f"{field}: requirements attempt preparation must preserve trusted state"
+                    )
         if same_phase_format_correction:
             for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):
                 if (

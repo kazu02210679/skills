@@ -223,6 +223,7 @@ def valid_state(
     resolution_stop_sequence: object = None,
     schema_version: object = 1,
     pending_requirements_envelope_digest: object = _UNSET_STATE_VALUE,
+    pending_requirements_expected_header_digest: object = _UNSET_STATE_VALUE,
     pending_review_envelope_digest: object = _UNSET_STATE_VALUE,
     pending_review_expected_header_digest: object = _UNSET_STATE_VALUE,
     last_consumed_packet_digest: object = _UNSET_STATE_VALUE,
@@ -258,6 +259,8 @@ def valid_state(
         pending_requirements_envelope_digest = (
             REQ_ENVELOPE_DIGEST if phase == "REQUIREMENTS_PENDING" else None
         )
+    if pending_requirements_expected_header_digest is _UNSET_STATE_VALUE:
+        pending_requirements_expected_header_digest = None
     if pending_review_envelope_digest is _UNSET_STATE_VALUE:
         pending_review_envelope_digest = (
             REVIEW_ENVELOPE_DIGEST if phase == "REVIEW_PENDING" else None
@@ -336,6 +339,7 @@ def valid_state(
         "resolution_evidence": resolution_evidence,
         "resolution_stop_sequence": resolution_stop_sequence,
         "pending_requirements_envelope_digest": pending_requirements_envelope_digest,
+        "pending_requirements_expected_header_digest": pending_requirements_expected_header_digest,
         "pending_review_envelope_digest": pending_review_envelope_digest,
         "pending_review_expected_header_digest": pending_review_expected_header_digest,
         "last_consumed_packet_digest": last_consumed_packet_digest,
@@ -620,8 +624,12 @@ def bind_requirements_transition_context(
     )
     envelope_digest = canonical_digest(envelope)
     previous["pending_requirements_envelope_digest"] = envelope_digest
+    previous["pending_requirements_expected_header_digest"] = canonical_digest(
+        expected_envelope(envelope)
+    )
     current.update(
         pending_requirements_envelope_digest=None,
+        pending_requirements_expected_header_digest=None,
         last_consumed_packet_digest=envelope_digest,
     )
     if has_pending_revision:
@@ -1827,6 +1835,46 @@ class TransitionTests(unittest.TestCase):
                 changed_key,
             ),
         )
+
+    def test_requirements_expected_header_anchor_is_required(self) -> None:
+        previous = valid_state("REQUIREMENTS_PENDING", 0)
+        previous.pop("pending_requirements_expected_header_digest")
+        current = valid_state("REQUIREMENTS_FROZEN", 0)
+        self.assertIn(
+            "previous.pending_requirements_expected_header_digest: missing required field",
+            validate_transition(previous, current),
+        )
+
+    def test_requirements_attempt_preparation_preserves_unrelated_state(self) -> None:
+        previous = valid_state("REQUIREMENTS_PENDING", 0)
+        current = dict(previous)
+        current["pending_requirements_expected_header_digest"] = "sha256:" + "7" * 64
+        current["active_report_digest"] = "sha256:" + "8" * 64
+        self.assertIn(
+            "active_report_digest: requirements attempt preparation must preserve trusted state",
+            validate_transition(previous, current),
+        )
+
+    def test_requirements_context_rejects_coordinated_header_tampering(self) -> None:
+        for field, value in (
+            ("in_reply_to", "sha256:" + "7" * 64),
+            ("prompt_digest", "sha256:" + "8" * 64),
+        ):
+            with self.subTest(field=field):
+                previous = valid_state(
+                    "REQUIREMENTS_PENDING",
+                    0,
+                    active_requirements_revision=None,
+                    active_requirements_digest=None,
+                )
+                current = valid_state("REQUIREMENTS_FROZEN", 0)
+                context = bind_requirements_transition_context(previous, current)
+                context["expected"][field] = value
+                context["envelope"][field] = value
+                self.assertIn(
+                    "requirements_context.pending_requirements_expected_header_digest: expected header does not match trusted state",
+                    validate_transition(previous, current, requirements_context=context),
+                )
 
     def test_format_correction_cannot_mutate_domain_state(self) -> None:
         previous = valid_state(

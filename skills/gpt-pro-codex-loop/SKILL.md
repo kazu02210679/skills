@@ -37,6 +37,16 @@ The `next_commands` result is authoritative. Do not hand-author state, expected 
 
 All Browser interaction, project-command execution, detailed design, implementation, tests, and user escalation remain outside the controller. The controller never drives the Browser or runs project commands.
 
+## Recovery
+
+If `status` reports `recovery_required: true` or a mutation returns `RECOVERY_REQUIRED`, stop the normal loop. Preserve `state.json`, every transaction directory, and all referenced artifacts byte-for-byte; do not delete, rename, repair, or consume them. Escalate to the user with the reported transaction paths and run only the read-only status command:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py status --repo REPOSITORY --task TASK
+```
+
+Manual inspection may use the exact low-level validator commands documented in `references/packet-contract.md`, including `validate_packet.py transition` with independently preserved previous/current states and the matching closed context. Those diagnostics do not authorize cleanup or state repair. No normal mutation may resume until the transaction is resolved outside the controller path with explicit user direction.
+
 ## Hard Stops
 
 Use at most three valid review packets and one format-only correction per failed turn. Reconnects and format corrections do not consume a review round. Stop on ambiguous send status, authentication or Browser failure, silent model downgrade, conversation/turn/nonce mismatch, replay, repeated malformed output, the same unresolved finding or derived root cause across two consecutive reviews, sensitive disclosure, new scope or user authority, or any destructive/external action.

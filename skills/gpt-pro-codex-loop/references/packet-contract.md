@@ -87,6 +87,26 @@ Each non-help invocation prints exactly one canonical UTF-8 JSON object and one 
 
 Use `status` before every controller mutation after `init` and follow only its `next_commands`. The controller writes artifacts and validates candidates before replacing `state.json` last. Its consumed-envelope set comes only from trusted chain-head fields in `state.json`, never from scanning artifact history. It derives and validates every prompt/header digest, state transition, snapshot/report binding, and final gate; never hand-author those artifacts. `abandon-attempt` atomically replaces only the outstanding expected attempt with a `NOT_SENT` receipt and preserves `state.json` and all domain artifacts unchanged.
 
+## Recovery
+
+An existing transaction directory is a manual recovery boundary. `status` remains read-only, returns `recovery_required: true`, reports the exact transaction paths and unreachable artifacts, and returns an empty `next_commands`; every normal mutation returns `RECOVERY_REQUIRED`. Preserve `state.json`, the complete transaction directory, its manifest/staged files/backups, and all run artifacts byte-for-byte. Do not delete, rename, restore, publish, or otherwise repair them through the normal controller. Escalate to the user before any resolution.
+
+Re-run the exact read-only status command as needed:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py status --repo REPOSITORY --task TASK
+```
+
+For manual validation, copy the relevant states and closed context to separately preserved diagnostic inputs, then run the matching command without altering the run:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-context REQUIREMENTS_CONTEXT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --review-context REVIEW_CONTEXT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py envelope ENVELOPE.json --expected EXPECTED_HEADER.json --consumed CONSUMED.json
+```
+
+The validator only reports validity; it does not select, publish, clean, or repair a transaction. No mutation may resume until the transaction is resolved outside the normal controller path under explicit user direction. Version 1 intentionally provides no recovery or destructive-cleanup command and never silently repairs an interrupted transaction.
+
 ## Complete requirements envelope
 
 ```json
@@ -311,6 +331,7 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "resolution_evidence": null,
   "resolution_stop_sequence": null,
   "pending_requirements_envelope_digest": null,
+  "pending_requirements_expected_header_digest": null,
   "pending_review_envelope_digest": "sha256:3a63ffc1078e3eb2ca79474c0f63a79c203ebf00cef62e6b259e030d3afb5bb2",
   "pending_review_expected_header_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
   "last_consumed_packet_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
