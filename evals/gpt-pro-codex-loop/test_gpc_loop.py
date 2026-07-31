@@ -182,6 +182,78 @@ class ControllerCase(unittest.TestCase):
         )
         return controller.build_report(self.repository, "controller-test", evidence)
 
+    def _active_report(self) -> dict[str, object]:
+        return controller.load_json(self._run_dir() / "implementation-report.json")
+
+    def _valid_pass_review(self) -> dict[str, object]:
+        report = self._active_report()
+        return {
+            "schema_version": 1,
+            "requirements_digest": self._state()["active_requirements_digest"],
+            "reviewed_snapshot_digest": report["snapshot_digest"],
+            "decision": "PASS",
+            "acceptance_results": {
+                "AC-1": {"status": "PASS", "evidence": "Focused unittest passed."}
+            },
+            "findings": [],
+            "scope_violations": [],
+            "next_instruction": "Run final verification.",
+        }
+
+    def _valid_changes_review(
+        self, action: str, category: str, root_cause_key: str
+    ) -> dict[str, object]:
+        review = self._valid_pass_review()
+        review.update(
+            decision="CHANGES_REQUESTED",
+            acceptance_results={
+                "AC-1": {"status": "FAIL", "evidence": "The behavior is incomplete."}
+            },
+            findings=[
+                {
+                    "id": "F-1",
+                    "acceptance_id": "AC-1",
+                    "root_cause_key": root_cause_key,
+                    "severity": "HIGH",
+                    "category": category,
+                    "required_action": action,
+                    "evidence": "The behavior is incomplete.",
+                    **(
+                        {"required_evidence": "Supply the requested proof."}
+                        if action == "PROVIDE_EVIDENCE"
+                        else {"required_change": "Implement the missing AC-1 behavior."}
+                        if action in {"CODE_CHANGE", "TEST_CHANGE"}
+                        else {}
+                    ),
+                }
+            ],
+            next_instruction="Apply the routed correction.",
+        )
+        return review
+
+    def _prepare_valid_review(self, **evidence_overrides: object) -> dict[str, object]:
+        self._build_valid_report(**evidence_overrides)
+        return controller.prepare_review(self.repository, "controller-test")
+
+    def _write_review_response(
+        self, attempt: dict[str, object], payload: dict[str, object]
+    ) -> Path:
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.input_directory / "review.raw.md"
+        write_raw_envelope(raw, expected, payload)
+        return raw
+
+    def _accept_pass_review(self, **evidence_overrides: object) -> dict[str, object]:
+        attempt = self._prepare_valid_review(**evidence_overrides)
+        raw = self._write_review_response(attempt, self._valid_pass_review())
+        return controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+
     def _seed_evidence_only_route(self) -> dict[str, object]:
         self._build_valid_report()
         state = self._state()
@@ -1157,6 +1229,248 @@ class ControllerCase(unittest.TestCase):
 
         self.assertEqual(self._state_bytes(), before)
         self.assertEqual(list(self._run_dir().glob("expected-attempt-*.json")), [])
+
+    def test_accept_pass_review_consumes_round_and_routes_to_final_verification(self) -> None:
+        attempt = self._prepare_valid_review()
+        raw = self._write_review_response(attempt, self._valid_pass_review())
+
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+
+        self.assertEqual(result["phase"], "FINAL_VERIFICATION")
+        self.assertEqual(result["review_round"], 1)
+        self.assertEqual(result["required_actions"], [])
+
+    def test_accept_changes_requested_routes_and_derives_fingerprints(self) -> None:
+        attempt = self._prepare_valid_review()
+        raw = self._write_review_response(
+            attempt,
+            self._valid_changes_review(
+                "CODE_CHANGE", "CORRECTNESS", "missing-empty-input-guard"
+            ),
+        )
+
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+
+        self.assertEqual(result["phase"], "IMPLEMENTING")
+        self.assertEqual(result["required_actions"], ["CODE_CHANGE"])
+        self.assertEqual(len(result["blocker_fingerprints"]), 2)
+
+    def test_accept_review_routes_structural_actions(self) -> None:
+        cases = {
+            ("PASS", ()): "FINAL_VERIFICATION",
+            ("BLOCK", ()): "USER_DECISION_REQUIRED",
+            ("CHANGES_REQUESTED", ("CODE_CHANGE",)): "IMPLEMENTING",
+            ("CHANGES_REQUESTED", ("TEST_CHANGE",)): "IMPLEMENTING",
+            ("CHANGES_REQUESTED", ("PROVIDE_EVIDENCE",)): "LOCAL_VERIFICATION",
+            ("CHANGES_REQUESTED", ("REQUIREMENTS_REVISION",)): "REQUIREMENTS_PENDING",
+            ("CHANGES_REQUESTED", ("USER_DECISION",)): "USER_DECISION_REQUIRED",
+        }
+        for (decision, actions), expected_phase in cases.items():
+            with self.subTest(decision=decision, actions=actions):
+                self.assertEqual(controller.review_target(decision, actions), expected_phase)
+
+    def test_accept_review_rejects_wrong_current_conversation_and_model(self) -> None:
+        attempt = self._prepare_valid_review()
+        raw = self._write_review_response(attempt, self._valid_pass_review())
+        before = self._state_bytes()
+        for url, label in (
+            ("https://chatgpt.com/c/other", "Pro"),
+            (self._state()["bound_conversation_url"], "Standard"),
+        ):
+            with self.subTest(url=url, label=label):
+                with self.assertRaises(controller.ControllerError):
+                    controller.accept_review(
+                        self.repository, "controller-test", raw, url, label
+                    )
+                self.assertEqual(self._state_bytes(), before)
+
+    def test_final_verify_derives_gate_and_completes_unchanged_snapshot(self) -> None:
+        self._accept_pass_review()
+
+        result = controller.final_verify(self.repository, "controller-test")
+        gate = controller.load_json(self._run_dir() / "final-gate.json")
+
+        self.assertEqual(result["phase"], "COMPLETE")
+        self.assertTrue(
+            all(
+                gate[field] is True
+                for field in (
+                    "acceptance_gate_passed",
+                    "local_checks_passed",
+                    "scope_gate_passed",
+                    "artifact_hygiene_passed",
+                )
+            )
+        )
+
+    def test_final_verify_rejects_failed_report_omission_or_blocker(self) -> None:
+        cases = (
+            {
+                "test_commands": [
+                    {
+                        "command": "python -m unittest test_example.py -v",
+                        "outcome": "FAIL",
+                        "output_summary": "1 test failed.",
+                    }
+                ]
+            },
+            {"omissions": ["AC-1 edge case was not exercised."]},
+            {"unresolved_risks_or_blockers": ["Required dependency is unavailable."]},
+        )
+        for evidence_overrides in cases:
+            with self.subTest(evidence_overrides=evidence_overrides):
+                self._accept_pass_review(**evidence_overrides)
+                before = self._state_bytes()
+                with self.assertRaises(controller.ControllerError):
+                    controller.final_verify(self.repository, "controller-test")
+                self.assertEqual(self._state_bytes(), before)
+                self.temporary.cleanup()
+                self.setUp()
+
+    def test_pass_with_scope_violation_is_rejected_before_final_gate(self) -> None:
+        attempt = self._prepare_valid_review()
+        review = self._valid_pass_review()
+        review["scope_violations"] = ["example.py changed outside the frozen scope."]
+        raw = self._write_review_response(attempt, review)
+        before = self._state_bytes()
+
+        with self.assertRaises(controller.ControllerError):
+            controller.accept_review(
+                self.repository,
+                "controller-test",
+                raw,
+                self._state()["bound_conversation_url"],
+                "Pro",
+            )
+
+        self.assertEqual(self._state_bytes(), before)
+
+    def test_final_verify_rejects_tracked_metadata_and_product_drift(self) -> None:
+        self._accept_pass_review()
+        subprocess.run(
+            ["git", "add", "-f", ".ai-pro-loop/controller-test/state.json"],
+            cwd=self.repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        before = self._state_bytes()
+        with self.assertRaises(controller.ControllerError):
+            controller.final_verify(self.repository, "controller-test")
+        self.assertEqual(self._state_bytes(), before)
+
+        subprocess.run(["git", "reset"], cwd=self.repository, check=True, capture_output=True)
+        (self.repository / "example.py").write_text("value = 2\n", encoding="utf-8")
+        with self.assertRaises(controller.ControllerError):
+            controller.final_verify(self.repository, "controller-test")
+        self.assertEqual(self._state_bytes(), before)
+
+    def test_correction_loop_replaces_snapshot_and_rejects_first_review_replay(self) -> None:
+        first_attempt = self._prepare_valid_review()
+        first_raw = self._write_review_response(
+            first_attempt,
+            self._valid_changes_review(
+                "CODE_CHANGE", "CORRECTNESS", "missing-empty-input-guard"
+            ),
+        )
+        first_result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            first_raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        first_snapshot = self._state()["current_snapshot_digest"]
+        self.assertEqual(first_result["phase"], "IMPLEMENTING")
+
+        (self.repository / "example.py").write_text("value = 2\n", encoding="utf-8")
+        evidence = self._write_local_evidence({"example.py": "Correct AC-1."})
+        controller.build_report(self.repository, "controller-test", evidence)
+        second_attempt = controller.prepare_review(self.repository, "controller-test")
+        second_raw = self._write_review_response(second_attempt, self._valid_pass_review())
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            second_raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+
+        with self.assertRaises(controller.ControllerError):
+            controller.accept_review(
+                self.repository,
+                "controller-test",
+                first_raw,
+                self._state()["bound_conversation_url"],
+                "Pro",
+            )
+        gate_result = controller.final_verify(self.repository, "controller-test")
+        gate = controller.load_json(self._run_dir() / "final-gate.json")
+        self.assertEqual(result["review_round"], 2)
+        self.assertEqual(gate_result["phase"], "COMPLETE")
+        self.assertNotEqual(first_snapshot, gate["current_snapshot_digest"])
+        self.assertEqual(gate["current_snapshot_digest"], self._state()["reviewed_snapshot_digest"])
+
+    def test_second_review_rejects_repeated_blocker_but_allows_new_route(self) -> None:
+        first_attempt = self._prepare_valid_review()
+        first_raw = self._write_review_response(
+            first_attempt,
+            self._valid_changes_review("CODE_CHANGE", "CORRECTNESS", "missing-guard"),
+        )
+        controller.accept_review(
+            self.repository,
+            "controller-test",
+            first_raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        (self.repository / "example.py").write_text("value = 2\n", encoding="utf-8")
+        controller.build_report(
+            self.repository,
+            "controller-test",
+            self._write_local_evidence({"example.py": "Correct AC-1."}),
+        )
+        repeated_attempt = controller.prepare_review(self.repository, "controller-test")
+        repeated_raw = self._write_review_response(
+            repeated_attempt,
+            self._valid_changes_review("CODE_CHANGE", "CORRECTNESS", "missing-guard"),
+        )
+        before = self._state_bytes()
+        with self.assertRaises(controller.ControllerError):
+            controller.accept_review(
+                self.repository,
+                "controller-test",
+                repeated_raw,
+                self._state()["bound_conversation_url"],
+                "Pro",
+            )
+        self.assertEqual(self._state_bytes(), before)
+        new_review = self._valid_changes_review(
+            "TEST_CHANGE", "TEST_COVERAGE", "missing-focused-test"
+        )
+        new_review["findings"][0]["id"] = "F-2"
+        new_route_raw = self._write_review_response(repeated_attempt, new_review)
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            new_route_raw,
+            self._state()["bound_conversation_url"],
+            "Pro",
+        )
+        self.assertEqual(result["phase"], "IMPLEMENTING")
+        self.assertEqual(result["review_round"], 2)
 
     def test_dynamic_path_and_acceptance_ids_are_not_secret_schema_fields(self) -> None:
         requirements = valid_requirements(

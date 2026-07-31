@@ -1238,11 +1238,14 @@ def _active_report_context(
     state: Mapping[str, object],
     *,
     prior_reviewed_report: bool = False,
+    allow_final_verification: bool = False,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     requirements = _active_requirements(paths, state)
     report = load_json(paths.run / "implementation-report.json")
     snapshot = load_json(paths.run / "snapshot.json")
     validation_state = dict(state)
+    if allow_final_verification and validation_state.get("phase") == "FINAL_VERIFICATION":
+        validation_state["phase"] = "REVIEW_PENDING"
     if prior_reviewed_report:
         report_round = report.get("review_round")
         current_round = state.get("review_round")
@@ -1975,6 +1978,337 @@ def accept_requirements(
     return status_run(paths.repository, task_slug)
 
 
+def review_target(decision: str, actions: Sequence[str]) -> str:
+    """Route a validated review decision without authorizing extra work."""
+    action_set = set(actions)
+    if decision == "PASS":
+        return "FINAL_VERIFICATION"
+    if decision == "BLOCK" or "USER_DECISION" in action_set:
+        return "USER_DECISION_REQUIRED"
+    if "REQUIREMENTS_REVISION" in action_set:
+        return "REQUIREMENTS_PENDING"
+    if action_set & {"CODE_CHANGE", "TEST_CHANGE"}:
+        return "IMPLEMENTING"
+    if action_set == {"PROVIDE_EVIDENCE"}:
+        return "LOCAL_VERIFICATION"
+    raise ControllerError("INVALID_REVIEW_ROUTE", "Review has no valid route.")
+
+
+def _review_context(
+    envelope: dict[str, object],
+    expected: dict[str, object],
+    consumed: set[str],
+    requirements: dict[str, object],
+    report: dict[str, object],
+    snapshot: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "envelope": envelope,
+        "expected": expected,
+        "consumed_digests": sorted(consumed),
+        "requirements": requirements,
+        "report": report,
+        "snapshot": snapshot,
+    }
+
+
+def _review_stop_provenance(
+    state: Mapping[str, object],
+    decision: str,
+    actions: Sequence[str],
+    reason: object,
+) -> dict[str, object]:
+    if decision != "BLOCK" and "USER_DECISION" not in set(actions):
+        return {}
+    if not isinstance(reason, str) or not reason.strip():
+        raise ControllerError("INVALID_RESPONSE", "Review stop requires a non-empty instruction.")
+    return {
+        "stop_origin_phase": "REVIEW_PENDING",
+        "stop_origin_category": (
+            "REVIEW_BLOCK" if decision == "BLOCK" else "REVIEW_USER_DECISION"
+        ),
+        "stop_reason": reason,
+        "stop_sequence": state["stop_sequence"] + 1,
+    }
+
+
+def accept_review(
+    repository: Path,
+    task_slug: str,
+    raw_response_path: Path,
+    observed_conversation_url: str,
+    observed_model_label: str,
+) -> dict[str, object]:
+    """Validate, consume, and deterministically route one review response."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _reconcile_incomplete_transactions(paths)
+        state = load_json(paths.state)
+        if state.get("phase") != "REVIEW_PENDING":
+            raise ControllerError("INVALID_PHASE", "Review can be accepted only when pending.")
+        _raise_validation(
+            "BROWSER_IDENTITY_MISMATCH",
+            "Observed browser or model identity is invalid.",
+            observed_browser_errors(
+                state,
+                observed_conversation_url,
+                observed_model_label,
+                allow_initial_binding=False,
+            ),
+        )
+        attempts = _outstanding_attempts(paths)
+        if len(attempts) != 1:
+            raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
+        expected_path = paths.run / str(attempts[0]["name"])
+        expected = attempts[0]["expected_header"]
+        match = ATTEMPT_NAME.fullmatch(expected_path.name)
+        review_round = state.get("review_round")
+        if (
+            match is None
+            or not isinstance(review_round, int)
+            or isinstance(review_round, bool)
+            or not _valid_expected_header(
+                expected,
+                task_slug=task_slug,
+                packet_type="review",
+                semantic_sequence=review_round + 1,
+                expected_nonce=_derive_attempt_nonce(
+                    state,
+                    task_slug,
+                    "review",
+                    review_round + 1,
+                    int(match.group(1)) if match is not None else -1,
+                ),
+            )
+        ):
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding review attempt is invalid.")
+        raw = _read_input(raw_response_path, "review response")
+        try:
+            envelope = validate_packet.extract_single_json_object(raw)
+        except ValueError as exc:
+            raise ControllerError("INVALID_RESPONSE", "Review response is not one strict JSON envelope.") from exc
+        consumed = consumed_chain_heads(state)
+        _raise_validation(
+            "INVALID_RESPONSE",
+            "Review response envelope is invalid.",
+            validate_packet.validate_transport_envelope(envelope, expected, consumed),
+        )
+        review = envelope.get("payload")
+        if not isinstance(review, dict):
+            raise ControllerError("INVALID_RESPONSE", "Review response payload is invalid.")
+        requirements, report, snapshot = _active_report_context(paths, state)
+        _raise_validation(
+            "INVALID_RESPONSE",
+            "Review response payload is invalid.",
+            validate_packet.validate_review(review, requirements, report),
+        )
+        actions = sorted(
+            {
+                finding["required_action"]
+                for finding in review["findings"]
+                if isinstance(finding, dict) and isinstance(finding.get("required_action"), str)
+            }
+        )
+        finding_ids = sorted(
+            {
+                finding["id"]
+                for finding in review["findings"]
+                if isinstance(finding, dict) and isinstance(finding.get("id"), str)
+            }
+        )
+        fingerprints = sorted(
+            {
+                fingerprint
+                for finding in review["findings"]
+                if isinstance(finding, dict)
+                for fingerprint in (
+                    validate_packet.derive_root_cause_fingerprint(finding),
+                    validate_packet.derive_root_cause_route_fingerprint(finding),
+                )
+            }
+        )
+        decision = review["decision"]
+        if not isinstance(decision, str):
+            raise ControllerError("INVALID_RESPONSE", "Review response decision is invalid.")
+        target = review_target(decision, actions)
+        envelope_digest = validate_packet.canonical_digest(envelope)
+        review_digest = validate_packet.canonical_digest(review)
+        staged = dict(state)
+        staged.update(
+            pending_review_envelope_digest=envelope_digest,
+            active_review_packet_digest=review_digest,
+            reviewed_snapshot_digest=review["reviewed_snapshot_digest"],
+            latest_decision=decision,
+            required_actions=actions,
+            unresolved_finding_ids=finding_ids,
+            blocker_fingerprints=fingerprints,
+        )
+        context = _review_context(
+            envelope, expected, consumed, requirements, report, snapshot
+        )
+        _raise_validation(
+            "INVALID_REVIEW_CONTEXT",
+            "Review response failed context validation.",
+            validate_packet.validate_review_context(
+                envelope, requirements, report, staged, snapshot
+            ),
+        )
+        transition_previous = dict(staged)
+        transition_previous.update(
+            unresolved_finding_ids=state["unresolved_finding_ids"],
+            blocker_fingerprints=state["blocker_fingerprints"],
+        )
+        candidate = dict(staged)
+        candidate.update(
+            phase=target,
+            review_round=review_round + 1,
+            pending_review_envelope_digest=None,
+            last_consumed_packet_digest=envelope_digest,
+            last_consumed_review_envelope_digest=envelope_digest,
+            **_review_stop_provenance(
+                state, decision, actions, review.get("next_instruction")
+            ),
+        )
+        _raise_validation(
+            "INVALID_TRANSITION",
+            "Review acceptance failed state validation.",
+            validate_packet.validate_transition(
+                transition_previous, candidate, review_context=context
+            ),
+        )
+        turn_id = expected.get("turn_id")
+        if not isinstance(turn_id, str):
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding review attempt is invalid.")
+        events = _append_event(
+            paths,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "event": "REVIEW_ACCEPTED",
+                "review_digest": review_digest,
+                "envelope_digest": envelope_digest,
+                "decision": decision,
+                "target_phase": target,
+            },
+        )
+        _commit_artifacts_then_state(
+            paths,
+            [
+                (paths.run / "responses" / f"{turn_id}.raw.md", raw),
+                (paths.run / f"review-envelope-{review_round + 1:02d}.json", envelope),
+                (paths.run / "review.json", review),
+                (paths.events, events),
+            ],
+            candidate,
+            expected_path,
+            frozenset({paths.run / "review.json", paths.events}),
+        )
+    return status_run(paths.repository, task_slug)
+
+
+def metadata_hygiene_is_clean(repository: Path) -> bool:
+    """Return whether controller metadata is neither tracked nor staged by Git."""
+    for command in (
+        ["git", "-C", str(repository), "ls-files", "--", ".ai-pro-loop"],
+        ["git", "-C", str(repository), "diff", "--cached", "--name-only", "--", ".ai-pro-loop"],
+    ):
+        completed = subprocess.run(
+            command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        if completed.returncode:
+            raise ControllerError("GIT_CHECK_FAILED", "Could not verify controller metadata hygiene.")
+        if completed.stdout.strip():
+            return False
+    return True
+
+
+def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
+    """Derive and validate the final gate from trusted artifacts and Git state."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _reconcile_incomplete_transactions(paths)
+        state = load_json(paths.state)
+        if state.get("phase") != "FINAL_VERIFICATION":
+            raise ControllerError("INVALID_PHASE", "Final verification is available only after PASS review.")
+        requirements, report, _bound_snapshot = _active_report_context(
+            paths,
+            state,
+            prior_reviewed_report=True,
+            allow_final_verification=True,
+        )
+        review = _active_prior_review(paths, state, requirements, report)
+        current_snapshot = _capture_snapshot(paths, state)
+        test_commands = report.get("test_commands")
+        gate = {
+            "schema_version": SCHEMA_VERSION,
+            "requirements_digest": state["active_requirements_digest"],
+            "review_packet_digest": state["active_review_packet_digest"],
+            "reviewed_snapshot_digest": state["reviewed_snapshot_digest"],
+            "current_snapshot_digest": current_snapshot["snapshot_digest"],
+            "acceptance_gate_passed": (
+                review.get("decision") == "PASS"
+                and isinstance(review.get("acceptance_results"), dict)
+                and all(
+                    isinstance(item, dict) and item.get("status") == "PASS"
+                    for item in review["acceptance_results"].values()
+                )
+            ),
+            "local_checks_passed": (
+                isinstance(test_commands, list)
+                and bool(test_commands)
+                and all(
+                    isinstance(item, dict) and item.get("outcome") == "PASS"
+                    for item in test_commands
+                )
+                and report.get("omissions") == []
+                and report.get("unresolved_risks_or_blockers") == []
+            ),
+            "scope_gate_passed": review.get("scope_violations") == [],
+            "artifact_hygiene_passed": metadata_hygiene_is_clean(paths.repository),
+        }
+        candidate = dict(state)
+        candidate["phase"] = "COMPLETE"
+        _raise_validation(
+            "FINAL_GATE_REJECTED",
+            "Final verification gate did not pass.",
+            validate_packet.validate_final_gate(gate, state, report, requirements),
+        )
+        _raise_validation(
+            "INVALID_TRANSITION",
+            "Final verification failed state validation.",
+            validate_packet.validate_transition(
+                state,
+                candidate,
+                final_gate_evidence=gate,
+                final_gate_report=report,
+                final_gate_requirements=requirements,
+            ),
+        )
+        events = _append_event(
+            paths,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "event": "FINAL_VERIFIED",
+                "final_gate_digest": validate_packet.canonical_digest(gate),
+                "snapshot_digest": current_snapshot["snapshot_digest"],
+            },
+        )
+        _commit_artifacts_then_state(
+            paths,
+            [
+                (paths.run / "snapshot.json", current_snapshot),
+                (paths.run / "final-gate.json", gate),
+                (paths.events, events),
+            ],
+            candidate,
+            replaceable_artifacts=frozenset({paths.run / "snapshot.json", paths.events}),
+        )
+    return status_run(paths.repository, task_slug)
+
+
 def approve_requirements(
     repository: Path,
     task_slug: str,
@@ -2278,6 +2612,8 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
             "visible_label": state.get("visible_model_label"),
         },
         "required_actions": state.get("required_actions"),
+        "unresolved_finding_ids": state.get("unresolved_finding_ids"),
+        "blocker_fingerprints": state.get("blocker_fingerprints"),
         "stop_origin_category": state.get("stop_origin_category"),
         "outstanding_attempts": [attempt["name"] for attempt in attempts],
         "lock_present": paths.lock.exists(),
