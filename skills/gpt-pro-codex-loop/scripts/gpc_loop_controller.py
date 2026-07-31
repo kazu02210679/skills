@@ -313,10 +313,43 @@ def _head_commit(repository: Path) -> str:
         raise ControllerError("PREFLIGHT_FAILED", "Git returned an invalid baseline commit.") from exc
 
 
-def _remove_empty_transaction(transaction: Path) -> None:
-    for item in transaction.iterdir():
-        item.unlink()
-    transaction.rmdir()
+def _owned_path(path: Path) -> tuple[Path, os.stat_result]:
+    return path, path.stat()
+
+
+def _unlink_owned(owned_paths: Sequence[tuple[Path, os.stat_result]]) -> None:
+    for path, owned_stat in reversed(owned_paths):
+        try:
+            if os.path.samestat(owned_stat, path.stat()):
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _cleanup_owned_transaction(
+    transaction: Path, staged_paths: Sequence[tuple[Path, os.stat_result]]
+) -> None:
+    """Remove only artifacts staged by this invocation, leaving foreign leftovers visible."""
+    _unlink_owned(staged_paths)
+    try:
+        transaction.rmdir()
+    except OSError:
+        pass
+
+
+def _cleanup_failed_initialization(
+    paths: RunPaths, committed_paths: Sequence[tuple[Path, os.stat_result]]
+) -> None:
+    """Remove this invocation's untrusted artifacts without touching foreign leftovers."""
+    _unlink_owned(committed_paths)
+    try:
+        paths.transactions.rmdir()
+    except OSError:
+        pass
+    try:
+        paths.run.rmdir()
+    except OSError:
+        pass
 
 
 def initialize_run(
@@ -333,68 +366,107 @@ def initialize_run(
     _validate_model_policy(model_policy, requested_model_label)
     request_text = _read_input(request_path, "request")
     context_text = _read_input(repository_context_path, "repository context")
-    if paths.run.exists():
-        raise ControllerError("RUN_EXISTS", "Run already exists.")
-    paths.run.mkdir(parents=True)
-    paths.transactions.mkdir()
-    with run_lock(paths.lock):
-        preflight = capture_snapshot.inspect_preflight(
-            paths.repository, _head_commit(paths.repository)
-        )
-        preflight_errors = capture_snapshot.validate_preflight(
-            preflight, approved_existing_paths, paths.repository
-        )
-        if preflight_errors:
-            message = "Preflight has unapproved or invalid product paths."
-            if any(error.startswith("unapproved pre-existing") for error in preflight_errors):
-                message = "Preflight has unapproved pre-existing product paths."
-            raise ControllerError(
-                "PREFLIGHT_INVALID",
-                message,
-                preflight_errors,
-            )
-        approved_paths = _normalize_approved_paths(approved_existing_paths)
-        previous = initial_state(
-            preflight, approved_paths, model_policy, requested_model_label
-        )
-        candidate = dict(previous)
-        candidate["phase"] = "REQUIREMENTS_PENDING"
-        transition_errors = validate_packet.validate_transition(previous, candidate)
-        if transition_errors:
-            raise ControllerError(
-                "INVALID_INITIAL_STATE",
-                "Initial controller state failed transition validation.",
-                transition_errors,
-            )
+    metadata = paths.run.parent
+    metadata.mkdir(parents=True, exist_ok=True)
+    initialization_lock = metadata / f".{paths.task_slug}.initialize.lock"
+    with run_lock(initialization_lock):
+        if paths.run.exists():
+            raise ControllerError("RUN_EXISTS", "Run already exists.")
+        try:
+            paths.run.mkdir()
+        except FileExistsError as exc:
+            raise ControllerError("RUN_EXISTS", "Run already exists.") from exc
+        lock_acquired = False
+        initialized = False
+        committed_paths: list[tuple[Path, os.stat_result]] = []
+        try:
+            paths.transactions.mkdir()
+            with run_lock(paths.lock):
+                lock_acquired = True
+                preflight = capture_snapshot.inspect_preflight(
+                    paths.repository, _head_commit(paths.repository)
+                )
+                preflight_errors = capture_snapshot.validate_preflight(
+                    preflight, approved_existing_paths, paths.repository
+                )
+                if preflight_errors:
+                    message = "Preflight has unapproved or invalid product paths."
+                    if any(
+                        error.startswith("unapproved pre-existing")
+                        for error in preflight_errors
+                    ):
+                        message = "Preflight has unapproved pre-existing product paths."
+                    raise ControllerError(
+                        "PREFLIGHT_INVALID",
+                        message,
+                        preflight_errors,
+                    )
+                approved_paths = _normalize_approved_paths(approved_existing_paths)
+                previous = initial_state(
+                    preflight, approved_paths, model_policy, requested_model_label
+                )
+                candidate = dict(previous)
+                candidate["phase"] = "REQUIREMENTS_PENDING"
+                transition_errors = validate_packet.validate_transition(previous, candidate)
+                if transition_errors:
+                    raise ControllerError(
+                        "INVALID_INITIAL_STATE",
+                        "Initial controller state failed transition validation.",
+                        transition_errors,
+                    )
 
-        transaction = paths.transactions / f"initialize-{os.getpid()}-{time.time_ns()}"
-        transaction.mkdir()
-        request_stage = transaction / "request.md"
-        context_stage = transaction / "repository-context.md"
-        preflight_stage = transaction / "preflight.json"
-        events_stage = transaction / "events.jsonl"
-        state_stage = transaction / "state.json"
-        write_text_atomic(request_stage, request_text)
-        write_text_atomic(context_stage, context_text)
-        write_json_atomic(preflight_stage, preflight)
-        write_text_atomic(
-            events_stage,
-            _canonical_json_bytes(
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "event": "RUN_INITIALIZED",
-                    "at_unix": int(time.time()),
-                }
-            ).decode("utf-8"),
-        )
-        write_json_atomic(state_stage, candidate)
-
-        os.replace(request_stage, paths.run / "request.md")
-        os.replace(context_stage, paths.run / "repository-context.md")
-        os.replace(preflight_stage, paths.preflight)
-        os.replace(events_stage, paths.events)
-        os.replace(state_stage, paths.state)
-        _remove_empty_transaction(transaction)
+                transaction = paths.transactions / f"initialize-{os.getpid()}-{time.time_ns()}"
+                transaction.mkdir()
+                request_stage = transaction / "request.md"
+                context_stage = transaction / "repository-context.md"
+                preflight_stage = transaction / "preflight.json"
+                events_stage = transaction / "events.jsonl"
+                state_stage = transaction / "state.json"
+                staged_paths: list[tuple[Path, os.stat_result]] = []
+                try:
+                    write_text_atomic(request_stage, request_text)
+                    staged_paths.append(_owned_path(request_stage))
+                    write_text_atomic(context_stage, context_text)
+                    staged_paths.append(_owned_path(context_stage))
+                    write_json_atomic(preflight_stage, preflight)
+                    staged_paths.append(_owned_path(preflight_stage))
+                    write_text_atomic(
+                        events_stage,
+                        _canonical_json_bytes(
+                            {
+                                "schema_version": SCHEMA_VERSION,
+                                "event": "RUN_INITIALIZED",
+                                "at_unix": int(time.time()),
+                            }
+                        ).decode("utf-8"),
+                    )
+                    staged_paths.append(_owned_path(events_stage))
+                    write_json_atomic(state_stage, candidate)
+                    staged_paths.append(_owned_path(state_stage))
+                    try:
+                        os.replace(request_stage, paths.run / "request.md")
+                        committed_paths.append(_owned_path(paths.run / "request.md"))
+                        os.replace(context_stage, paths.run / "repository-context.md")
+                        committed_paths.append(
+                            _owned_path(paths.run / "repository-context.md")
+                        )
+                        os.replace(preflight_stage, paths.preflight)
+                        committed_paths.append(_owned_path(paths.preflight))
+                        os.replace(events_stage, paths.events)
+                        committed_paths.append(_owned_path(paths.events))
+                        os.replace(state_stage, paths.state)
+                        committed_paths.append(_owned_path(paths.state))
+                    except OSError as exc:
+                        raise ControllerError(
+                            "WRITE_FAILED",
+                            "Could not commit initialized controller artifacts.",
+                        ) from exc
+                    initialized = True
+                finally:
+                    _cleanup_owned_transaction(transaction, staged_paths)
+        finally:
+            if not initialized and (lock_acquired or not paths.lock.exists()):
+                _cleanup_failed_initialization(paths, committed_paths)
     return status_run(paths.repository, task_slug)
 
 

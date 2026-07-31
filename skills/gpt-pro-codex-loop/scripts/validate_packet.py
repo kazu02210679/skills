@@ -1409,6 +1409,21 @@ def _is_initial_unbound_requirements(state: dict[str, object]) -> bool:
         and state.get("active_requirements_revision") is None
         and state.get("active_requirements_digest") is None
         and state.get("last_consumed_packet_digest") is None
+        and all(
+            state.get(field) is None
+            for field in (
+                "pending_review_envelope_digest",
+                "last_consumed_review_envelope_digest",
+                "active_report_digest",
+                "current_snapshot_digest",
+                "active_review_packet_digest",
+                "reviewed_snapshot_digest",
+            )
+        )
+        and state.get("latest_decision") is None
+        and state.get("required_actions") == []
+        and state.get("unresolved_finding_ids") == []
+        and state.get("blocker_fingerprints") == []
         and not _has_pending_requirements_provenance(state)
     )
 

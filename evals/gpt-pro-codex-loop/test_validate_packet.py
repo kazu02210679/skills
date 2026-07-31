@@ -2527,6 +2527,32 @@ class TransitionTests(unittest.TestCase):
         )
         self.assertEqual(validate_transition(previous, current), [])
 
+    def test_initial_unbound_requirements_reject_review_provenance(self) -> None:
+        previous = valid_state("PREFLIGHT", 0)
+        for field in (
+            "pending_review_envelope_digest",
+            "last_consumed_review_envelope_digest",
+            "active_report_digest",
+            "current_snapshot_digest",
+            "active_review_packet_digest",
+            "reviewed_snapshot_digest",
+        ):
+            with self.subTest(field=field):
+                current = valid_state(
+                    "REQUIREMENTS_PENDING",
+                    0,
+                    active_requirements_revision=None,
+                    active_requirements_digest=None,
+                    pending_requirements_envelope_digest=None,
+                )
+                current[field] = "sha256:" + "1" * 64
+                self.assertTrue(
+                    any(
+                        "active_requirements" in error
+                        for error in validate_transition(previous, current)
+                    )
+                )
+
     def test_unbound_requirements_are_rejected_outside_initial_pending(self) -> None:
         for phase in ("REQUIREMENTS_FROZEN", "IMPLEMENTING", "LOCAL_VERIFICATION"):
             with self.subTest(phase=phase):

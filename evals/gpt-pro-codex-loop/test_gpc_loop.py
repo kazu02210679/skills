@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 SCRIPT_DIR = (
@@ -116,3 +119,88 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(status["orphan_transactions"], ["orphan"])
         self.assertEqual(status["next_commands"], ["prepare-requirements"])
         self.assertEqual(paths.state.read_bytes(), original)
+
+    def test_failed_preflight_cleans_owned_run_and_allows_same_slug_retry(self) -> None:
+        (self.repository / "new-product.py").write_text("value = 1\n", encoding="utf-8")
+        paths = controller.resolve_run(self.repository, "retry-test")
+        with self.assertRaisesRegex(controller.ControllerError, "unapproved pre-existing"):
+            controller.initialize_run(
+                self.repository, "retry-test", self.request, self.context, [], "PRO_CLASS", None
+            )
+        self.assertFalse(paths.run.exists())
+        (self.repository / "new-product.py").unlink()
+        result = controller.initialize_run(
+            self.repository, "retry-test", self.request, self.context, [], "PRO_CLASS", None
+        )
+        self.assertEqual(result["phase"], "REQUIREMENTS_PENDING")
+
+    def test_run_lock_refuses_contention_without_deleting_foreign_lock(self) -> None:
+        paths = controller.resolve_run(self.repository, "locked-test")
+        paths.run.mkdir(parents=True)
+        paths.lock.write_text('{"pid":999999}\n', encoding="utf-8")
+        with self.assertRaisesRegex(controller.ControllerError, "already locked"):
+            with controller.run_lock(paths.lock):
+                self.fail("foreign lock must prevent entry")
+        self.assertEqual(paths.lock.read_text(encoding="utf-8"), '{"pid":999999}\n')
+
+    def test_concurrent_initialization_has_one_owner_and_one_valid_run(self) -> None:
+        barrier = threading.Barrier(2)
+
+        def initialize() -> object:
+            barrier.wait()
+            try:
+                return controller.initialize_run(
+                    self.repository,
+                    "race-test",
+                    self.request,
+                    self.context,
+                    [],
+                    "PRO_CLASS",
+                    None,
+                )
+            except controller.ControllerError as exc:
+                return exc
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: initialize(), range(2)))
+        successes = [result for result in results if isinstance(result, dict)]
+        failures = [result for result in results if isinstance(result, controller.ControllerError)]
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(successes[0]["phase"], "REQUIREMENTS_PENDING")
+        self.assertEqual(len(failures), 1)
+        self.assertIn(failures[0].code, {"RUN_LOCKED", "RUN_EXISTS"})
+        paths = controller.resolve_run(self.repository, "race-test")
+        self.assertTrue(paths.state.is_file())
+        self.assertEqual(list(paths.transactions.iterdir()), [])
+
+    def test_staging_failure_cleans_transaction_and_untrusted_run_artifacts(self) -> None:
+        paths = controller.resolve_run(self.repository, "failure-test")
+        replace = controller.os.replace
+
+        def fail_state_commit(source: object, destination: object) -> None:
+            if Path(destination) == paths.state:
+                raise OSError("injected state replacement failure")
+            replace(source, destination)
+
+        with patch.object(controller.os, "replace", side_effect=fail_state_commit):
+            with self.assertRaises(controller.ControllerError):
+                controller.initialize_run(
+                    self.repository,
+                    "failure-test",
+                    self.request,
+                    self.context,
+                    [],
+                    "PRO_CLASS",
+                    None,
+                )
+        self.assertFalse(paths.run.exists())
+        result = controller.initialize_run(
+            self.repository,
+            "failure-test",
+            self.request,
+            self.context,
+            [],
+            "PRO_CLASS",
+            None,
+        )
+        self.assertEqual(result["phase"], "REQUIREMENTS_PENDING")
