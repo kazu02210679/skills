@@ -86,6 +86,7 @@ TEMPLATE_TOKENS = {
         "REQUIREMENTS_JSON",
         "PRIOR_REVIEW_JSON",
         "SUPPLEMENTAL_EVIDENCE",
+        "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REVIEW",
     },
 }
 
@@ -1003,20 +1004,22 @@ def _validate_evidence_strings(value: object, field: str, errors: list[str]) -> 
         _require_nonempty_string(item, f"{field}.{index}", errors)
 
 
-def _forbidden_evidence_field_names(value: object, field: str = "") -> list[str]:
+def _forbidden_evidence_schema_field_names(value: object) -> list[str]:
+    """Reject secret-bearing schema fields without interpreting dynamic map keys."""
     errors: list[str] = []
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if not isinstance(key, str):
-                errors.append(f"{field}: evidence field names must be strings")
-                continue
+    mappings: list[tuple[str, object]] = [("", value)]
+    if isinstance(value, dict) and isinstance(value.get("test_commands"), list):
+        mappings.extend(
+            (f"test_commands.{index}.", command)
+            for index, command in enumerate(value["test_commands"])
+        )
+    for field, mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        for key in mapping:
             normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
             if normalized in FORBIDDEN_EVIDENCE_FIELD_NAMES:
                 errors.append(f"{field}{key}: credential or session fields are forbidden")
-            errors.extend(_forbidden_evidence_field_names(item, f"{field}{key}."))
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            errors.extend(_forbidden_evidence_field_names(item, f"{field}{index}."))
     return errors
 
 
@@ -1029,7 +1032,7 @@ def _load_local_evidence(
         errors.append("local evidence: contains unknown or missing fields")
     if type(evidence.get("schema_version")) is not int or evidence.get("schema_version") != SCHEMA_VERSION:
         errors.append("schema_version: must be 1")
-    errors.extend(_forbidden_evidence_field_names(evidence))
+    errors.extend(_forbidden_evidence_schema_field_names(evidence))
 
     intents = evidence.get("changed_file_intents")
     if not isinstance(intents, dict):
@@ -1231,16 +1234,78 @@ def build_report(
 
 
 def _active_report_context(
-    paths: RunPaths, state: Mapping[str, object]
+    paths: RunPaths,
+    state: Mapping[str, object],
+    *,
+    prior_reviewed_report: bool = False,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     requirements = _active_requirements(paths, state)
     report = load_json(paths.run / "implementation-report.json")
     snapshot = load_json(paths.run / "snapshot.json")
+    validation_state = dict(state)
+    if prior_reviewed_report:
+        report_round = report.get("review_round")
+        current_round = state.get("review_round")
+        if (
+            not isinstance(report_round, int)
+            or isinstance(report_round, bool)
+            or not isinstance(current_round, int)
+            or isinstance(current_round, bool)
+            or current_round != report_round + 1
+        ):
+            raise ControllerError(
+                "INVALID_REPORT",
+                "Evidence-only review requires the report from the immediately prior round.",
+            )
+        validation_state["review_round"] = report_round
     _raise_validation(
         "INVALID_REPORT", "Active implementation report failed context validation.",
-        validate_packet.validate_report_context(report, requirements, state, snapshot),
+        validate_packet.validate_report_context(
+            report, requirements, validation_state, snapshot
+        ),
     )
     return requirements, report, snapshot
+
+
+def _require_unchanged_snapshot(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    bound_snapshot: Mapping[str, object],
+) -> None:
+    fresh_snapshot = _capture_snapshot(paths, state)
+    if fresh_snapshot != bound_snapshot:
+        raise ControllerError(
+            "SNAPSHOT_CHANGED",
+            "Review preparation requires an unchanged bound product snapshot.",
+        )
+
+
+def _active_prior_review(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    requirements: dict[str, object],
+    report: dict[str, object],
+) -> dict[str, object]:
+    review = load_json(paths.run / "review.json")
+    _raise_validation(
+        "INVALID_REVIEW",
+        "Persisted prior review payload is invalid.",
+        validate_packet.validate_review(review, requirements, report),
+    )
+    review_digest = validate_packet.canonical_digest(review)
+    if review_digest != state.get("active_review_packet_digest"):
+        raise ControllerError(
+            "INVALID_REVIEW",
+            "Persisted prior review payload does not match trusted state.",
+        )
+    if review.get("reviewed_snapshot_digest") != state.get(
+        "reviewed_snapshot_digest"
+    ):
+        raise ControllerError(
+            "INVALID_REVIEW",
+            "Persisted prior review snapshot does not match trusted state.",
+        )
+    return review
 
 
 def _save_review_attempt_with_state(
@@ -1274,6 +1339,7 @@ def prepare_review(
         if _outstanding_attempts(paths):
             raise ControllerError("OUTSTANDING_ATTEMPT", "A review attempt is already outstanding.")
         evidence_only = supplemental_evidence_path is not None
+        prior_review: dict[str, object] | None = None
         if evidence_only:
             if state.get("phase") != "LOCAL_VERIFICATION" or state.get("required_actions") != ["PROVIDE_EVIDENCE"]:
                 raise ControllerError("INVALID_PHASE", "Evidence-only review requires only PROVIDE_EVIDENCE.")
@@ -1282,10 +1348,12 @@ def prepare_review(
                 raise ControllerError("INVALID_SUPPLEMENTAL_EVIDENCE", "Supplemental evidence must not be empty.")
             candidate = dict(state)
             candidate["phase"] = "REVIEW_PENDING"
-            requirements, report, snapshot = _active_report_context(paths, candidate)
-            fresh_snapshot = _capture_snapshot(paths, candidate)
-            if fresh_snapshot.get("snapshot_digest") != snapshot.get("snapshot_digest"):
-                raise ControllerError("SNAPSHOT_CHANGED", "Evidence-only review requires an unchanged product snapshot.")
+            requirements, report, snapshot = _active_report_context(
+                paths, candidate, prior_reviewed_report=True
+            )
+            prior_review = _active_prior_review(
+                paths, state, requirements, report
+            )
             _raise_validation(
                 "INVALID_TRANSITION",
                 "Evidence-only review failed state validation.",
@@ -1295,7 +1363,7 @@ def prepare_review(
             values: dict[str, str | Template] = {
                 "SNAPSHOT_DIGEST": str(snapshot["snapshot_digest"]),
                 "REQUIREMENTS_JSON": _canonical_prompt_json(requirements),
-                "PRIOR_REVIEW_JSON": _canonical_prompt_json(report),
+                "PRIOR_REVIEW_JSON": _canonical_prompt_json(prior_review),
                 "SUPPLEMENTAL_EVIDENCE": supplemental,
             }
         else:
@@ -1310,6 +1378,7 @@ def prepare_review(
                 "IMPLEMENTATION_REPORT_JSON": _canonical_prompt_json(report),
                 "SNAPSHOT_DIGEST": str(snapshot["snapshot_digest"]),
             }
+        _require_unchanged_snapshot(paths, state, snapshot)
         shared = load_template(_prompt_contract_path(), "Shared envelope instruction")
         attempt_number = _attempt_number(paths)
         semantic_sequence = int(state["review_round"]) + 1
@@ -1321,6 +1390,9 @@ def prepare_review(
                 "requirements_digest": state["active_requirements_digest"],
                 "report_digest": state["active_report_digest"],
                 "snapshot_digest": snapshot["snapshot_digest"],
+                "prior_review_digest": (
+                    state["active_review_packet_digest"] if evidence_only else None
+                ),
                 "supplemental_evidence": _normalize_text(supplemental) if evidence_only else None,
             }
         )

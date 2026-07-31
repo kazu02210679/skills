@@ -123,6 +123,8 @@ SUPPLEMENTAL CODEX EVIDENCE
 {{SUPPLEMENTAL_EVIDENCE}}
 
 Use the review payload and shared envelope contracts above with a fresh turn/nonce/prompt digest. Missing evidence remains UNVERIFIED.
+
+{{SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REVIEW}}
 ```
 
 ## One format-only correction

@@ -131,12 +131,14 @@ class ControllerCase(unittest.TestCase):
     def _state_bytes(self) -> bytes:
         return (self._run_dir() / "state.json").read_bytes()
 
-    def _freeze_initial_requirements(self) -> dict[str, object]:
+    def _freeze_initial_requirements(
+        self, requirements: dict[str, object] | None = None
+    ) -> dict[str, object]:
         self._init_run()
         attempt = controller.prepare_requirements(self.repository, "controller-test")
         expected = controller.load_json(Path(attempt["expected_header_path"]))
         raw = self.input_directory / "requirements.raw.md"
-        write_raw_envelope(raw, expected, valid_requirements())
+        write_raw_envelope(raw, expected, requirements or valid_requirements())
         return controller.accept_requirements(
             self.repository,
             "controller-test",
@@ -179,6 +181,61 @@ class ControllerCase(unittest.TestCase):
             {"example.py": "Implement AC-1."}, **evidence_overrides
         )
         return controller.build_report(self.repository, "controller-test", evidence)
+
+    def _seed_evidence_only_route(self) -> dict[str, object]:
+        self._build_valid_report()
+        state = self._state()
+        review: dict[str, object] = {
+            "schema_version": 1,
+            "requirements_digest": state["active_requirements_digest"],
+            "reviewed_snapshot_digest": state["current_snapshot_digest"],
+            "decision": "CHANGES_REQUESTED",
+            "acceptance_results": {
+                "AC-1": {
+                    "status": "UNVERIFIED",
+                    "evidence": "Focused output is missing exact detail.",
+                }
+            },
+            "findings": [
+                {
+                    "id": "F-EVIDENCE",
+                    "acceptance_id": "AC-1",
+                    "root_cause_key": "missing-focused-output",
+                    "severity": "MEDIUM",
+                    "category": "INSUFFICIENT_EVIDENCE",
+                    "required_action": "PROVIDE_EVIDENCE",
+                    "evidence": "The report summarizes but does not quote the focused output.",
+                    "required_evidence": "Attach the exact focused output summary.",
+                }
+            ],
+            "scope_violations": [],
+            "next_instruction": "Provide only the requested evidence.",
+        }
+        requirements = controller.load_json(self._run_dir() / "requirements.json")
+        report = controller.load_json(self._run_dir() / "implementation-report.json")
+        self.assertEqual(controller.validate_packet.validate_review(review, requirements, report), [])
+        finding = review["findings"][0]
+        self.assertIsInstance(finding, dict)
+        state.update(
+            phase="LOCAL_VERIFICATION",
+            review_round=1,
+            latest_decision="CHANGES_REQUESTED",
+            required_actions=["PROVIDE_EVIDENCE"],
+            unresolved_finding_ids=["F-EVIDENCE"],
+            blocker_fingerprints=sorted(
+                {
+                    controller.validate_packet.derive_root_cause_fingerprint(finding),
+                    controller.validate_packet.derive_root_cause_route_fingerprint(finding),
+                }
+            ),
+            active_review_packet_digest=controller.validate_packet.canonical_digest(review),
+            reviewed_snapshot_digest=state["current_snapshot_digest"],
+            last_consumed_packet_digest="sha256:" + "e" * 64,
+            last_consumed_review_envelope_digest="sha256:" + "e" * 64,
+        )
+        controller.write_json_atomic(self._run_dir() / "review.json", review)
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        return review
 
     def _seed_requirements_revision_pending(self) -> None:
         state = self._state()
@@ -1031,3 +1088,96 @@ class ControllerCase(unittest.TestCase):
             controller.status_run(self.repository, "controller-test")["next_commands"],
             ["accept-review", "abandon-attempt"],
         )
+
+    def test_prepare_review_rejects_repository_drift_before_creating_attempt(self) -> None:
+        self._build_valid_report()
+        run = self._run_dir()
+        before_state = self._state_bytes()
+        before_artifacts = sorted(
+            path.relative_to(run).as_posix()
+            for path in run.rglob("*")
+            if path.is_file()
+        )
+        (self.repository / "example.py").write_text("value = 2\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(controller.ControllerError, "snapshot"):
+            controller.prepare_review(self.repository, "controller-test")
+
+        self.assertEqual(self._state_bytes(), before_state)
+        self.assertEqual(
+            sorted(
+                path.relative_to(run).as_posix()
+                for path in run.rglob("*")
+                if path.is_file()
+            ),
+            before_artifacts,
+        )
+
+    def test_evidence_only_review_renders_prior_review_and_exact_envelope(self) -> None:
+        prior_review = self._seed_evidence_only_route()
+        supplemental = self.input_directory / "supplemental.txt"
+        supplemental.write_text("Focused output: 1 test passed.\n", encoding="utf-8")
+
+        result = controller.prepare_review(
+            self.repository, "controller-test", supplemental
+        )
+        expected = controller.load_json(Path(result["expected_header_path"]))
+        prompt = Path(result["prompt_path"]).read_text(encoding="utf-8")
+        for field in (
+            "schema_version",
+            "packet_type",
+            "run_id",
+            "turn_id",
+            "nonce",
+            "in_reply_to",
+            "prompt_digest",
+            "previous_packet_digest",
+        ):
+            value = "null" if expected[field] is None else str(expected[field])
+            with self.subTest(field=field):
+                self.assertIn(f"{field}={value}\n", prompt)
+        self.assertIn(
+            json.dumps(prior_review, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            prompt,
+        )
+        self.assertIn("Attach the exact focused output summary.", prompt)
+
+    def test_evidence_only_review_rejects_prior_review_digest_mismatch(self) -> None:
+        self._seed_evidence_only_route()
+        review_path = self._run_dir() / "review.json"
+        tampered = controller.load_json(review_path)
+        tampered["next_instruction"] = "Tampered instruction."
+        controller.write_json_atomic(review_path, tampered)
+        supplemental = self.input_directory / "supplemental.txt"
+        supplemental.write_text("Focused output: 1 test passed.\n", encoding="utf-8")
+        before = self._state_bytes()
+
+        with self.assertRaisesRegex(controller.ControllerError, "review"):
+            controller.prepare_review(self.repository, "controller-test", supplemental)
+
+        self.assertEqual(self._state_bytes(), before)
+        self.assertEqual(list(self._run_dir().glob("expected-attempt-*.json")), [])
+
+    def test_dynamic_path_and_acceptance_ids_are_not_secret_schema_fields(self) -> None:
+        requirements = valid_requirements(
+            in_scope=["token"],
+            acceptance_criteria=[
+                {
+                    "id": "SESSION",
+                    "criterion": "The token path has deterministic behavior.",
+                    "required_evidence": "Focused unittest output.",
+                }
+            ],
+        )
+        self._freeze_initial_requirements(requirements)
+        (self.repository / "token").write_text("value = 1\n", encoding="utf-8")
+        evidence = self._write_local_evidence(
+            {"token": "Implement SESSION."},
+            acceptance_evidence={"SESSION": ["Focused unittest passed."]},
+        )
+
+        result = controller.build_report(self.repository, "controller-test", evidence)
+
+        report = controller.load_json(Path(result["report_path"]))
+        self.assertEqual(report["changed_files"][0]["path"], "token")
+        self.assertEqual(report["acceptance_evidence"], {"SESSION": ["Focused unittest passed."]})
