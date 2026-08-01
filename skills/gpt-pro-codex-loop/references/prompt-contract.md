@@ -2,6 +2,12 @@
 
 Use these prompts verbatim except for replacing placeholders with bounded, disclosure-approved content. Save the exact prompt and complete raw response. Before sending, persist the expected closed envelope header and exact prompt digest in trusted local state.
 
+## Controller template rendering
+
+The controller extracts each prompt body only from the stable named heading followed by exactly one `text` fence. Source text is UTF-8 without a BOM; after extraction, normalize CRLF and bare CR to LF and retain exactly one trailing LF. Every supported placeholder must occur exactly once in its source template, unknown/missing/duplicate tokens fail closed, and substituted values are structural leaf nodes rather than new template source.
+
+Render all values except `PROMPT_DIGEST`, hash the exact UTF-8 bytes while that single literal token remains, then replace it with the lowercase `sha256:` digest. This token cardinality and byte sequence are controller-owned. Do not reformat prompt text, independently calculate a digest, or hand-author an expected header; use the prepared prompt and expected-header artifacts returned by `gpc_loop.py`.
+
 ## Model and conversation policy
 
 State records `model_policy`, `requested_model_label`, and `visible_model_label`.
@@ -123,6 +129,8 @@ SUPPLEMENTAL CODEX EVIDENCE
 {{SUPPLEMENTAL_EVIDENCE}}
 
 Use the review payload and shared envelope contracts above with a fresh turn/nonce/prompt digest. Missing evidence remains UNVERIFIED.
+
+{{SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REVIEW}}
 ```
 
 ## One format-only correction

@@ -25,6 +25,7 @@ python skills/gpt-pro-codex-loop/scripts/validate_packet.py format-correction CO
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py requirements REQUIREMENTS.json --previous PREVIOUS_REQUIREMENTS.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py report-context REPORT.json --requirements REQUIREMENTS.json --state STATE.json --snapshot SNAPSHOT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py review-context REVIEW_ENVELOPE.json --requirements REQUIREMENTS.json --report REPORT.json --state STATE.json --snapshot SNAPSHOT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-preparation-context REQUIREMENTS_PREPARATION_CONTEXT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-context REQUIREMENTS_CONTEXT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --review-context REVIEW_CONTEXT.json
 python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --final-gate FINAL_GATE.json --final-report REPORT.json --final-requirements REQUIREMENTS.json
@@ -47,6 +48,67 @@ REVIEW_CONTEXT.json:
 `expected` contains the eight envelope header fields without `payload`; `consumed_digests` is an array of lowercase SHA-256 strings; `approval_receipt` is the trusted digest-bound receipt or `null`. A successful command exits `0` and prints canonical JSON plus one newline.
 
 `review-context` validates and prints the envelope; that output is **not** a `REVIEW_CONTEXT.json` transition input. The controller constructs the composed context from the same validated envelope, trusted expected header and consumed set, active requirements/report, and captured snapshot, then passes that closed object to `transition`.
+
+`requirements-preparation-context` is a closed, controller-built local authorization for changing the pending requirements expected-header anchor. It contains exactly the new expected header and either `null` for the first attempt or the complete matching `ABANDONED_NOT_SENT` receipt for the previous anchor. A same-phase anchor replacement or clear without that proof fails closed.
+
+## Controller CLI
+
+The normal-loop entry point is `python skills/gpt-pro-codex-loop/scripts/gpc_loop.py COMMAND`. Every command accepts `--repo REPOSITORY --task TASK`. `init` additionally requires `--request FILE --repository-context FILE --model-policy PRO_CLASS|EXACT_LABEL`, with repeatable `--approved-existing-path PATH` and optional `--requested-model-label LABEL`. The other command-specific inputs are:
+
+```text
+prepare-requirements  [--conflict-evidence FILE]
+accept-requirements   --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL
+approve-requirements  --approval-evidence FILE
+build-report          --local-evidence FILE
+prepare-review        [--supplemental-evidence FILE]
+accept-review         --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL
+final-verify
+status
+abandon-attempt       --send-status NOT_SENT --not-sent-evidence FILE
+```
+
+`--local-evidence` is one strict UTF-8 JSON object with exactly this shape (no unknown fields):
+
+```json
+{
+  "schema_version": 1,
+  "changed_file_intents": {"example.py": "Implement AC-1."},
+  "intent_summary": "Implement and verify AC-1.",
+  "acceptance_evidence": {"AC-1": ["Focused test passed."]},
+  "test_commands": [{"command": "python -m unittest test_example.py -v", "outcome": "PASS", "output_summary": "1 test passed."}],
+  "diff_evidence": ["example.py implements AC-1."],
+  "omissions": [],
+  "unresolved_risks_or_blockers": []
+}
+```
+
+`schema_version` is integer `1`. `changed_file_intents` is an object of non-empty changed-path keys and non-empty intent strings; its keys must equal the captured product snapshot's changed-path set exactly. `intent_summary` is a non-empty string. `acceptance_evidence` must have exactly every active acceptance ID as keys and each value is a non-empty list of non-empty strings. `diff_evidence`, `omissions`, and `unresolved_risks_or_blockers` are lists of non-empty strings. Every `test_commands` item has exactly non-empty string `command`, `outcome`, and `output_summary` fields; the controller records commands without executing them. A report may record a non-`PASS` outcome, but final verification requires at least one command and every outcome to be `PASS`, with empty omissions and unresolved blockers.
+
+`--request` and `--repository-context` are UTF-8 text inputs read with universal-newline handling: CRLF and bare CR become LF before persistence. No trailing newline is added or removed; any trailing newline sequence is preserved after that line-ending normalization. `--conflict-evidence`, `--supplemental-evidence`, and `--approval-evidence` are readable, non-empty UTF-8 text files. `--not-sent-evidence` is readable, non-empty UTF-8 text normalized to LF and stored up to 8192 UTF-8 bytes; it is valid only with literal `--send-status NOT_SENT`. `accept-*` always receives the complete raw response plus the URL and model label observed in the Browser at acceptance time.
+
+Each non-help invocation prints exactly one canonical UTF-8 JSON object and one LF: success is `{"ok":true,"command":"COMMAND","result":RESULT}`; a stable controller failure is `{"ok":false,"command":"COMMAND","error":{"code":"CODE","message":"MESSAGE","details":[]}}`. Success exits `0`, an expected controller failure exits `2`, and an unexpected failure returns `INTERNAL_ERROR` with exit `1`; `--debug` sends its traceback only to stderr.
+
+Use `status` before every controller mutation after `init` and follow only its `next_commands`. The controller writes artifacts and validates candidates before replacing `state.json` last. Its consumed-envelope set comes only from trusted chain-head fields in `state.json`, never from scanning artifact history. It derives and validates every prompt/header digest, state transition, snapshot/report binding, and final gate; never hand-author those artifacts. `abandon-attempt` atomically replaces only the outstanding expected attempt with a `NOT_SENT` receipt and preserves `state.json` and all domain artifacts unchanged.
+
+## Recovery
+
+An existing transaction directory is a manual recovery boundary. `status` remains read-only, returns `recovery_required: true`, reports the exact transaction paths and unreachable artifacts, and returns an empty `next_commands`; every normal mutation returns `RECOVERY_REQUIRED`. Preserve `state.json`, the complete transaction directory, its manifest/staged files/backups, and all run artifacts byte-for-byte. Do not delete, rename, restore, publish, or otherwise repair them through the normal controller. Escalate to the user before any resolution.
+
+Re-run the exact read-only status command as needed:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py status --repo REPOSITORY --task TASK
+```
+
+For manual validation, copy the relevant states and closed context to separately preserved diagnostic inputs, then run the matching command without altering the run:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-context REQUIREMENTS_CONTEXT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py transition PREVIOUS_STATE.json CURRENT_STATE.json --review-context REVIEW_CONTEXT.json
+python skills/gpt-pro-codex-loop/scripts/validate_packet.py envelope ENVELOPE.json --expected EXPECTED_HEADER.json --consumed CONSUMED.json
+```
+
+The validator only reports validity; it does not select, publish, clean, or repair a transaction. No mutation may resume until the transaction is resolved outside the normal controller path under explicit user direction. Version 1 intentionally provides no recovery or destructive-cleanup command and never silently repairs an interrupted transaction.
 
 ## Complete requirements envelope
 
@@ -272,7 +334,9 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "resolution_evidence": null,
   "resolution_stop_sequence": null,
   "pending_requirements_envelope_digest": null,
+  "pending_requirements_expected_header_digest": null,
   "pending_review_envelope_digest": "sha256:3a63ffc1078e3eb2ca79474c0f63a79c203ebf00cef62e6b259e030d3afb5bb2",
+  "pending_review_expected_header_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
   "last_consumed_packet_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
   "last_consumed_review_envelope_digest": null,
   "active_report_digest": "sha256:4198d50d6002e2ac6819ba5f7398d4df12e457a9ee58f0d7d50538cc32a93204",
@@ -281,9 +345,12 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "reviewed_snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "baseline_head": "1111111111111111111111111111111111111111",
   "preflight_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "nonce_derivation_key": "0000000000000000000000000000000000000000000000000000000000000000",
   "approved_existing_paths": []
 }
 ```
+
+`nonce_derivation_key` is immutable, local-only preparation provenance. The controller derives each exact attempt nonce from it and the trusted run, packet, semantic-turn, and attempt identities; acceptance recomputes that nonce instead of trusting the mutable expected-attempt file.
 
 After envelope and report checks pass, the controller constructs this complete state as an ephemeral candidate using the validated review payload, pending envelope digest, routed actions, and locally derived history. Run `review-context` against that candidate. Only after it passes may the controller atomically replace persisted `state.json`; never mutate persisted trusted state before candidate validation. `REVIEW_PENDING -> FINAL_VERIFICATION` then consumes the pending envelope: increment round, move its digest to both consumed fields, clear pending identity, and preserve active report/review/snapshot digests. Other routes populate their candidate actions and derived history before validation and the corresponding edge. Never hand-author or persist a partial state.
 

@@ -180,6 +180,19 @@ def expected_envelope(envelope: dict[str, object]) -> dict[str, object]:
     }
 
 
+def valid_abandoned_attempt(expected: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "ABANDONED_NOT_SENT",
+        "expected_header": expected,
+        "expected_header_digest": canonical_digest(expected),
+        "nonce": expected["nonce"],
+        "prompt_digest": expected["prompt_digest"],
+        "evidence": "The prompt was verified not sent.\n",
+        "abandoned_at_unix": 1,
+    }
+
+
 _UNSET_STATE_VALUE = object()
 
 
@@ -223,7 +236,9 @@ def valid_state(
     resolution_stop_sequence: object = None,
     schema_version: object = 1,
     pending_requirements_envelope_digest: object = _UNSET_STATE_VALUE,
+    pending_requirements_expected_header_digest: object = _UNSET_STATE_VALUE,
     pending_review_envelope_digest: object = _UNSET_STATE_VALUE,
+    pending_review_expected_header_digest: object = _UNSET_STATE_VALUE,
     last_consumed_packet_digest: object = _UNSET_STATE_VALUE,
     last_consumed_review_envelope_digest: object = _UNSET_STATE_VALUE,
     active_report_digest: object = None,
@@ -232,6 +247,7 @@ def valid_state(
     reviewed_snapshot_digest: object = _UNSET_STATE_VALUE,
     baseline_head: object = "a" * 40,
     preflight_digest: object = "sha256:" + "f" * 64,
+    nonce_derivation_key: object = "0" * 64,
     approved_existing_paths: object = None,
 ) -> dict[str, object]:
     if active_requirements_revision is _UNSET_STATE_VALUE:
@@ -256,9 +272,15 @@ def valid_state(
         pending_requirements_envelope_digest = (
             REQ_ENVELOPE_DIGEST if phase == "REQUIREMENTS_PENDING" else None
         )
+    if pending_requirements_expected_header_digest is _UNSET_STATE_VALUE:
+        pending_requirements_expected_header_digest = None
     if pending_review_envelope_digest is _UNSET_STATE_VALUE:
         pending_review_envelope_digest = (
             REVIEW_ENVELOPE_DIGEST if phase == "REVIEW_PENDING" else None
+        )
+    if pending_review_expected_header_digest is _UNSET_STATE_VALUE:
+        pending_review_expected_header_digest = (
+            "sha256:" + "6" * 64 if phase == "REVIEW_PENDING" else None
         )
     if last_consumed_packet_digest is _UNSET_STATE_VALUE:
         if phase == "PREFLIGHT":
@@ -330,7 +352,9 @@ def valid_state(
         "resolution_evidence": resolution_evidence,
         "resolution_stop_sequence": resolution_stop_sequence,
         "pending_requirements_envelope_digest": pending_requirements_envelope_digest,
+        "pending_requirements_expected_header_digest": pending_requirements_expected_header_digest,
         "pending_review_envelope_digest": pending_review_envelope_digest,
+        "pending_review_expected_header_digest": pending_review_expected_header_digest,
         "last_consumed_packet_digest": last_consumed_packet_digest,
         "last_consumed_review_envelope_digest": last_consumed_review_envelope_digest,
         "active_report_digest": active_report_digest,
@@ -339,6 +363,7 @@ def valid_state(
         "reviewed_snapshot_digest": reviewed_snapshot_digest,
         "baseline_head": baseline_head,
         "preflight_digest": preflight_digest,
+        "nonce_derivation_key": nonce_derivation_key,
         "approved_existing_paths": (
             [] if approved_existing_paths is None else approved_existing_paths
         ),
@@ -505,6 +530,9 @@ def bind_review_transition_context(
         active_requirements_revision=requirements["requirements_revision"],
         active_requirements_digest=requirements_digest,
         pending_review_envelope_digest=envelope_digest,
+        pending_review_expected_header_digest=canonical_digest(
+            expected_envelope(envelope)
+        ),
         active_report_digest=canonical_digest(report),
         current_snapshot_digest=snapshot["snapshot_digest"],
         active_review_packet_digest=canonical_digest(review),
@@ -514,6 +542,7 @@ def bind_review_transition_context(
         active_requirements_revision=requirements["requirements_revision"],
         active_requirements_digest=requirements_digest,
         pending_review_envelope_digest=None,
+        pending_review_expected_header_digest=None,
         last_consumed_packet_digest=envelope_digest,
         last_consumed_review_envelope_digest=envelope_digest,
         active_report_digest=previous["active_report_digest"],
@@ -576,6 +605,10 @@ def bind_requirements_transition_context(
         if has_pending_revision
         else None
     )
+    decision = current.get("latest_requirements_decision")
+    if decision not in {"PLAN_READY", "NEED_USER_INPUT", "BLOCK"}:
+        decision = "PLAN_READY"
+        current["latest_requirements_decision"] = decision
     requirements = valid_requirements(
         requirements_revision=revision,
         supersedes_digest=supersedes_digest,
@@ -593,7 +626,7 @@ def bind_requirements_transition_context(
             "prior_evidence_invalidated"
         ),
         review_round_reset=previous.get("review_round_reset"),
-        decision=current.get("latest_requirements_decision"),
+        decision=decision,
     )
     requirements_digest = canonical_digest(requirements)
     chain_head = previous.get("last_consumed_packet_digest")
@@ -604,8 +637,12 @@ def bind_requirements_transition_context(
     )
     envelope_digest = canonical_digest(envelope)
     previous["pending_requirements_envelope_digest"] = envelope_digest
+    previous["pending_requirements_expected_header_digest"] = canonical_digest(
+        expected_envelope(envelope)
+    )
     current.update(
         pending_requirements_envelope_digest=None,
+        pending_requirements_expected_header_digest=None,
         last_consumed_packet_digest=envelope_digest,
     )
     if has_pending_revision:
@@ -629,10 +666,15 @@ def bind_requirements_transition_context(
                 active_requirements_digest=requirements_digest,
             )
     else:
-        previous.update(
-            active_requirements_revision=revision,
-            active_requirements_digest=requirements_digest,
+        initial_unbound = (
+            previous.get("active_requirements_revision") is None
+            and previous.get("active_requirements_digest") is None
         )
+        if not initial_unbound:
+            previous.update(
+                active_requirements_revision=revision,
+                active_requirements_digest=requirements_digest,
+            )
         current.update(
             active_requirements_revision=revision,
             active_requirements_digest=requirements_digest,
@@ -677,14 +719,18 @@ class PacketTransportTests(unittest.TestCase):
             packet_validator.strict_json_loads(body)
             for body in re.findall(r"```json\n(.*?)\n```", contract, re.DOTALL)
         ]
-        self.assertEqual(5, len(examples))
+        self.assertEqual(6, len(examples))
         (
+            local_evidence,
             requirements_envelope,
             documented_report,
             review_envelope,
             staged_review_state,
             final_gate,
         ) = examples
+        self.assertEqual(1, local_evidence["schema_version"])
+        self.assertEqual(["Focused test passed."], local_evidence["acceptance_evidence"]["AC-1"])
+        self.assertEqual("PASS", local_evidence["test_commands"][0]["outcome"])
         requirements = requirements_envelope["payload"]
         self.assertEqual(
             [],
@@ -1778,6 +1824,128 @@ class TransitionTests(unittest.TestCase):
                 valid_state("LOCAL_VERIFICATION", 0),
             ),
         )
+        malformed_key = valid_state(
+            "IMPLEMENTING",
+            0,
+            nonce_derivation_key="A" * 64,
+        )
+        self.assertIn(
+            "previous.nonce_derivation_key: must be 64 lowercase hexadecimal characters",
+            validate_transition(
+                malformed_key,
+                valid_state("LOCAL_VERIFICATION", 0),
+            ),
+        )
+        changed_key = valid_state(
+            "LOCAL_VERIFICATION",
+            0,
+            nonce_derivation_key="1" * 64,
+        )
+        self.assertIn(
+            "nonce_derivation_key: must preserve immutable preflight provenance",
+            validate_transition(
+                valid_state("IMPLEMENTING", 0),
+                changed_key,
+            ),
+        )
+
+    def test_requirements_expected_header_anchor_is_required(self) -> None:
+        previous = valid_state("REQUIREMENTS_PENDING", 0)
+        previous.pop("pending_requirements_expected_header_digest")
+        current = valid_state("REQUIREMENTS_FROZEN", 0)
+        self.assertIn(
+            "previous.pending_requirements_expected_header_digest: missing required field",
+            validate_transition(previous, current),
+        )
+
+    def test_requirements_attempt_preparation_preserves_unrelated_state(self) -> None:
+        previous = valid_state("REQUIREMENTS_PENDING", 0)
+        current = dict(previous)
+        current["pending_requirements_expected_header_digest"] = "sha256:" + "7" * 64
+        current["active_report_digest"] = "sha256:" + "8" * 64
+        self.assertIn(
+            "active_report_digest: requirements attempt preparation must preserve trusted state",
+            validate_transition(previous, current),
+        )
+
+    def test_requirements_anchor_update_requires_preparation_authorization(self) -> None:
+        previous = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            pending_requirements_expected_header_digest="sha256:" + "6" * 64,
+        )
+        for value in ("sha256:" + "7" * 64, None):
+            with self.subTest(value=value):
+                current = dict(previous)
+                current["pending_requirements_expected_header_digest"] = value
+                self.assertIn(
+                    "requirements_preparation_context: explicit closed context is required for requirements anchor updates",
+                    validate_transition(previous, current),
+                )
+
+    def test_requirements_preparation_context_authorizes_first_and_fresh_attempts(self) -> None:
+        first_expected = expected_envelope(valid_envelope("requirements", valid_requirements()))
+        first_previous = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            pending_requirements_envelope_digest=None,
+            pending_requirements_expected_header_digest=None,
+        )
+        first_current = dict(first_previous)
+        first_current["pending_requirements_expected_header_digest"] = canonical_digest(
+            first_expected
+        )
+        self.assertEqual(
+            validate_transition(
+                first_previous,
+                first_current,
+                requirements_preparation_context={
+                    "expected": first_expected,
+                    "abandoned_attempt": None,
+                },
+            ),
+            [],
+        )
+
+        replacement_expected = dict(first_expected)
+        replacement_expected["nonce"] = "requirements-attempt-02"
+        replacement_expected["prompt_digest"] = "sha256:" + "7" * 64
+        replacement_current = dict(first_current)
+        replacement_current["pending_requirements_expected_header_digest"] = canonical_digest(
+            replacement_expected
+        )
+        self.assertEqual(
+            validate_transition(
+                first_current,
+                replacement_current,
+                requirements_preparation_context={
+                    "expected": replacement_expected,
+                    "abandoned_attempt": valid_abandoned_attempt(first_expected),
+                },
+            ),
+            [],
+        )
+
+    def test_requirements_context_rejects_coordinated_header_tampering(self) -> None:
+        for field, value in (
+            ("in_reply_to", "sha256:" + "7" * 64),
+            ("prompt_digest", "sha256:" + "8" * 64),
+        ):
+            with self.subTest(field=field):
+                previous = valid_state(
+                    "REQUIREMENTS_PENDING",
+                    0,
+                    active_requirements_revision=None,
+                    active_requirements_digest=None,
+                )
+                current = valid_state("REQUIREMENTS_FROZEN", 0)
+                context = bind_requirements_transition_context(previous, current)
+                context["expected"][field] = value
+                context["envelope"][field] = value
+                self.assertIn(
+                    "requirements_context.pending_requirements_expected_header_digest: expected header does not match trusted state",
+                    validate_transition(previous, current, requirements_context=context),
+                )
 
     def test_format_correction_cannot_mutate_domain_state(self) -> None:
         previous = valid_state(
@@ -2119,13 +2287,12 @@ class TransitionTests(unittest.TestCase):
         frozen = valid_state(
             "REQUIREMENTS_FROZEN",
             0,
-            latest_decision="CHANGES_REQUESTED",
             latest_requirements_decision="PLAN_READY",
-            required_actions=["REQUIREMENTS_REVISION"],
             active_requirements_revision=2,
             active_requirements_digest="sha256:" + "b" * 64,
             approval_sequence=1,
             last_consumed_packet_digest=REQ_ENVELOPE_DIGEST,
+            last_consumed_review_envelope_digest=REVIEW_ENVELOPE_DIGEST,
         )
         self.assertIn(
             "requirements_context: explicit composed context is required for requirements consumption",
@@ -2507,11 +2674,81 @@ class TransitionTests(unittest.TestCase):
             validate_transition(valid_state("PREFLIGHT", 0), injected),
         )
 
-    def test_active_requirements_provenance_is_initialized_once_after_preflight(self) -> None:
+    def test_initial_requirements_pending_may_remain_unbound(self) -> None:
+        previous = valid_state("PREFLIGHT", 0)
+        current = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+            pending_requirements_envelope_digest=None,
+        )
+        self.assertEqual(validate_transition(previous, current), [])
+
+    def test_initial_unbound_requirements_reject_review_provenance(self) -> None:
+        previous = valid_state("PREFLIGHT", 0)
+        for field in (
+            "pending_review_envelope_digest",
+            "last_consumed_review_envelope_digest",
+            "active_report_digest",
+            "current_snapshot_digest",
+            "active_review_packet_digest",
+            "reviewed_snapshot_digest",
+        ):
+            with self.subTest(field=field):
+                current = valid_state(
+                    "REQUIREMENTS_PENDING",
+                    0,
+                    active_requirements_revision=None,
+                    active_requirements_digest=None,
+                    pending_requirements_envelope_digest=None,
+                )
+                current[field] = "sha256:" + "1" * 64
+                self.assertTrue(
+                    any(
+                        "active_requirements" in error
+                        for error in validate_transition(previous, current)
+                    )
+                )
+
+    def test_unbound_requirements_are_rejected_outside_initial_pending(self) -> None:
+        for phase in ("REQUIREMENTS_FROZEN", "IMPLEMENTING", "LOCAL_VERIFICATION"):
+            with self.subTest(phase=phase):
+                state = valid_state(
+                    phase,
+                    0,
+                    active_requirements_revision=None,
+                    active_requirements_digest=None,
+                )
+                self.assertTrue(
+                    any(
+                        "active_requirements" in error
+                        for error in validate_transition(state, state)
+                    )
+                )
+
+    def test_first_requirements_packet_binds_the_unbound_initial_state(self) -> None:
+        previous = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+            pending_requirements_envelope_digest=None,
+        )
+        current = valid_state("REQUIREMENTS_FROZEN", 0)
+        self.assertEqual(validate_bound_requirements_transition(previous, current), [])
+
+    def test_active_requirements_provenance_is_initialized_once_after_initial_requirements(self) -> None:
         self.assertEqual(
             validate_transition(
                 valid_state("PREFLIGHT", 0),
-                valid_state("REQUIREMENTS_PENDING", 0),
+                valid_state(
+                    "REQUIREMENTS_PENDING",
+                    0,
+                    active_requirements_revision=None,
+                    active_requirements_digest=None,
+                    pending_requirements_envelope_digest=None,
+                ),
             ),
             [],
         )
@@ -2530,7 +2767,7 @@ class TransitionTests(unittest.TestCase):
             active_requirements_digest=None,
         )
         self.assertIn(
-            "current.active_requirements: revision and digest are required after preflight",
+            "current.active_requirements: revision and digest are required after initial requirements",
             validate_transition(null_pending, null_frozen),
         )
 
@@ -2547,7 +2784,7 @@ class TransitionTests(unittest.TestCase):
             active_requirements_digest="sha256:" + "b" * 64,
         )
         self.assertIn(
-            "active_requirements: may be initialized only when preflight enters requirements pending",
+            "active_requirements: may be initialized only when initial requirements are frozen",
             validate_transition(late_source, late_injection),
         )
 
@@ -2667,6 +2904,12 @@ class TransitionTests(unittest.TestCase):
             resolution_evidence=approval_receipt,
             resolution_stop_sequence=1,
         )
+        frozen["last_consumed_packet_digest"] = stopped[
+            "last_consumed_packet_digest"
+        ]
+        frozen["last_consumed_review_envelope_digest"] = stopped[
+            "last_consumed_review_envelope_digest"
+        ]
         self.assertEqual(validate_transition(stopped, frozen), [])
         implementation_state = valid_state(
             "LOCAL_VERIFICATION",
@@ -3075,7 +3318,13 @@ class TransitionTests(unittest.TestCase):
             bound_conversation_url=None,
             visible_model_label=None,
         )
-        bound = valid_state("REQUIREMENTS_PENDING", 0)
+        bound = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+            pending_requirements_envelope_digest=None,
+        )
         self.assertEqual(validate_transition(unbound, bound), [])
 
         for field, value in (
@@ -3410,12 +3659,16 @@ class TransitionTests(unittest.TestCase):
             blocker_fingerprints=["cause-2"],
         )
         current = valid_state(
-            "IMPLEMENTING",
+            "BLOCKED",
             3,
             latest_decision="CHANGES_REQUESTED",
             required_actions=["CODE_CHANGE"],
             unresolved_finding_ids=["F-1"],
             blocker_fingerprints=["cause-1"],
+            stop_origin_phase="REVIEW_PENDING",
+            stop_origin_category="REVIEW_ROUND_LIMIT",
+            stop_reason="The semantic review round limit was reached.",
+            stop_sequence=1,
         )
         self.assertEqual(
             validate_bound_review_transition(previous, current),
@@ -3465,6 +3718,74 @@ class TransitionTests(unittest.TestCase):
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, prompt_contract)
+
+    def test_material_approval_must_clear_review_bindings_and_preserve_history(self) -> None:
+        active_digest = "sha256:" + "a" * 64
+        proposal_digest = "sha256:" + "6" * 64
+        requirements_head = "sha256:" + "7" * 64
+        review_head = "sha256:" + "8" * 64
+        stopped = valid_state(
+            "USER_DECISION_REQUIRED",
+            2,
+            latest_decision="CHANGES_REQUESTED",
+            latest_requirements_decision="NEED_USER_INPUT",
+            required_actions=["REQUIREMENTS_REVISION"],
+            unresolved_finding_ids=["F-1"],
+            blocker_fingerprints=["sha256:" + "9" * 64],
+            active_requirements_revision=1,
+            active_requirements_digest=active_digest,
+            pending_requirements_revision=2,
+            pending_requirements_digest=proposal_digest,
+            pending_supersedes_digest=active_digest,
+            behavior_changed=True,
+            user_approval_required=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+            stop_origin_phase="REQUIREMENTS_PENDING",
+            stop_origin_category="REQUIREMENTS_NEED_USER_INPUT",
+            stop_reason="Material requirements need approval.",
+            stop_sequence=1,
+            last_consumed_packet_digest=requirements_head,
+            last_consumed_review_envelope_digest=review_head,
+            active_report_digest="sha256:" + "1" * 64,
+            current_snapshot_digest="sha256:" + "2" * 64,
+            active_review_packet_digest="sha256:" + "3" * 64,
+            reviewed_snapshot_digest="sha256:" + "2" * 64,
+        )
+        receipt = f"user-approval:stop-1:{proposal_digest}"
+        frozen = valid_state(
+            "REQUIREMENTS_FROZEN",
+            0,
+            active_requirements_revision=2,
+            active_requirements_digest=proposal_digest,
+            approval_sequence=1,
+            stop_sequence=1,
+            resolution_evidence=receipt,
+            resolution_stop_sequence=1,
+            last_consumed_packet_digest=requirements_head,
+            last_consumed_review_envelope_digest=review_head,
+        )
+        self.assertEqual(validate_transition(stopped, frozen), [])
+        cases = (
+            ("latest_decision", "CHANGES_REQUESTED", "clear stale review state"),
+            ("required_actions", ["REQUIREMENTS_REVISION"], "clear stale review history"),
+            ("unresolved_finding_ids", ["F-1"], "clear stale review history"),
+            ("blocker_fingerprints", ["sha256:" + "9" * 64], "clear stale review history"),
+            ("pending_review_envelope_digest", "sha256:" + "4" * 64, "clear stale review state"),
+            ("active_report_digest", "sha256:" + "1" * 64, "clear stale review state"),
+            ("current_snapshot_digest", "sha256:" + "2" * 64, "clear stale review state"),
+            ("active_review_packet_digest", "sha256:" + "3" * 64, "clear stale review state"),
+            ("reviewed_snapshot_digest", "sha256:" + "2" * 64, "clear stale review state"),
+            ("last_consumed_packet_digest", "sha256:" + "5" * 64, "preserve consumed history"),
+            ("last_consumed_review_envelope_digest", "sha256:" + "5" * 64, "preserve consumed history"),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                tampered = dict(frozen)
+                tampered[field] = value
+                self.assertTrue(
+                    any(message in error for error in validate_transition(stopped, tampered))
+                )
 
 
 if __name__ == "__main__":

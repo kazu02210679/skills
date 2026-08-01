@@ -32,6 +32,20 @@ TRANSPORT_HEADER_FIELDS = (
 )
 TRANSPORT_ENVELOPE_FIELDS = (*TRANSPORT_HEADER_FIELDS, "payload")
 TRANSPORT_PACKET_TYPES = frozenset({"requirements", "review"})
+REQUIREMENTS_PREPARATION_CONTEXT_FIELDS = (
+    "expected",
+    "abandoned_attempt",
+)
+ABANDONED_ATTEMPT_FIELDS = (
+    "schema_version",
+    "status",
+    "expected_header",
+    "expected_header_digest",
+    "nonce",
+    "prompt_digest",
+    "evidence",
+    "abandoned_at_unix",
+)
 REQUIREMENTS_DECISIONS = frozenset({"PLAN_READY", "NEED_USER_INPUT", "BLOCK"})
 REVIEW_DECISIONS = frozenset({"PASS", "CHANGES_REQUESTED", "BLOCK"})
 ACCEPTANCE_STATUSES = frozenset({"PASS", "FAIL", "UNVERIFIED"})
@@ -85,6 +99,20 @@ PENDING_REVISION_PROVENANCE_FIELDS = (
     "pending_user_approval_evidence",
     *MATERIAL_REVISION_FLAGS,
 )
+MATERIAL_RESET_NULL_FIELDS = (
+    "latest_decision",
+    "pending_review_envelope_digest",
+    "pending_review_expected_header_digest",
+    "active_report_digest",
+    "current_snapshot_digest",
+    "active_review_packet_digest",
+    "reviewed_snapshot_digest",
+)
+MATERIAL_RESET_EMPTY_LIST_FIELDS = (
+    "required_actions",
+    "unresolved_finding_ids",
+    "blocker_fingerprints",
+)
 STOP_PHASES = frozenset({"USER_DECISION_REQUIRED", "BLOCKED"})
 STOP_ORIGIN_CATEGORIES = frozenset(
     {
@@ -92,6 +120,8 @@ STOP_ORIGIN_CATEGORIES = frozenset(
         "REQUIREMENTS_BLOCK",
         "REVIEW_USER_DECISION",
         "REVIEW_BLOCK",
+        "REVIEW_REPEATED_BLOCKER",
+        "REVIEW_ROUND_LIMIT",
         "FINAL_VERIFICATION_BLOCK",
     }
 )
@@ -100,6 +130,8 @@ STOP_CATEGORY_ORIGINS = {
     "REQUIREMENTS_BLOCK": "REQUIREMENTS_PENDING",
     "REVIEW_USER_DECISION": "REVIEW_PENDING",
     "REVIEW_BLOCK": "REVIEW_PENDING",
+    "REVIEW_REPEATED_BLOCKER": "REVIEW_PENDING",
+    "REVIEW_ROUND_LIMIT": "REVIEW_PENDING",
     "FINAL_VERIFICATION_BLOCK": "FINAL_VERIFICATION",
 }
 STOP_CATEGORY_PHASES = {
@@ -107,6 +139,8 @@ STOP_CATEGORY_PHASES = {
     "REQUIREMENTS_BLOCK": "BLOCKED",
     "REVIEW_USER_DECISION": "USER_DECISION_REQUIRED",
     "REVIEW_BLOCK": "USER_DECISION_REQUIRED",
+    "REVIEW_REPEATED_BLOCKER": "BLOCKED",
+    "REVIEW_ROUND_LIMIT": "BLOCKED",
     "FINAL_VERIFICATION_BLOCK": "BLOCKED",
 }
 STOP_RESUME_TARGETS = {
@@ -209,7 +243,9 @@ REQUIRED_STATE_FIELDS = (
     "resolution_evidence",
     "resolution_stop_sequence",
     "pending_requirements_envelope_digest",
+    "pending_requirements_expected_header_digest",
     "pending_review_envelope_digest",
+    "pending_review_expected_header_digest",
     "last_consumed_packet_digest",
     "last_consumed_review_envelope_digest",
     "active_report_digest",
@@ -218,6 +254,7 @@ REQUIRED_STATE_FIELDS = (
     "reviewed_snapshot_digest",
     "baseline_head",
     "preflight_digest",
+    "nonce_derivation_key",
     "approved_existing_paths",
 )
 OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
@@ -273,6 +310,7 @@ STATE_TRANSITIONS = {
             "REQUIREMENTS_PENDING",
             "USER_DECISION_REQUIRED",
             "FINAL_VERIFICATION",
+            "BLOCKED",
         }
     ),
     "USER_DECISION_REQUIRED": frozenset(
@@ -1401,6 +1439,70 @@ def _has_pending_requirements_provenance(state: dict[str, object]) -> bool:
     )
 
 
+def _is_initial_unbound_requirements(state: dict[str, object]) -> bool:
+    """Return whether state is the sole post-preflight unbound requirements state."""
+    return (
+        state.get("phase") == "REQUIREMENTS_PENDING"
+        and state.get("review_round") == 0
+        and state.get("active_requirements_revision") is None
+        and state.get("active_requirements_digest") is None
+        and state.get("last_consumed_packet_digest") is None
+        and all(
+            state.get(field) is None
+            for field in (
+                "pending_review_envelope_digest",
+                "last_consumed_review_envelope_digest",
+                "active_report_digest",
+                "current_snapshot_digest",
+                "active_review_packet_digest",
+                "reviewed_snapshot_digest",
+            )
+        )
+        and state.get("latest_decision") is None
+        and state.get("required_actions") == []
+        and state.get("unresolved_finding_ids") == []
+        and state.get("blocker_fingerprints") == []
+        and not _has_pending_requirements_provenance(state)
+    )
+
+
+def _is_initial_requirements_stop(state: dict[str, object]) -> bool:
+    """Return whether initial requirements were consumed into a valid stop route."""
+    category = state.get("stop_origin_category")
+    decision = state.get("latest_requirements_decision")
+    return (
+        state.get("phase") in STOP_PHASES
+        and state.get("stop_origin_phase") == "REQUIREMENTS_PENDING"
+        and category in {"REQUIREMENTS_NEED_USER_INPUT", "REQUIREMENTS_BLOCK"}
+        and decision
+        == (
+            "NEED_USER_INPUT"
+            if category == "REQUIREMENTS_NEED_USER_INPUT"
+            else "BLOCK"
+        )
+        and state.get("review_round") == 0
+        and state.get("active_requirements_revision") is None
+        and state.get("active_requirements_digest") is None
+        and isinstance(state.get("last_consumed_packet_digest"), str)
+        and bool(DIGEST_PATTERN.fullmatch(state["last_consumed_packet_digest"]))
+    )
+
+
+def _is_initial_requirements_candidate(state: dict[str, object]) -> bool:
+    """Return whether a prevalidated initial proposal is awaiting consumption."""
+    return (
+        state.get("phase") == "REQUIREMENTS_PENDING"
+        and state.get("review_round") == 0
+        and state.get("active_requirements_revision") is None
+        and state.get("active_requirements_digest") is None
+        and state.get("pending_requirements_revision") == 1
+        and isinstance(state.get("pending_requirements_digest"), str)
+        and bool(DIGEST_PATTERN.fullmatch(state["pending_requirements_digest"]))
+        and state.get("pending_supersedes_digest") is None
+        and state.get("last_consumed_packet_digest") is None
+    )
+
+
 def _validate_conversation_binding(
     state: dict[str, object], name: str, errors: list[str]
 ) -> bool:
@@ -1550,8 +1652,10 @@ def _validate_state_fields(
         "pending_requirements_digest",
         "pending_supersedes_digest",
         "pending_approved_requirements_digest",
-        "pending_requirements_envelope_digest",
-        "pending_review_envelope_digest",
+    "pending_requirements_envelope_digest",
+    "pending_requirements_expected_header_digest",
+    "pending_review_envelope_digest",
+        "pending_review_expected_header_digest",
         "last_consumed_packet_digest",
         "last_consumed_review_envelope_digest",
         "active_report_digest",
@@ -1571,6 +1675,14 @@ def _validate_state_fields(
             state.get("preflight_digest"),
             f"{name}.preflight_digest",
             errors,
+        )
+    nonce_derivation_key = state.get("nonce_derivation_key")
+    if "nonce_derivation_key" in state and (
+        not isinstance(nonce_derivation_key, str)
+        or re.fullmatch(r"[0-9a-f]{64}", nonce_derivation_key) is None
+    ):
+        errors.append(
+            f"{name}.nonce_derivation_key: must be 64 lowercase hexadecimal characters"
         )
     baseline_head = state.get("baseline_head")
     if "baseline_head" in state and (
@@ -1631,11 +1743,25 @@ def _validate_state_fields(
             f"{name}.pending_requirements_envelope_digest: is allowed only while requirements are pending"
         )
     if (
+        state.get("phase") != "REQUIREMENTS_PENDING"
+        and state.get("pending_requirements_expected_header_digest") is not None
+    ):
+        errors.append(
+            f"{name}.pending_requirements_expected_header_digest: is allowed only while requirements are pending"
+        )
+    if (
         state.get("phase") != "REVIEW_PENDING"
         and state.get("pending_review_envelope_digest") is not None
     ):
         errors.append(
             f"{name}.pending_review_envelope_digest: is allowed only while review is pending"
+        )
+    if (
+        state.get("phase") != "REVIEW_PENDING"
+        and state.get("pending_review_expected_header_digest") is not None
+    ):
+        errors.append(
+            f"{name}.pending_review_expected_header_digest: is allowed only while review is pending"
         )
     active_revision = state.get("active_requirements_revision")
     active_digest = state.get("active_requirements_digest")
@@ -1653,6 +1779,12 @@ def _validate_state_fields(
                 f"{name}.active_requirements: must be null during preflight"
             )
     elif (
+        _is_initial_unbound_requirements(state)
+        or _is_initial_requirements_candidate(state)
+        or _is_initial_requirements_stop(state)
+    ):
+        pass
+    elif (
         not isinstance(active_revision, int)
         or isinstance(active_revision, bool)
         or active_revision < 1
@@ -1660,7 +1792,7 @@ def _validate_state_fields(
         or not DIGEST_PATTERN.fullmatch(active_digest)
     ):
         errors.append(
-            f"{name}.active_requirements: revision and digest are required after preflight"
+            f"{name}.active_requirements: revision and digest are required after initial requirements"
         )
     pending_revision = state.get("pending_requirements_revision")
     pending_digest = state.get("pending_requirements_digest")
@@ -1874,6 +2006,7 @@ def _expected_requirements_target(
 def _expected_stop_category(
     previous_phase: str,
     current_phase: str,
+    previous_state: dict[str, object],
     current_state: dict[str, object],
 ) -> str | None:
     if previous_phase == "REQUIREMENTS_PENDING":
@@ -1893,6 +2026,17 @@ def _expected_stop_category(
             return "REVIEW_USER_DECISION"
         if decision == "BLOCK":
             return "REVIEW_BLOCK"
+    if previous_phase == "REVIEW_PENDING" and current_phase == "BLOCKED":
+        if (
+            _finding_ids(previous_state) & _finding_ids(current_state)
+            or _fingerprints(previous_state) & _fingerprints(current_state)
+        ):
+            return "REVIEW_REPEATED_BLOCKER"
+        if (
+            current_state.get("latest_decision") == "CHANGES_REQUESTED"
+            and current_state.get("review_round") == MAX_REVIEW_ROUNDS
+        ):
+            return "REVIEW_ROUND_LIMIT"
     if previous_phase == "FINAL_VERIFICATION" and current_phase == "BLOCKED":
         return "FINAL_VERIFICATION_BLOCK"
     return None
@@ -1940,6 +2084,7 @@ def _validate_stop_entry(
     expected_category = _expected_stop_category(
         previous_phase,
         current_phase,
+        previous_state,
         current_state,
     )
     if current_state.get("stop_origin_phase") != previous_phase:
@@ -2301,6 +2446,25 @@ def _validate_requirements_promotion(
             errors.append(
                 "review_round: approved material revision must reset the review round to zero"
             )
+        for field in MATERIAL_RESET_NULL_FIELDS:
+            if current_state.get(field) is not None:
+                errors.append(
+                    f"{field}: approved material revision must clear stale review state"
+                )
+        for field in MATERIAL_RESET_EMPTY_LIST_FIELDS:
+            if current_state.get(field) != []:
+                errors.append(
+                    f"{field}: approved material revision must clear stale review history"
+                )
+        if direct_stop_approval:
+            for field in (
+                "last_consumed_packet_digest",
+                "last_consumed_review_envelope_digest",
+            ):
+                if current_state.get(field) != previous_state.get(field):
+                    errors.append(
+                        f"{field}: approved material revision must preserve consumed history"
+                    )
     elif (
         current_state.get("approval_sequence")
         != previous_state.get("approval_sequence")
@@ -2333,6 +2497,15 @@ def _validate_requirements_envelope_consumption(
     if current_state.get("pending_requirements_envelope_digest") is not None:
         errors.append(
             "pending_requirements_envelope_digest: must clear after requirements consumption"
+        )
+    _require_digest(
+        previous_state.get("pending_requirements_expected_header_digest"),
+        "pending_requirements_expected_header_digest",
+        errors,
+    )
+    if current_state.get("pending_requirements_expected_header_digest") is not None:
+        errors.append(
+            "pending_requirements_expected_header_digest: must clear after requirements consumption"
         )
 
 
@@ -2371,6 +2544,15 @@ def _validate_review_envelope_consumption(
     if current_state.get("pending_review_envelope_digest") is not None:
         errors.append(
             "pending_review_envelope_digest: must clear after review consumption"
+        )
+    _require_digest(
+        previous_state.get("pending_review_expected_header_digest"),
+        "pending_review_expected_header_digest",
+        errors,
+    )
+    if current_state.get("pending_review_expected_header_digest") is not None:
+        errors.append(
+            "pending_review_expected_header_digest: must clear after review consumption"
         )
     for field in ("active_review_packet_digest", "reviewed_snapshot_digest"):
         if previous_state.get(field) is None:
@@ -2427,6 +2609,18 @@ def _validate_review_transition_context(
     errors.extend(
         f"review_context.transport.{error}" for error in transport_errors
     )
+    expected_digest = _canonical_digest_checked(
+        context["expected"],
+        "review_context.expected",
+        errors,
+    )
+    if (
+        expected_digest is not None
+        and state.get("pending_review_expected_header_digest") != expected_digest
+    ):
+        errors.append(
+            "review_context.pending_review_expected_header_digest: expected header does not match trusted state"
+        )
     review_state = dict(state)
     for field in (
         "latest_decision",
@@ -2439,6 +2633,13 @@ def _validate_review_transition_context(
             review_state[field] = consumed_state[field]
         else:
             review_state.pop(field, None)
+    report = context.get("report")
+    if (
+        isinstance(report, dict)
+        and isinstance(state.get("review_round"), int)
+        and report.get("review_round") == state["review_round"] - 1
+    ):
+        review_state["review_round"] = report["review_round"]
     review_errors = validate_review_context(
         context["envelope"],
         context["requirements"],
@@ -2529,6 +2730,17 @@ def _validate_requirements_transition_context(
         errors.append(
             "requirements_context.pending_requirements_envelope_digest: envelope was not prevalidated"
         )
+    expected_digest = _canonical_digest_checked(
+        context["expected"], "requirements_context.expected", errors
+    )
+    if (
+        expected_digest is not None
+        and previous_state.get("pending_requirements_expected_header_digest")
+        != expected_digest
+    ):
+        errors.append(
+            "requirements_context.pending_requirements_expected_header_digest: expected header does not match trusted state"
+        )
     if packet.get("previous_packet_digest") != previous_state.get(
         "last_consumed_packet_digest"
     ):
@@ -2556,6 +2768,7 @@ def _validate_requirements_transition_context(
     has_pending_revision = (
         pending_revision is not None or pending_digest is not None
     )
+    initial_unbound = _is_initial_unbound_requirements(previous_state)
     if has_pending_revision:
         if requirements_packet.get("requirements_revision") != pending_revision:
             errors.append(
@@ -2579,6 +2792,15 @@ def _validate_requirements_transition_context(
                 errors.append(
                     f"requirements_context.{field}: does not match pending requirements provenance"
                 )
+    elif initial_unbound:
+        if requirements_packet.get("requirements_revision") != 1:
+            errors.append(
+                "requirements_context.requirements_revision: initial requirements must be revision 1"
+            )
+        if requirements_packet.get("supersedes_digest") is not None:
+            errors.append(
+                "requirements_context.supersedes_digest: initial requirements must not supersede a digest"
+            )
     else:
         if (
             requirements_packet.get("requirements_revision")
@@ -2674,10 +2896,154 @@ def _validate_requirements_transition_context(
     return _errors_sorted(errors)
 
 
+def _validate_requirements_expected_header(
+    value: object,
+    path: str,
+    errors: list[str],
+) -> dict[str, object]:
+    local_errors: list[str] = []
+    expected = _as_mapping(value, path, local_errors)
+    _require_fields(expected, TRANSPORT_HEADER_FIELDS, local_errors)
+    _reject_unknown_fields(expected, TRANSPORT_HEADER_FIELDS, local_errors)
+    _require_schema_version(expected, local_errors)
+    if expected.get("packet_type") != "requirements":
+        local_errors.append("packet_type: must be requirements")
+    for field in ("run_id", "turn_id", "nonce"):
+        _require_nonempty_string(expected, field, local_errors)
+    for field in ("in_reply_to", "prompt_digest"):
+        _require_digest(expected.get(field), field, local_errors)
+    _require_digest(
+        expected.get("previous_packet_digest"),
+        "previous_packet_digest",
+        local_errors,
+        nullable=True,
+    )
+    prefix = f"{path}."
+    errors.extend(
+        error if error.startswith(f"{path}:") else prefix + error
+        for error in local_errors
+    )
+    return expected
+
+
+def _validate_abandoned_requirements_attempt(
+    value: object,
+    errors: list[str],
+) -> dict[str, object]:
+    path = "requirements_preparation_context.abandoned_attempt"
+    local_errors: list[str] = []
+    receipt = _as_mapping(value, path, local_errors)
+    _require_fields(receipt, ABANDONED_ATTEMPT_FIELDS, local_errors)
+    _reject_unknown_fields(receipt, ABANDONED_ATTEMPT_FIELDS, local_errors)
+    _require_schema_version(receipt, local_errors)
+    if receipt.get("status") != "ABANDONED_NOT_SENT":
+        local_errors.append("status: must be ABANDONED_NOT_SENT")
+    expected = _validate_requirements_expected_header(
+        receipt.get("expected_header"),
+        f"{path}.expected_header",
+        errors,
+    )
+    expected_digest = _canonical_digest_checked(
+        expected,
+        f"{path}.expected_header",
+        errors,
+    )
+    _require_digest(
+        receipt.get("expected_header_digest"),
+        "expected_header_digest",
+        local_errors,
+    )
+    if (
+        expected_digest is not None
+        and receipt.get("expected_header_digest") != expected_digest
+    ):
+        local_errors.append(
+            "expected_header_digest: does not match the abandoned expected header"
+        )
+    for field in ("nonce", "prompt_digest"):
+        if receipt.get(field) != expected.get(field):
+            local_errors.append(f"{field}: does not match the abandoned expected header")
+    if not _is_nonempty_string(receipt.get("evidence")):
+        local_errors.append("evidence: must be a non-empty string")
+    abandoned_at = receipt.get("abandoned_at_unix")
+    if (
+        not isinstance(abandoned_at, int)
+        or isinstance(abandoned_at, bool)
+        or abandoned_at < 0
+    ):
+        local_errors.append("abandoned_at_unix: must be a non-negative integer")
+    errors.extend(
+        error if error.startswith(f"{path}:") else f"{path}.{error}"
+        for error in local_errors
+    )
+    return receipt
+
+
+def _validate_requirements_preparation_context(
+    context: object,
+    previous_state: dict[str, object],
+    current_state: dict[str, object],
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(context, dict):
+        return [
+            "requirements_preparation_context: explicit closed context is required for requirements anchor updates"
+        ]
+    _require_fields(context, REQUIREMENTS_PREPARATION_CONTEXT_FIELDS, errors)
+    _reject_unknown_fields(
+        context,
+        REQUIREMENTS_PREPARATION_CONTEXT_FIELDS,
+        errors,
+        path="requirements_preparation_context",
+    )
+    expected = _validate_requirements_expected_header(
+        context.get("expected"),
+        "requirements_preparation_context.expected",
+        errors,
+    )
+    expected_digest = _canonical_digest_checked(
+        expected,
+        "requirements_preparation_context.expected",
+        errors,
+    )
+    current_anchor = current_state.get(
+        "pending_requirements_expected_header_digest"
+    )
+    if expected_digest is not None and current_anchor != expected_digest:
+        errors.append(
+            "requirements_preparation_context.expected: digest does not match the current requirements anchor"
+        )
+
+    previous_anchor = previous_state.get(
+        "pending_requirements_expected_header_digest"
+    )
+    abandoned_value = context.get("abandoned_attempt")
+    if previous_anchor is None:
+        if abandoned_value is not None:
+            errors.append(
+                "requirements_preparation_context.abandoned_attempt: must be null for the first requirements attempt"
+            )
+    elif abandoned_value is None:
+        errors.append(
+            "requirements_preparation_context.abandoned_attempt: a matching abandoned attempt is required to replace the requirements anchor"
+        )
+    else:
+        abandoned = _validate_abandoned_requirements_attempt(
+            abandoned_value,
+            errors,
+        )
+        if abandoned.get("expected_header_digest") != previous_anchor:
+            errors.append(
+                "requirements_preparation_context.abandoned_attempt.expected_header_digest: does not match the previous requirements anchor"
+            )
+    return _errors_sorted(errors)
+
+
 def validate_transition(
     previous,
     current,
     *,
+    requirements_preparation_context=None,
     requirements_context=None,
     review_context=None,
     final_gate_evidence=None,
@@ -2731,6 +3097,8 @@ def validate_transition(
         errors.append("review_round: must be an integer within the review limit")
 
     valid_review_consumption = False
+    consumes_review = False
+    review_context_valid = False
     if previous_phase and current_phase:
         initial_binding_transition = (
             previous_binding_valid
@@ -2783,11 +3151,37 @@ def validate_transition(
             and not isinstance(previous_reconnects, bool)
             and reconnects == previous_reconnects + 1
         )
+        same_phase_requirements_preparation = (
+            previous_phase == current_phase == "REQUIREMENTS_PENDING"
+            and current_state.get("pending_requirements_expected_header_digest")
+            != previous_state.get("pending_requirements_expected_header_digest")
+        )
         same_phase_maintenance = (
             same_phase_format_correction
             or same_phase_browser_reconnect
             or initial_binding_transition
+            or same_phase_requirements_preparation
         )
+        if same_phase_requirements_preparation:
+            errors.extend(
+                _validate_requirements_preparation_context(
+                    requirements_preparation_context,
+                    previous_state,
+                    current_state,
+                )
+            )
+            for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):
+                if (
+                    field != "pending_requirements_expected_header_digest"
+                    and current_state.get(field) != previous_state.get(field)
+                ):
+                    errors.append(
+                        f"{field}: requirements attempt preparation must preserve trusted state"
+                    )
+        elif requirements_preparation_context is not None:
+            errors.append(
+                "requirements_preparation_context: allowed only for a requirements anchor update"
+            )
         if same_phase_format_correction:
             for field in (*REQUIRED_STATE_FIELDS, *OPTIONAL_STATE_FIELDS):
                 if (
@@ -2809,6 +3203,7 @@ def validate_transition(
         for field in (
             "baseline_head",
             "preflight_digest",
+            "nonce_derivation_key",
             "approved_existing_paths",
         ):
             if current_state.get(field) != previous_state.get(field):
@@ -2963,16 +3358,27 @@ def validate_transition(
             "active_requirements_revision"
         )
         current_active_digest = current_state.get("active_requirements_digest")
-        initial_active_binding = (
+        initial_preflight_state = (
             previous_phase == "PREFLIGHT"
             and current_phase == "REQUIREMENTS_PENDING"
             and previous_active_revision is None
             and previous_active_digest is None
+            and current_active_revision is None
+            and current_active_digest is None
+        )
+        initial_requirements_binding = (
+            previous_phase == "REQUIREMENTS_PENDING"
+            and current_phase == "REQUIREMENTS_FROZEN"
+            and _is_initial_unbound_requirements(previous_state)
             and current_active_revision == 1
             and isinstance(current_active_digest, str)
             and bool(DIGEST_PATTERN.fullmatch(current_active_digest))
         )
-        if not promotion_attempt and not initial_active_binding:
+        if (
+            not promotion_attempt
+            and not initial_preflight_state
+            and not initial_requirements_binding
+        ):
             if (
                 previous_active_revision is None
                 and previous_active_digest is None
@@ -2982,7 +3388,7 @@ def validate_transition(
                 )
             ):
                 errors.append(
-                    "active_requirements: may be initialized only when preflight enters requirements pending"
+                    "active_requirements: may be initialized only when initial requirements are frozen"
                 )
             if (
                 current_active_revision
@@ -3007,7 +3413,6 @@ def validate_transition(
                 "approval_sequence: must preserve consumed approval history"
             )
         consumes_review = previous_phase == "REVIEW_PENDING" and current_phase != previous_phase
-        review_context_valid = False
         if consumes_review:
             review_context_errors = _validate_review_transition_context(
                 review_context,
@@ -3041,6 +3446,16 @@ def validate_transition(
                 expected_target = None
             else:
                 expected_target = _expected_review_target(previous_state, errors)
+                repeated_blocker = previous_round >= 1 and (
+                    _finding_ids(previous_state) & _finding_ids(current_state)
+                    or _fingerprints(previous_state) & _fingerprints(current_state)
+                )
+                round_limit = (
+                    decision == "CHANGES_REQUESTED"
+                    and current_round == MAX_REVIEW_ROUNDS
+                )
+                if repeated_blocker or round_limit:
+                    expected_target = "BLOCKED"
             if expected_target and current_phase != expected_target:
                 errors.append(
                     f"phase: review routing requires transition to {expected_target}, not {current_phase}"
@@ -3099,9 +3514,15 @@ def validate_transition(
                 "final_gate: evidence is allowed only for FINAL_VERIFICATION to COMPLETE"
             )
 
-    if valid_review_consumption and previous_round >= 1 and (
+    if (
+        consumes_review
+        and review_context_valid
+        and current_phase != "BLOCKED"
+        and previous_round >= 1
+        and (
         _finding_ids(previous_state) & _finding_ids(current_state)
         or _fingerprints(previous_state) & _fingerprints(current_state)
+        )
     ):
         errors.append(
             "unresolved_findings: blocker persisted across two consecutive valid review rounds"
@@ -3154,6 +3575,7 @@ def main(argv: list[str] | None = None) -> int:
     transition_parser = subparsers.add_parser("transition")
     transition_parser.add_argument("previous")
     transition_parser.add_argument("current")
+    transition_parser.add_argument("--requirements-preparation-context")
     transition_parser.add_argument("--requirements-context")
     transition_parser.add_argument("--review-context")
     transition_parser.add_argument("--final-gate")
@@ -3221,6 +3643,11 @@ def main(argv: list[str] | None = None) -> int:
             errors = validate_transition(
                 value["previous"],
                 value["current"],
+                requirements_preparation_context=(
+                    _load_json(args.requirements_preparation_context)
+                    if args.requirements_preparation_context
+                    else None
+                ),
                 requirements_context=(
                     _load_json(args.requirements_context)
                     if args.requirements_context

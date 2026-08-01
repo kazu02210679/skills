@@ -1,0 +1,2982 @@
+#!/usr/bin/env python3
+"""Deterministic controller for the GPT Pro Codex Loop Skill."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import socket
+import subprocess
+import tempfile
+import time
+from urllib.parse import urlparse
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Iterator, Mapping, Sequence
+
+import capture_snapshot
+import validate_packet
+
+
+SCHEMA_VERSION = 1
+TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
+TEMPLATE_TOKEN = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+ATTEMPT_NAME = re.compile(r"(?:expected|abandoned|consumed)-attempt-(\d+)\.json\Z")
+DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+NONCE = re.compile(r"[0-9a-f]{32}\Z")
+MAX_ABANDON_EVIDENCE_BYTES = 8192
+EXPECTED_HEADER_FIELDS = {
+    "schema_version",
+    "packet_type",
+    "run_id",
+    "turn_id",
+    "nonce",
+    "in_reply_to",
+    "prompt_digest",
+    "previous_packet_digest",
+}
+ABANDONED_ATTEMPT_FIELDS = {
+    "schema_version",
+    "status",
+    "expected_header",
+    "expected_header_digest",
+    "nonce",
+    "prompt_digest",
+    "evidence",
+    "abandoned_at_unix",
+}
+
+TEMPLATE_TOKENS = {
+    "Shared envelope instruction": {
+        "PACKET_TYPE",
+        "RUN_ID",
+        "TURN_ID",
+        "NONCE",
+        "IN_REPLY_TO_DIGEST",
+        "PROMPT_DIGEST",
+        "PREVIOUS_PACKET_DIGEST_OR_NULL",
+    },
+    "Initial requirements": {
+        "USER_REQUEST",
+        "REPOSITORY_EVIDENCE",
+        "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REQUIREMENTS",
+    },
+    "Requirements revision": {
+        "PREVIOUS_REQUIREMENTS_JSON",
+        "PREVIOUS_REQUIREMENTS_DIGEST",
+        "CONFLICT_EVIDENCE",
+        "APPROVAL_RECEIPT_OR_NULL",
+        "NEXT_REVISION",
+        "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REQUIREMENTS",
+    },
+    "Implementation review": {
+        "REQUIREMENTS_JSON",
+        "REQUIREMENTS_DIGEST",
+        "IMPLEMENTATION_REPORT_JSON",
+        "SNAPSHOT_DIGEST",
+        "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REVIEW",
+    },
+    "Evidence-only supplementation": {
+        "SNAPSHOT_DIGEST",
+        "REQUIREMENTS_JSON",
+        "PRIOR_REVIEW_JSON",
+        "SUPPLEMENTAL_EVIDENCE",
+        "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REVIEW",
+    },
+}
+
+
+class ControllerError(RuntimeError):
+    """A stable, safe-to-display controller failure."""
+
+    def __init__(
+        self, code: str, message: str, details: Sequence[str] = ()
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = tuple(details)
+
+
+@dataclass(frozen=True)
+class Token:
+    name: str
+
+
+@dataclass(frozen=True)
+class Template:
+    parts: tuple[str | Token, ...]
+
+
+@dataclass(frozen=True)
+class RunPaths:
+    repository: Path
+    task_slug: str
+    run: Path
+    state: Path
+    preflight: Path
+    events: Path
+    transactions: Path
+    lock: Path
+
+
+def _repository_root(repository: Path) -> Path:
+    supplied = Path(repository).resolve()
+    if not supplied.is_dir():
+        raise ControllerError("INVALID_REPOSITORY", "Repository path is not a directory.")
+    completed = subprocess.run(
+        ["git", "-C", str(supplied), "rev-parse", "--show-toplevel"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode:
+        raise ControllerError("INVALID_REPOSITORY", "Repository path is not a Git repository root.")
+    try:
+        root = Path(completed.stdout.decode("utf-8", errors="strict").strip()).resolve()
+    except UnicodeDecodeError as exc:
+        raise ControllerError("INVALID_REPOSITORY", "Git returned an invalid repository path.") from exc
+    if root != supplied:
+        raise ControllerError("INVALID_REPOSITORY", "Repository path must be the Git repository root.")
+    return root
+
+
+def _is_contained(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_run(repository: Path, task_slug: str) -> RunPaths:
+    """Resolve one safe, explicit run location within a repository root."""
+    root = _repository_root(repository)
+    if not isinstance(task_slug, str) or TASK_SLUG.fullmatch(task_slug) is None:
+        raise ControllerError("INVALID_TASK_SLUG", "Invalid task slug.")
+    metadata = root / ".ai-pro-loop"
+    resolved_metadata = metadata.resolve(strict=False)
+    run = metadata / task_slug
+    resolved_run = run.resolve(strict=False)
+    if not _is_contained(resolved_metadata, root) or not _is_contained(
+        resolved_run, resolved_metadata
+    ):
+        raise ControllerError("UNSAFE_RUN_PATH", "Run path escapes the repository metadata directory.")
+    return RunPaths(
+        repository=root,
+        task_slug=task_slug,
+        run=run,
+        state=run / "state.json",
+        preflight=run / "preflight.json",
+        events=run / "events.jsonl",
+        transactions=run / "transactions",
+        lock=run / ".lock",
+    )
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ControllerError("INVALID_JSON_VALUE", "Value is not canonical JSON.") from exc
+    return (encoded + "\n").encode("utf-8")
+
+
+def _write_bytes_atomic(path: Path, value: bytes) -> None:
+    if not path.parent.is_dir():
+        raise ControllerError("WRITE_FAILED", "Destination directory does not exist.")
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+            temporary.write(value)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.replace(temporary_name, path)
+    except OSError as exc:
+        raise ControllerError("WRITE_FAILED", "Could not atomically write controller artifact.") from exc
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def write_json_atomic(path: Path, value: object) -> None:
+    """Write one canonical JSON value with atomic replacement."""
+    _write_bytes_atomic(path, _canonical_json_bytes(value))
+
+
+def write_text_atomic(path: Path, value: str) -> None:
+    """Write UTF-8 text with atomic replacement and no newline translation."""
+    if not isinstance(value, str):
+        raise ControllerError("INVALID_TEXT", "Controller text artifact must be a string.")
+    _write_bytes_atomic(path, value.encode("utf-8"))
+
+
+def _normalize_text(value: str) -> str:
+    if not isinstance(value, str):
+        raise ControllerError("INVALID_TEXT", "Prompt text must be a string.")
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _normalize_prompt(value: str) -> str:
+    return _normalize_text(value).rstrip("\n") + "\n"
+
+
+def sha256_bytes(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def _parse_template(
+    raw: str, required_tokens: set[str], allow_repeated: bool
+) -> Template:
+    normalized = _normalize_prompt(raw)
+    for placeholder in re.finditer(r"\{\{[^{}\n]*\}\}", normalized):
+        if TEMPLATE_TOKEN.fullmatch(placeholder.group(0)) is None:
+            raise ControllerError("UNKNOWN_TEMPLATE_TOKEN", "Template contains an unknown token.")
+    without_tokens = TEMPLATE_TOKEN.sub("", normalized)
+    if "{{" in without_tokens or "}}" in without_tokens:
+        raise ControllerError("MALFORMED_TEMPLATE_TOKEN", "Template contains malformed token braces.")
+    parts: list[str | Token] = []
+    present: set[str] = set()
+    position = 0
+    for match in TEMPLATE_TOKEN.finditer(normalized):
+        name = match.group(1)
+        if name not in required_tokens:
+            raise ControllerError("UNKNOWN_TEMPLATE_TOKEN", "Template contains an unknown token.")
+        if name in present and not allow_repeated:
+            raise ControllerError("DUPLICATE_TEMPLATE_TOKEN", "Template contains a duplicate token.")
+        if match.start() > position:
+            parts.append(normalized[position : match.start()])
+        parts.append(Token(name))
+        present.add(name)
+        position = match.end()
+    if position < len(normalized):
+        parts.append(normalized[position:])
+    missing = required_tokens - present
+    if missing:
+        raise ControllerError("MISSING_TEMPLATE_TOKEN", "Template is missing a required token.")
+    return Template(tuple(parts))
+
+
+def parse_template(raw: str, required_tokens: set[str]) -> Template:
+    """Parse one closed template without treating future values as syntax."""
+    return _parse_template(raw, required_tokens, allow_repeated=False)
+
+
+def load_template(contract: Path, heading: str) -> Template:
+    """Load the first text fence immediately following one exact heading."""
+    required_tokens = TEMPLATE_TOKENS.get(heading)
+    if required_tokens is None:
+        raise ControllerError("UNKNOWN_TEMPLATE", "Prompt template heading is not supported.")
+    try:
+        source = _normalize_text(Path(contract).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError) as exc:
+        raise ControllerError("TEMPLATE_READ_FAILED", "Could not read prompt contract.") from exc
+    heading_match = re.search(rf"(?m)^## {re.escape(heading)}[ \t]*$", source)
+    if heading_match is None:
+        raise ControllerError("TEMPLATE_NOT_FOUND", "Prompt template fence was not found.")
+    next_heading = re.search(r"(?m)^## ", source[heading_match.end() :])
+    section_end = (
+        heading_match.end() + next_heading.start()
+        if next_heading is not None
+        else len(source)
+    )
+    match = re.search(
+        r"(?m)^```text[ \t]*\n(.*?)\n```",
+        source[heading_match.end() : section_end],
+        re.DOTALL,
+    )
+    if match is None:
+        raise ControllerError("TEMPLATE_NOT_FOUND", "Prompt template fence was not found.")
+    # Contract templates deliberately repeat a few bound digests in prose and
+    # schema reminders. Values are still parsed only once, before rendering.
+    return _parse_template(match.group(1), required_tokens, allow_repeated=True)
+
+
+def _render_nodes(
+    parts: Sequence[str | Token],
+    values: Mapping[str, str | Template],
+    prompt_digest: str,
+) -> str:
+    rendered: list[str] = []
+    for part in parts:
+        if isinstance(part, str):
+            rendered.append(part)
+            continue
+        if part.name == "PROMPT_DIGEST":
+            rendered.append(prompt_digest)
+            continue
+        value = values.get(part.name)
+        if value is None:
+            raise ControllerError("MISSING_TEMPLATE_VALUE", "Prompt value is missing for a template token.")
+        if isinstance(value, Template):
+            rendered.append(_render_nodes(value.parts, values, prompt_digest))
+        elif isinstance(value, str):
+            rendered.append(_normalize_text(value))
+        else:
+            raise ControllerError("INVALID_TEMPLATE_VALUE", "Prompt template value must be text or a template.")
+    return "".join(rendered)
+
+
+def render_prompt(
+    template: Template, values: Mapping[str, str | Template]
+) -> dict[str, str]:
+    """Render and digest an exact UTF-8 prompt without reparsing values."""
+    digest_source = _normalize_prompt(
+        _render_nodes(template.parts, values, "{{PROMPT_DIGEST}}")
+    )
+    prompt_digest = sha256_bytes(digest_source.encode("utf-8"))
+    prompt = _normalize_prompt(_render_nodes(template.parts, values, prompt_digest))
+    return {"prompt": prompt, "prompt_digest": prompt_digest}
+
+
+@contextmanager
+def run_lock(path: Path) -> Iterator[None]:
+    """Hold one exclusive run lock without guessing whether old locks are stale."""
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise ControllerError("RUN_LOCKED", "Run is already locked.") from exc
+    except OSError as exc:
+        raise ControllerError("LOCK_FAILED", "Could not create the run lock.") from exc
+    owned_stat = os.fstat(descriptor)
+    try:
+        payload = _canonical_json_bytes(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "pid": os.getpid(),
+                "hostname": socket.gethostname(),
+                "created_at_unix": int(time.time()),
+            }
+        )
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        yield
+    finally:
+        try:
+            os.close(descriptor)
+        finally:
+            try:
+                if os.path.samestat(owned_stat, path.stat()):
+                    path.unlink()
+            except OSError:
+                pass
+
+
+def load_json(path: Path) -> dict[str, object]:
+    """Strictly load one object-shaped controller artifact."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ControllerError("READ_FAILED", "Could not read controller JSON artifact.") from exc
+    try:
+        value = validate_packet.strict_json_loads(raw)
+    except ValueError as exc:
+        raise ControllerError("INVALID_JSON", "Controller JSON artifact is invalid.") from exc
+    if not isinstance(value, dict):
+        raise ControllerError("INVALID_JSON", "Controller JSON artifact must be an object.")
+    return value
+
+
+def _load_mutator_state(paths: RunPaths) -> tuple[dict[str, object], str]:
+    """Load canonical trusted state and bind this command to those exact bytes."""
+    state = load_json(paths.state)
+    digest = sha256_bytes(_canonical_json_bytes(state))
+    _require_state_digest(paths, digest)
+    return state, digest
+
+
+def _normalize_approved_paths(approved_existing_paths: Sequence[str]) -> list[str]:
+    if isinstance(approved_existing_paths, (str, bytes)):
+        return []
+    try:
+        values = list(approved_existing_paths)
+    except TypeError:
+        return []
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            return []
+        normalized.append("/".join(PurePosixPath(value.replace("\\", "/")).parts))
+    return sorted(normalized)
+
+
+def initial_state(
+    preflight: Mapping[str, object],
+    approved_paths: Sequence[str],
+    model_policy: str,
+    requested_label: str | None,
+) -> dict[str, object]:
+    """Build the complete, preflight-only trusted state object."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "phase": "PREFLIGHT",
+        "review_round": 0,
+        "latest_decision": None,
+        "latest_requirements_decision": None,
+        "required_actions": [],
+        "unresolved_finding_ids": [],
+        "blocker_fingerprints": [],
+        "format_error_count": 0,
+        "browser_reconnect_count": 0,
+        "conversation_binding_state": "CONVERSATION_UNBOUND",
+        "bound_conversation_url": None,
+        "model_policy": model_policy,
+        "requested_model_label": requested_label,
+        "visible_model_label": None,
+        "active_requirements_revision": None,
+        "active_requirements_digest": None,
+        "approval_sequence": 0,
+        "pending_requirements_revision": None,
+        "pending_requirements_digest": None,
+        "pending_supersedes_digest": None,
+        "pending_approval_sequence": None,
+        "pending_approved_requirements_digest": None,
+        "pending_user_approval_evidence": None,
+        "behavior_changed": False,
+        "user_approval_required": False,
+        "scope_changed": False,
+        "public_contract_changed": False,
+        "prior_evidence_invalidated": False,
+        "review_round_reset": False,
+        "user_approval_received": False,
+        "stop_origin_phase": None,
+        "stop_origin_category": None,
+        "stop_reason": None,
+        "stop_sequence": 0,
+        "resolution_evidence": None,
+        "resolution_stop_sequence": None,
+        "pending_requirements_envelope_digest": None,
+        "pending_requirements_expected_header_digest": None,
+        "pending_review_envelope_digest": None,
+        "pending_review_expected_header_digest": None,
+        "last_consumed_packet_digest": None,
+        "last_consumed_review_envelope_digest": None,
+        "active_report_digest": None,
+        "current_snapshot_digest": None,
+        "active_review_packet_digest": None,
+        "reviewed_snapshot_digest": None,
+        "baseline_head": preflight["baseline_head"],
+        "preflight_digest": validate_packet.canonical_digest(preflight),
+        "nonce_derivation_key": secrets.token_hex(32),
+        "approved_existing_paths": sorted(approved_paths),
+    }
+
+
+def _validate_model_policy(model_policy: str, requested_label: str | None) -> None:
+    if model_policy == "PRO_CLASS" and requested_label is None:
+        return
+    if (
+        model_policy == "EXACT_LABEL"
+        and isinstance(requested_label, str)
+        and bool(requested_label.strip())
+    ):
+        return
+    raise ControllerError(
+        "INVALID_MODEL_POLICY",
+        "Model policy must be PRO_CLASS with no label or EXACT_LABEL with a label.",
+    )
+
+
+def _read_input(path: Path, name: str) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ControllerError("INPUT_READ_FAILED", f"Could not read {name} input.") from exc
+
+
+def _head_commit(repository: Path) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD^{commit}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode:
+        raise ControllerError("PREFLIGHT_FAILED", "Repository has no valid baseline commit.")
+    try:
+        return completed.stdout.decode("ascii", errors="strict").strip()
+    except UnicodeDecodeError as exc:
+        raise ControllerError("PREFLIGHT_FAILED", "Git returned an invalid baseline commit.") from exc
+
+
+def _owned_path(path: Path) -> tuple[Path, os.stat_result]:
+    return path, path.stat()
+
+
+def _unlink_owned(owned_paths: Sequence[tuple[Path, os.stat_result]]) -> None:
+    for path, owned_stat in reversed(owned_paths):
+        try:
+            if os.path.samestat(owned_stat, path.stat()):
+                path.unlink()
+        except OSError:
+            pass
+
+
+def _cleanup_owned_transaction(
+    transaction: Path, staged_paths: Sequence[tuple[Path, os.stat_result]]
+) -> None:
+    """Remove only artifacts staged by this invocation, leaving foreign leftovers visible."""
+    _unlink_owned(staged_paths)
+    try:
+        transaction.rmdir()
+    except OSError:
+        pass
+
+
+def _cleanup_failed_initialization(
+    paths: RunPaths, committed_paths: Sequence[tuple[Path, os.stat_result]]
+) -> None:
+    """Remove this invocation's untrusted artifacts without touching foreign leftovers."""
+    _unlink_owned(committed_paths)
+    try:
+        paths.transactions.rmdir()
+    except OSError:
+        pass
+    try:
+        paths.run.rmdir()
+    except OSError:
+        pass
+
+
+def initialize_run(
+    repository: Path,
+    task_slug: str,
+    request_path: Path,
+    repository_context_path: Path,
+    approved_existing_paths: Sequence[str],
+    model_policy: str,
+    requested_model_label: str | None,
+) -> dict[str, object]:
+    """Create a fully validated, conversation-unbound controller run."""
+    paths = resolve_run(repository, task_slug)
+    _validate_model_policy(model_policy, requested_model_label)
+    request_text = _read_input(request_path, "request")
+    context_text = _read_input(repository_context_path, "repository context")
+    metadata = paths.run.parent
+    metadata.mkdir(parents=True, exist_ok=True)
+    initialization_lock = metadata / f".{paths.task_slug}.initialize.lock"
+    with run_lock(initialization_lock):
+        if paths.run.exists():
+            raise ControllerError("RUN_EXISTS", "Run already exists.")
+        try:
+            paths.run.mkdir()
+        except FileExistsError as exc:
+            raise ControllerError("RUN_EXISTS", "Run already exists.") from exc
+        lock_acquired = False
+        initialized = False
+        committed_paths: list[tuple[Path, os.stat_result]] = []
+        try:
+            paths.transactions.mkdir()
+            with run_lock(paths.lock):
+                lock_acquired = True
+                preflight = capture_snapshot.inspect_preflight(
+                    paths.repository, _head_commit(paths.repository)
+                )
+                preflight_errors = capture_snapshot.validate_preflight(
+                    preflight, approved_existing_paths, paths.repository
+                )
+                if preflight_errors:
+                    message = "Preflight has unapproved or invalid product paths."
+                    if any(
+                        error.startswith("unapproved pre-existing")
+                        for error in preflight_errors
+                    ):
+                        message = "Preflight has unapproved pre-existing product paths."
+                    raise ControllerError(
+                        "PREFLIGHT_INVALID",
+                        message,
+                        preflight_errors,
+                    )
+                approved_paths = _normalize_approved_paths(approved_existing_paths)
+                previous = initial_state(
+                    preflight, approved_paths, model_policy, requested_model_label
+                )
+                candidate = dict(previous)
+                candidate["phase"] = "REQUIREMENTS_PENDING"
+                transition_errors = validate_packet.validate_transition(previous, candidate)
+                if transition_errors:
+                    raise ControllerError(
+                        "INVALID_INITIAL_STATE",
+                        "Initial controller state failed transition validation.",
+                        transition_errors,
+                    )
+
+                transaction = paths.transactions / f"initialize-{os.getpid()}-{time.time_ns()}"
+                transaction.mkdir()
+                request_stage = transaction / "request.md"
+                context_stage = transaction / "repository-context.md"
+                preflight_stage = transaction / "preflight.json"
+                state_stage = transaction / "state.json"
+                staged_paths: list[tuple[Path, os.stat_result]] = []
+                try:
+                    write_text_atomic(request_stage, request_text)
+                    staged_paths.append(_owned_path(request_stage))
+                    write_text_atomic(context_stage, context_text)
+                    staged_paths.append(_owned_path(context_stage))
+                    write_json_atomic(preflight_stage, preflight)
+                    staged_paths.append(_owned_path(preflight_stage))
+                    write_json_atomic(state_stage, candidate)
+                    staged_paths.append(_owned_path(state_stage))
+                    try:
+                        os.replace(request_stage, paths.run / "request.md")
+                        committed_paths.append(_owned_path(paths.run / "request.md"))
+                        os.replace(context_stage, paths.run / "repository-context.md")
+                        committed_paths.append(
+                            _owned_path(paths.run / "repository-context.md")
+                        )
+                        os.replace(preflight_stage, paths.preflight)
+                        committed_paths.append(_owned_path(paths.preflight))
+                        os.replace(state_stage, paths.state)
+                        committed_paths.append(_owned_path(paths.state))
+                    except OSError as exc:
+                        raise ControllerError(
+                            "WRITE_FAILED",
+                            "Could not commit initialized controller artifacts.",
+                        ) from exc
+                    initialized = True
+                    _record_events_best_effort(paths, [{
+                        "schema_version": SCHEMA_VERSION,
+                        "event": "RUN_INITIALIZED",
+                        "at_unix": int(time.time()),
+                    }])
+                finally:
+                    _cleanup_owned_transaction(transaction, staged_paths)
+        finally:
+            if not initialized and (lock_acquired or not paths.lock.exists()):
+                _cleanup_failed_initialization(paths, committed_paths)
+    return status_run(paths.repository, task_slug)
+
+
+def _prompt_contract_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "references" / "prompt-contract.md"
+
+
+def _canonical_prompt_json(value: object) -> str:
+    try:
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise ControllerError("INVALID_PROMPT_VALUE", "Prompt value is not canonical JSON.") from exc
+
+
+def _valid_expected_header(
+    value: object,
+    task_slug: str | None = None,
+    packet_type: str | None = None,
+    semantic_sequence: int | None = None,
+    expected_nonce: str | None = None,
+) -> bool:
+    if not isinstance(value, dict) or set(value) != EXPECTED_HEADER_FIELDS:
+        return False
+    if type(value.get("schema_version")) is not int or value["schema_version"] != SCHEMA_VERSION:
+        return False
+    if value.get("packet_type") not in {"requirements", "review"}:
+        return False
+    if any(
+        not isinstance(value.get(field), str) or not value[field]
+        for field in ("run_id", "turn_id", "nonce")
+    ):
+        return False
+    if NONCE.fullmatch(value["nonce"]) is None:
+        return False
+    if expected_nonce is not None and value["nonce"] != expected_nonce:
+        return False
+    if task_slug is not None and value["run_id"] != f"gpc-loop-{task_slug}":
+        return False
+    if packet_type is not None and value["packet_type"] != packet_type:
+        return False
+    if semantic_sequence is not None and value["turn_id"] != (
+        f"{value['packet_type']}-{semantic_sequence:02d}"
+    ):
+        return False
+    if any(
+        not isinstance(value.get(field), str) or DIGEST.fullmatch(value[field]) is None
+        for field in ("in_reply_to", "prompt_digest")
+    ):
+        return False
+    previous = value.get("previous_packet_digest")
+    return previous is None or (
+        isinstance(previous, str) and DIGEST.fullmatch(previous) is not None
+    )
+
+
+def _validate_abandoned_attempt_receipt(value: object) -> None:
+    valid = isinstance(value, dict) and set(value) == ABANDONED_ATTEMPT_FIELDS
+    expected = value.get("expected_header") if isinstance(value, dict) else None
+    valid = valid and value.get("schema_version") == SCHEMA_VERSION
+    valid = valid and type(value.get("schema_version")) is int
+    valid = valid and value.get("status") == "ABANDONED_NOT_SENT"
+    valid = valid and _valid_expected_header(expected)
+    if valid and isinstance(expected, dict):
+        valid = value.get("expected_header_digest") == validate_packet.canonical_digest(
+            expected
+        )
+        valid = valid and value.get("nonce") == expected.get("nonce")
+        valid = valid and value.get("prompt_digest") == expected.get("prompt_digest")
+    evidence = value.get("evidence") if isinstance(value, dict) else None
+    valid = valid and isinstance(evidence, str) and bool(evidence.strip())
+    valid = valid and len(evidence.encode("utf-8")) <= MAX_ABANDON_EVIDENCE_BYTES
+    abandoned_at = value.get("abandoned_at_unix") if isinstance(value, dict) else None
+    valid = valid and type(abandoned_at) is int and abandoned_at >= 0
+    if not valid:
+        raise ControllerError(
+            "INVALID_ABANDONED_ATTEMPT",
+            "Invalid abandoned attempt receipt.",
+        )
+
+
+def _attempt_number(paths: RunPaths) -> int:
+    numbers: list[int] = []
+    for path in paths.run.iterdir():
+        match = ATTEMPT_NAME.fullmatch(path.name)
+        if match is not None:
+            try:
+                artifact = load_json(path)
+            except ControllerError as exc:
+                raise ControllerError(
+                    "INVALID_ABANDONED_ATTEMPT",
+                    "Invalid abandoned attempt receipt.",
+                ) from exc
+            if path.name.startswith("abandoned-") or artifact.get("status") == "ABANDONED_NOT_SENT":
+                _validate_abandoned_attempt_receipt(artifact)
+            numbers.append(int(match.group(1)))
+    return max(numbers, default=0) + 1
+
+
+def _requirements_preparation_context(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    expected: Mapping[str, object],
+) -> dict[str, object]:
+    """Bind an anchor replacement to the exact locally abandoned attempt."""
+    previous_anchor = state.get("pending_requirements_expected_header_digest")
+    abandoned: dict[str, object] | None = None
+    if previous_anchor is not None:
+        matches: list[dict[str, object]] = []
+        for path in sorted(paths.run.glob("expected-attempt-*.json")):
+            artifact = load_json(path)
+            if artifact.get("status") != "ABANDONED_NOT_SENT":
+                continue
+            _validate_abandoned_attempt_receipt(artifact)
+            header = artifact.get("expected_header")
+            if (
+                artifact.get("expected_header_digest") == previous_anchor
+                and isinstance(header, dict)
+                and header.get("packet_type") == "requirements"
+            ):
+                matches.append(artifact)
+        if len(matches) != 1:
+            raise ControllerError(
+                "INVALID_ABANDONED_ATTEMPT",
+                "Requirements anchor replacement requires one matching abandoned attempt.",
+            )
+        abandoned = matches[0]
+    return {
+        "expected": dict(expected),
+        "abandoned_attempt": abandoned,
+    }
+
+
+def _expected_header(
+    task_slug: str,
+    packet_type: str,
+    semantic_sequence: int,
+    source_digest: str,
+    previous_packet_digest: object,
+    nonce: str,
+) -> dict[str, object]:
+    run_id = f"gpc-loop-{task_slug}"
+    turn_id = f"{packet_type}-{semantic_sequence:02d}"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "packet_type": packet_type,
+        "run_id": run_id,
+        "turn_id": turn_id,
+        "nonce": nonce,
+        "in_reply_to": validate_packet.canonical_digest(
+            {"run_id": run_id, "turn_id": turn_id, "source_digest": source_digest}
+        ),
+        "prompt_digest": "",
+        "previous_packet_digest": previous_packet_digest,
+    }
+
+
+def _derive_attempt_nonce(
+    state: Mapping[str, object],
+    task_slug: str,
+    packet_type: str,
+    semantic_sequence: int,
+    attempt_number: int,
+) -> str:
+    """Bind one exact attempt nonce to immutable trusted run provenance."""
+    key = state.get("nonce_derivation_key")
+    if not isinstance(key, str) or re.fullmatch(r"[0-9a-f]{64}", key) is None:
+        raise ControllerError("INVALID_STATE", "Trusted nonce derivation key is invalid.")
+    message = _canonical_json_bytes(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "run_id": f"gpc-loop-{task_slug}",
+            "packet_type": packet_type,
+            "semantic_sequence": semantic_sequence,
+            "attempt_number": attempt_number,
+        }
+    )
+    return hmac.new(bytes.fromhex(key), message, hashlib.sha256).hexdigest()[:32]
+
+
+def _save_attempt(
+    paths: RunPaths, attempt_number: int, turn_id: str, prompt: str, expected: Mapping[str, object]
+) -> tuple[Path, Path]:
+    prompts = paths.run / "prompts"
+    prompts.mkdir(exist_ok=True)
+    prompt_path = prompts / f"{turn_id}-attempt-{attempt_number:02d}.md"
+    expected_path = paths.run / f"expected-attempt-{attempt_number:02d}.json"
+    transaction = paths.transactions / f"prepare-{os.getpid()}-{time.time_ns()}"
+    transaction.mkdir()
+    prompt_stage = transaction / prompt_path.name
+    expected_stage = transaction / expected_path.name
+    staged: list[tuple[Path, os.stat_result]] = []
+    committed: list[tuple[Path, os.stat_result]] = []
+    try:
+        write_text_atomic(prompt_stage, prompt)
+        staged.append(_owned_path(prompt_stage))
+        write_json_atomic(expected_stage, dict(expected))
+        staged.append(_owned_path(expected_stage))
+        os.replace(prompt_stage, prompt_path)
+        committed.append(_owned_path(prompt_path))
+        os.replace(expected_stage, expected_path)
+        committed.append(_owned_path(expected_path))
+    except OSError as exc:
+        _unlink_owned(committed)
+        raise ControllerError("WRITE_FAILED", "Could not persist the pre-send attempt.") from exc
+    finally:
+        _cleanup_owned_transaction(transaction, staged)
+    return prompt_path, expected_path
+
+
+def _revision_prompt_values(
+    paths: RunPaths, state: Mapping[str, object], conflict_evidence_path: Path
+) -> tuple[dict[str, str | Template], int, str]:
+    if not conflict_evidence_path.is_file():
+        raise ControllerError("INPUT_READ_FAILED", "Could not read conflict evidence input.")
+    conflict = _read_input(conflict_evidence_path, "conflict evidence")
+    if not conflict.strip():
+        raise ControllerError("INVALID_CONFLICT_EVIDENCE", "Conflict evidence must not be empty.")
+    previous_digest = state.get("active_requirements_digest")
+    revision = state.get("active_requirements_revision")
+    if not isinstance(previous_digest, str) or not isinstance(revision, int):
+        raise ControllerError("INVALID_STATE", "Requirements revision lacks active trusted requirements.")
+    previous_path = paths.run / "requirements.json"
+    previous = load_json(previous_path)
+    next_revision = revision + 1
+    approval = state.get("pending_user_approval_evidence")
+    values: dict[str, str | Template] = {
+        "PREVIOUS_REQUIREMENTS_JSON": _canonical_prompt_json(previous),
+        "PREVIOUS_REQUIREMENTS_DIGEST": previous_digest,
+        "CONFLICT_EVIDENCE": conflict,
+        "APPROVAL_RECEIPT_OR_NULL": _canonical_prompt_json(approval),
+        "NEXT_REVISION": str(next_revision),
+    }
+    source_digest = validate_packet.canonical_digest(
+        {
+            "previous_requirements_digest": previous_digest,
+            "conflict_evidence": _normalize_text(conflict),
+            "approval_receipt": approval,
+        }
+    )
+    return values, next_revision, source_digest
+
+
+def prepare_requirements(
+    repository: Path,
+    task_slug: str,
+    conflict_evidence_path: Path | None = None,
+) -> dict[str, object]:
+    """Persist one correlated requirements prompt and its expected header."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
+        if state.get("phase") != "REQUIREMENTS_PENDING":
+            raise ControllerError("INVALID_PHASE", "Requirements can be prepared only when pending.")
+        attempts = _outstanding_attempts(paths)
+        if attempts:
+            raise ControllerError("OUTSTANDING_ATTEMPT", "A requirements attempt is already outstanding.")
+
+        shared = load_template(_prompt_contract_path(), "Shared envelope instruction")
+        if state.get("active_requirements_digest") is None:
+            if conflict_evidence_path is not None:
+                raise ControllerError("INVALID_PHASE", "Initial requirements do not accept conflict evidence.")
+            request = _read_input(paths.run / "request.md", "request")
+            repository_evidence = _read_input(
+                paths.run / "repository-context.md", "repository context"
+            )
+            values: dict[str, str | Template] = {
+                "USER_REQUEST": request,
+                "REPOSITORY_EVIDENCE": repository_evidence,
+            }
+            template = load_template(_prompt_contract_path(), "Initial requirements")
+            semantic_sequence = 1
+            source_digest = validate_packet.canonical_digest(
+                {
+                    "user_request": _normalize_text(request),
+                    "repository_evidence": _normalize_text(repository_evidence),
+                }
+            )
+        else:
+            if conflict_evidence_path is None:
+                raise ControllerError("CONFLICT_EVIDENCE_REQUIRED", "Requirements revision needs conflict evidence.")
+            values, semantic_sequence, source_digest = _revision_prompt_values(
+                paths, state, conflict_evidence_path
+            )
+            template = load_template(_prompt_contract_path(), "Requirements revision")
+
+        attempt_number = _attempt_number(paths)
+        previous_packet_digest = state.get("last_consumed_packet_digest")
+        if previous_packet_digest is not None and not isinstance(previous_packet_digest, str):
+            raise ControllerError("INVALID_STATE", "Trusted packet-chain head is invalid.")
+        expected = _expected_header(
+            task_slug,
+            "requirements",
+            semantic_sequence,
+            source_digest,
+            previous_packet_digest,
+            _derive_attempt_nonce(
+                state,
+                task_slug,
+                "requirements",
+                semantic_sequence,
+                attempt_number,
+            ),
+        )
+        values.update(
+            {
+                "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REQUIREMENTS": shared,
+                "PACKET_TYPE": "requirements",
+                "RUN_ID": str(expected["run_id"]),
+                "TURN_ID": str(expected["turn_id"]),
+                "NONCE": str(expected["nonce"]),
+                "IN_REPLY_TO_DIGEST": str(expected["in_reply_to"]),
+                "PREVIOUS_PACKET_DIGEST_OR_NULL": (
+                    previous_packet_digest if previous_packet_digest is not None else "null"
+                ),
+            }
+        )
+        rendered = render_prompt(template, values)
+        expected["prompt_digest"] = rendered["prompt_digest"]
+        candidate = dict(state)
+        candidate["pending_requirements_expected_header_digest"] = (
+            validate_packet.canonical_digest(expected)
+        )
+        _raise_validation(
+            "INVALID_TRANSITION",
+            "Requirements preparation failed state validation.",
+            validate_packet.validate_transition(
+                state,
+                candidate,
+                requirements_preparation_context=_requirements_preparation_context(
+                    paths,
+                    state,
+                    expected,
+                ),
+            ),
+        )
+        prompt_path = paths.run / "prompts" / f"{expected['turn_id']}-attempt-{attempt_number:02d}.md"
+        expected_path = paths.run / f"expected-attempt-{attempt_number:02d}.json"
+        _commit_artifacts_then_state(
+            paths,
+            [(prompt_path, rendered["prompt"]), (expected_path, expected)],
+            candidate,
+            expected_state_digest=loaded_state_digest,
+        )
+    return {
+        "prompt_path": str(prompt_path),
+        "expected_header_path": str(expected_path),
+        "prompt_digest": expected["prompt_digest"],
+        "nonce": expected["nonce"],
+        "turn_id": expected["turn_id"],
+    }
+
+
+LOCAL_EVIDENCE_FIELDS = {
+    "schema_version",
+    "changed_file_intents",
+    "intent_summary",
+    "acceptance_evidence",
+    "test_commands",
+    "diff_evidence",
+    "omissions",
+    "unresolved_risks_or_blockers",
+}
+LOCAL_EVIDENCE_COMMAND_FIELDS = {"command", "outcome", "output_summary"}
+FORBIDDEN_EVIDENCE_FIELD_NAMES = {
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "session",
+    "session_id",
+    "token",
+}
+
+
+def _require_nonempty_string(value: object, field: str, errors: list[str]) -> None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{field}: must be a non-empty string")
+
+
+def _validate_evidence_strings(value: object, field: str, errors: list[str]) -> None:
+    if not isinstance(value, list):
+        errors.append(f"{field}: must be a list of non-empty strings")
+        return
+    for index, item in enumerate(value):
+        _require_nonempty_string(item, f"{field}.{index}", errors)
+
+
+def _forbidden_evidence_schema_field_names(value: object) -> list[str]:
+    """Reject secret-bearing schema fields without interpreting dynamic map keys."""
+    errors: list[str] = []
+    mappings: list[tuple[str, object]] = [("", value)]
+    if isinstance(value, dict) and isinstance(value.get("test_commands"), list):
+        mappings.extend(
+            (f"test_commands.{index}.", command)
+            for index, command in enumerate(value["test_commands"])
+        )
+    for field, mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        for key in mapping:
+            normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+            if normalized in FORBIDDEN_EVIDENCE_FIELD_NAMES:
+                errors.append(f"{field}{key}: credential or session fields are forbidden")
+    return errors
+
+
+def _load_local_evidence(
+    path: Path, requirements: Mapping[str, object]
+) -> dict[str, object]:
+    evidence = load_json(path)
+    errors: list[str] = []
+    if set(evidence) != LOCAL_EVIDENCE_FIELDS:
+        errors.append("local evidence: contains unknown or missing fields")
+    if type(evidence.get("schema_version")) is not int or evidence.get("schema_version") != SCHEMA_VERSION:
+        errors.append("schema_version: must be 1")
+    errors.extend(_forbidden_evidence_schema_field_names(evidence))
+
+    intents = evidence.get("changed_file_intents")
+    if not isinstance(intents, dict):
+        errors.append("changed_file_intents: must be an object")
+    else:
+        for path_name, intent in intents.items():
+            _require_nonempty_string(path_name, "changed_file_intents path", errors)
+            _require_nonempty_string(intent, f"changed_file_intents.{path_name}", errors)
+    _require_nonempty_string(evidence.get("intent_summary"), "intent_summary", errors)
+
+    acceptance_ids = {
+        item.get("id")
+        for item in requirements.get("acceptance_criteria", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    acceptance_evidence = evidence.get("acceptance_evidence")
+    if not isinstance(acceptance_evidence, dict):
+        errors.append("acceptance_evidence: must be an object")
+    else:
+        for acceptance_id in sorted(acceptance_ids - set(acceptance_evidence)):
+            errors.append(f"acceptance_evidence.{acceptance_id}: missing acceptance evidence")
+        for acceptance_id, entries in acceptance_evidence.items():
+            if acceptance_id not in acceptance_ids:
+                errors.append(f"acceptance_evidence.{acceptance_id}: unknown acceptance ID")
+            if not isinstance(entries, list) or not entries:
+                errors.append(
+                    f"acceptance_evidence.{acceptance_id}: must be a non-empty list of non-empty strings"
+                )
+            else:
+                _validate_evidence_strings(entries, f"acceptance_evidence.{acceptance_id}", errors)
+
+    commands = evidence.get("test_commands")
+    if not isinstance(commands, list):
+        errors.append("test_commands: must be a list")
+    else:
+        for index, command in enumerate(commands):
+            if not isinstance(command, dict) or set(command) != LOCAL_EVIDENCE_COMMAND_FIELDS:
+                errors.append(f"test_commands.{index}: contains unknown or missing fields")
+                continue
+            for key in LOCAL_EVIDENCE_COMMAND_FIELDS:
+                _require_nonempty_string(command.get(key), f"test_commands.{index}.{key}", errors)
+    for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
+        _validate_evidence_strings(evidence.get(field), field, errors)
+    _raise_validation("INVALID_LOCAL_EVIDENCE", "Local evidence is invalid.", sorted(set(errors)))
+    return evidence
+
+
+def _active_requirements(paths: RunPaths, state: Mapping[str, object]) -> dict[str, object]:
+    requirements = load_json(paths.run / "requirements.json")
+    requirements_errors = validate_packet.validate_requirements(requirements)
+    _raise_validation(
+        "INVALID_STATE", "Stored requirements are invalid.", requirements_errors
+    )
+    if validate_packet.canonical_digest(requirements) != state.get("active_requirements_digest"):
+        raise ControllerError("INVALID_STATE", "Stored requirements do not match trusted state.")
+    if requirements.get("requirements_revision") != state.get("active_requirements_revision"):
+        raise ControllerError("INVALID_STATE", "Stored requirements revision does not match trusted state.")
+    return requirements
+
+
+def _capture_snapshot(paths: RunPaths, state: Mapping[str, object]) -> dict[str, object]:
+    try:
+        return capture_snapshot.capture_snapshot(
+            paths.repository, str(state["baseline_head"]), load_json(paths.preflight)
+        )
+    except (capture_snapshot.SnapshotError, KeyError) as exc:
+        raise ControllerError("SNAPSHOT_FAILED", "Could not capture the implementation snapshot.") from exc
+
+
+def _snapshot_changed_file_intents(
+    snapshot: Mapping[str, object], evidence: Mapping[str, object]
+) -> list[dict[str, object]]:
+    discovered = snapshot.get("changed_files")
+    intents = evidence.get("changed_file_intents")
+    if not isinstance(discovered, list) or not isinstance(intents, dict):
+        raise ControllerError("INVALID_LOCAL_EVIDENCE", "Local evidence is invalid.")
+    paths: list[str] = []
+    changed_files: list[dict[str, object]] = []
+    for index, item in enumerate(discovered):
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ControllerError("SNAPSHOT_FAILED", "Captured snapshot has invalid changed files.")
+        path = item["path"]
+        if path in paths:
+            raise ControllerError("SNAPSHOT_FAILED", "Captured snapshot has duplicate changed file paths.")
+        paths.append(path)
+        intent = intents.get(path)
+        if not isinstance(intent, str) or not intent.strip():
+            continue
+        changed_files.append({**item, "intent": intent})
+    if set(intents) != set(paths) or len(changed_files) != len(paths):
+        raise ControllerError(
+            "INVALID_LOCAL_EVIDENCE",
+            "changed_file_intents must match captured changed file paths exactly.",
+        )
+    return changed_files
+
+
+def _advance_report_phase(
+    state: Mapping[str, object],
+) -> tuple[dict[str, object], list[tuple[str, str]]]:
+    current = dict(state)
+    edges: list[tuple[str, str]] = []
+    routes = {
+        "REQUIREMENTS_FROZEN": "IMPLEMENTING",
+        "IMPLEMENTING": "LOCAL_VERIFICATION",
+        "LOCAL_VERIFICATION": "REVIEW_PENDING",
+    }
+    while current.get("phase") in routes:
+        candidate = dict(current)
+        candidate["phase"] = routes[str(current["phase"])]
+        _raise_validation(
+            "INVALID_TRANSITION",
+            "Report construction failed state validation.",
+            validate_packet.validate_transition(current, candidate),
+        )
+        edges.append((str(current["phase"]), str(candidate["phase"])))
+        current = candidate
+    if current.get("phase") != "REVIEW_PENDING":
+        raise ControllerError("INVALID_PHASE", "A report can be built only before review.")
+    return current, edges
+
+
+def _record_events(paths: RunPaths, events: Sequence[Mapping[str, object]]) -> None:
+    """Persist diagnostics only after the authoritative state commit."""
+    content = _read_input(paths.events, "controller events") if paths.events.exists() else ""
+    for event in events:
+        content += _canonical_json_bytes(dict(event)).decode("utf-8")
+    write_text_atomic(paths.events, content)
+
+
+def _record_events_best_effort(
+    paths: RunPaths, events: Sequence[Mapping[str, object]]
+) -> None:
+    try:
+        _record_events(paths, events)
+    except (ControllerError, OSError):
+        pass
+
+
+def build_report(
+    repository: Path,
+    task_slug: str,
+    local_evidence_path: Path,
+) -> dict[str, object]:
+    """Build a snapshot-bound implementation report from closed local evidence."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
+        if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
+            raise ControllerError(
+                "REVIEW_ROUND_LIMIT",
+                "The maximum number of semantic review rounds has been consumed.",
+            )
+        if _outstanding_attempts(paths):
+            raise ControllerError("OUTSTANDING_ATTEMPT", "An attempt is already outstanding.")
+        if state.get("phase") not in {
+            "REQUIREMENTS_FROZEN",
+            "IMPLEMENTING",
+            "LOCAL_VERIFICATION",
+        }:
+            raise ControllerError("INVALID_PHASE", "A report can be built only before review.")
+        requirements = _active_requirements(paths, state)
+        evidence = _load_local_evidence(local_evidence_path, requirements)
+        snapshot = _capture_snapshot(paths, state)
+        changed_files = _snapshot_changed_file_intents(snapshot, evidence)
+        report = {
+            "schema_version": SCHEMA_VERSION,
+            "baseline_head": state["baseline_head"],
+            "requirements_revision": state["active_requirements_revision"],
+            "requirements_digest": state["active_requirements_digest"],
+            "review_round": state["review_round"],
+            "snapshot_digest": snapshot["snapshot_digest"],
+            "tracked_diff_digest": snapshot["tracked_diff_digest"],
+            "untracked_manifest_digest": snapshot["untracked_manifest_digest"],
+            "changed_files": changed_files,
+            "intent_summary": evidence["intent_summary"],
+            "acceptance_evidence": evidence["acceptance_evidence"],
+            "test_commands": evidence["test_commands"],
+            "diff_evidence": evidence["diff_evidence"],
+            "omissions": evidence["omissions"],
+            "unresolved_risks_or_blockers": evidence["unresolved_risks_or_blockers"],
+        }
+        candidate, phase_edges = _advance_report_phase(state)
+        candidate.update(
+            active_report_digest=validate_packet.canonical_digest(report),
+            current_snapshot_digest=snapshot["snapshot_digest"],
+        )
+        context_errors = validate_packet.validate_report_context(
+            report, requirements, candidate, snapshot
+        )
+        _raise_validation(
+            "INVALID_REPORT", "Implementation report failed context validation.", context_errors
+        )
+        report_path = paths.run / "implementation-report.json"
+        snapshot_path = paths.run / "snapshot.json"
+        _commit_artifacts_then_state(
+            paths,
+            [(snapshot_path, snapshot), (report_path, report)],
+            candidate,
+            replaceable_artifacts=frozenset({snapshot_path, report_path}),
+            expected_state_digest=loaded_state_digest,
+        )
+        _record_events_best_effort(
+            paths,
+            [
+                *(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "event": "REPORT_PHASE_ADVANCED",
+                        "from_phase": source,
+                        "to_phase": target,
+                    }
+                    for source, target in phase_edges
+                ),
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "event": "REPORT_BUILT",
+                    "report_digest": candidate["active_report_digest"],
+                    "snapshot_digest": candidate["current_snapshot_digest"],
+                },
+            ],
+        )
+    return {
+        "report_path": str(report_path),
+        "snapshot_path": str(snapshot_path),
+        "report_digest": candidate["active_report_digest"],
+        "snapshot_digest": candidate["current_snapshot_digest"],
+    }
+
+
+def _active_report_context(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    *,
+    prior_reviewed_report: bool = False,
+    allow_final_verification: bool = False,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    requirements = _active_requirements(paths, state)
+    report = load_json(paths.run / "implementation-report.json")
+    snapshot = load_json(paths.run / "snapshot.json")
+    validation_state = dict(state)
+    if allow_final_verification and validation_state.get("phase") == "FINAL_VERIFICATION":
+        validation_state["phase"] = "REVIEW_PENDING"
+    if prior_reviewed_report:
+        report_round = report.get("review_round")
+        current_round = state.get("review_round")
+        if (
+            not isinstance(report_round, int)
+            or isinstance(report_round, bool)
+            or not isinstance(current_round, int)
+            or isinstance(current_round, bool)
+            or current_round != report_round + 1
+        ):
+            raise ControllerError(
+                "INVALID_REPORT",
+                "Evidence-only review requires the report from the immediately prior round.",
+            )
+        validation_state["review_round"] = report_round
+    _raise_validation(
+        "INVALID_REPORT", "Active implementation report failed context validation.",
+        validate_packet.validate_report_context(
+            report, requirements, validation_state, snapshot
+        ),
+    )
+    return requirements, report, snapshot
+
+
+def _require_unchanged_snapshot(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    bound_snapshot: Mapping[str, object],
+) -> None:
+    fresh_snapshot = _capture_snapshot(paths, state)
+    if fresh_snapshot != bound_snapshot:
+        raise ControllerError(
+            "SNAPSHOT_CHANGED",
+            "Review preparation requires an unchanged bound product snapshot.",
+        )
+
+
+def _active_prior_review(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    requirements: dict[str, object],
+    report: dict[str, object],
+) -> dict[str, object]:
+    review = load_json(paths.run / "review.json")
+    _raise_validation(
+        "INVALID_REVIEW",
+        "Persisted prior review payload is invalid.",
+        validate_packet.validate_review(review, requirements, report),
+    )
+    review_digest = validate_packet.canonical_digest(review)
+    if review_digest != state.get("active_review_packet_digest"):
+        raise ControllerError(
+            "INVALID_REVIEW",
+            "Persisted prior review payload does not match trusted state.",
+        )
+    if review.get("reviewed_snapshot_digest") != state.get(
+        "reviewed_snapshot_digest"
+    ):
+        raise ControllerError(
+            "INVALID_REVIEW",
+            "Persisted prior review snapshot does not match trusted state.",
+        )
+    return review
+
+
+def _save_review_attempt_with_state(
+    paths: RunPaths,
+    attempt_number: int,
+    expected: Mapping[str, object],
+    prompt: str,
+    state: dict[str, object],
+    expected_state_digest: str,
+) -> tuple[Path, Path]:
+    turn_id = expected.get("turn_id")
+    if not isinstance(turn_id, str):
+        raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Review attempt is invalid.")
+    prompt_path = paths.run / "prompts" / f"{turn_id}-attempt-{attempt_number:02d}.md"
+    expected_path = paths.run / f"expected-attempt-{attempt_number:02d}.json"
+    _commit_artifacts_then_state(
+        paths,
+        [(prompt_path, prompt), (expected_path, dict(expected))],
+        state,
+        expected_state_digest=expected_state_digest,
+    )
+    return prompt_path, expected_path
+
+
+def prepare_review(
+    repository: Path,
+    task_slug: str,
+    supplemental_evidence_path: Path | None = None,
+) -> dict[str, object]:
+    """Persist a correlated review prompt without using Browser interactions."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
+        if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
+            raise ControllerError(
+                "REVIEW_ROUND_LIMIT",
+                "The maximum number of semantic review rounds has been consumed.",
+            )
+        if _outstanding_attempts(paths):
+            raise ControllerError("OUTSTANDING_ATTEMPT", "A review attempt is already outstanding.")
+        evidence_only = supplemental_evidence_path is not None
+        prior_review: dict[str, object] | None = None
+        if evidence_only:
+            if state.get("phase") != "LOCAL_VERIFICATION" or state.get("required_actions") != ["PROVIDE_EVIDENCE"]:
+                raise ControllerError("INVALID_PHASE", "Evidence-only review requires only PROVIDE_EVIDENCE.")
+            supplemental = _read_input(supplemental_evidence_path, "supplemental evidence")
+            if not supplemental.strip():
+                raise ControllerError("INVALID_SUPPLEMENTAL_EVIDENCE", "Supplemental evidence must not be empty.")
+            candidate = dict(state)
+            candidate["phase"] = "REVIEW_PENDING"
+            requirements, report, snapshot = _active_report_context(
+                paths, candidate, prior_reviewed_report=True
+            )
+            prior_review = _active_prior_review(
+                paths, state, requirements, report
+            )
+            _raise_validation(
+                "INVALID_TRANSITION",
+                "Evidence-only review failed state validation.",
+                validate_packet.validate_transition(state, candidate),
+            )
+            template = load_template(_prompt_contract_path(), "Evidence-only supplementation")
+            values: dict[str, str | Template] = {
+                "SNAPSHOT_DIGEST": str(snapshot["snapshot_digest"]),
+                "REQUIREMENTS_JSON": _canonical_prompt_json(requirements),
+                "PRIOR_REVIEW_JSON": _canonical_prompt_json(prior_review),
+                "SUPPLEMENTAL_EVIDENCE": supplemental,
+            }
+        else:
+            if state.get("phase") != "REVIEW_PENDING":
+                raise ControllerError("INVALID_PHASE", "Review can be prepared only when pending.")
+            requirements, report, snapshot = _active_report_context(paths, state)
+            candidate = dict(state)
+            template = load_template(_prompt_contract_path(), "Implementation review")
+            values = {
+                "REQUIREMENTS_JSON": _canonical_prompt_json(requirements),
+                "REQUIREMENTS_DIGEST": str(state["active_requirements_digest"]),
+                "IMPLEMENTATION_REPORT_JSON": _canonical_prompt_json(report),
+                "SNAPSHOT_DIGEST": str(snapshot["snapshot_digest"]),
+            }
+        _require_unchanged_snapshot(paths, state, snapshot)
+        shared = load_template(_prompt_contract_path(), "Shared envelope instruction")
+        attempt_number = _attempt_number(paths)
+        semantic_sequence = int(state["review_round"]) + 1
+        previous_packet_digest = state.get("last_consumed_packet_digest")
+        if not isinstance(previous_packet_digest, str):
+            raise ControllerError("INVALID_STATE", "Review requires a trusted packet-chain head.")
+        source_digest = validate_packet.canonical_digest(
+            {
+                "requirements_digest": state["active_requirements_digest"],
+                "report_digest": state["active_report_digest"],
+                "snapshot_digest": snapshot["snapshot_digest"],
+                "prior_review_digest": (
+                    state["active_review_packet_digest"] if evidence_only else None
+                ),
+                "supplemental_evidence": _normalize_text(supplemental) if evidence_only else None,
+            }
+        )
+        expected = _expected_header(
+            task_slug,
+            "review",
+            semantic_sequence,
+            source_digest,
+            previous_packet_digest,
+            _derive_attempt_nonce(
+                state, task_slug, "review", semantic_sequence, attempt_number
+            ),
+        )
+        values.update(
+            {
+                "SHARED_ENVELOPE_INSTRUCTION_WITH_PACKET_TYPE_REVIEW": shared,
+                "PACKET_TYPE": "review",
+                "RUN_ID": str(expected["run_id"]),
+                "TURN_ID": str(expected["turn_id"]),
+                "NONCE": str(expected["nonce"]),
+                "IN_REPLY_TO_DIGEST": str(expected["in_reply_to"]),
+                "PREVIOUS_PACKET_DIGEST_OR_NULL": previous_packet_digest,
+            }
+        )
+        rendered = render_prompt(template, values)
+        expected["prompt_digest"] = rendered["prompt_digest"]
+        candidate["pending_review_expected_header_digest"] = (
+            validate_packet.canonical_digest(expected)
+        )
+        prompt_path, expected_path = _save_review_attempt_with_state(
+            paths,
+            attempt_number,
+            expected,
+            rendered["prompt"],
+            candidate,
+            loaded_state_digest,
+        )
+    return {
+        "prompt_path": str(prompt_path),
+        "expected_header_path": str(expected_path),
+        "prompt_digest": expected["prompt_digest"],
+        "nonce": expected["nonce"],
+        "turn_id": expected["turn_id"],
+    }
+
+
+REQUIREMENTS_TARGETS = {
+    "PLAN_READY": "REQUIREMENTS_FROZEN",
+    "NEED_USER_INPUT": "USER_DECISION_REQUIRED",
+    "BLOCK": "BLOCKED",
+}
+
+
+def observed_browser_errors(
+    state: Mapping[str, object],
+    observed_url: str,
+    observed_model_label: str,
+    allow_initial_binding: bool,
+) -> list[str]:
+    """Return deterministic identity-policy errors for an observed conversation."""
+    errors: list[str] = []
+    if not isinstance(observed_url, str) or not observed_url:
+        errors.append("conversation URL is missing")
+    if not isinstance(observed_model_label, str) or not observed_model_label:
+        errors.append("model label is missing")
+    policy = state.get("model_policy")
+    requested = state.get("requested_model_label")
+    required_label = "Pro" if policy == "PRO_CLASS" else requested
+    if not isinstance(required_label, str) or observed_model_label != required_label:
+        errors.append("observed model does not satisfy the requested model policy")
+
+    bound_url = state.get("bound_conversation_url")
+    bound_label = state.get("visible_model_label")
+    if state.get("conversation_binding_state") == "CONVERSATION_BOUND":
+        if observed_url != bound_url:
+            errors.append("observed conversation URL does not match the bound conversation")
+        if observed_model_label != bound_label:
+            errors.append("observed model does not match the bound model")
+    elif allow_initial_binding:
+        parsed = urlparse(observed_url) if isinstance(observed_url, str) else None
+        if (
+            parsed is None
+            or parsed.scheme != "https"
+            or parsed.netloc != "chatgpt.com"
+            or not parsed.path.startswith("/c/")
+            or parsed.path == "/c/"
+        ):
+            errors.append("initial conversation URL must be an HTTPS chatgpt.com/c/ URL")
+    else:
+        errors.append("conversation is not bound")
+    return errors
+
+
+def consumed_chain_heads(state: Mapping[str, object]) -> set[str]:
+    """Return only packet identities explicitly consumed by trusted state."""
+    return {
+        value
+        for value in (
+            state.get("last_consumed_packet_digest"),
+            state.get("last_consumed_review_envelope_digest"),
+        )
+        if isinstance(value, str)
+    }
+
+
+def _requirements_context(
+    envelope: dict[str, object],
+    expected: dict[str, object],
+    consumed: set[str],
+    requirements: dict[str, object],
+    approval_receipt: str | None = None,
+) -> dict[str, object]:
+    return {
+        "envelope": envelope,
+        "expected": expected,
+        "consumed_digests": sorted(consumed),
+        "requirements": requirements,
+        "approval_receipt": approval_receipt,
+    }
+
+
+def _raise_validation(code: str, message: str, errors: Sequence[str]) -> None:
+    if errors:
+        raise ControllerError(code, message, errors)
+
+
+def _requirements_revision_path(paths: RunPaths, revision: int) -> Path:
+    return paths.run / f"requirements-revision-{revision:02d}.json"
+
+
+def _run_relative_path(paths: RunPaths, path: Path) -> str:
+    resolved = Path(path).resolve(strict=False)
+    run = paths.run.resolve(strict=False)
+    if not _is_contained(resolved, run) or resolved == run:
+        raise ControllerError("UNSAFE_ARTIFACT_PATH", "Controller artifact path escapes the run directory.")
+    return resolved.relative_to(run).as_posix()
+
+
+def _manifest_run_path(paths: RunPaths, value: object) -> Path:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise ControllerError("INVALID_TRANSACTION", "Transaction contains an invalid run path.")
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or ".." in relative.parts or "." in relative.parts:
+        raise ControllerError("INVALID_TRANSACTION", "Transaction contains an unsafe run path.")
+    resolved = Path(paths.run, *relative.parts).resolve(strict=False)
+    if not _is_contained(resolved, paths.run.resolve(strict=False)):
+        raise ControllerError("INVALID_TRANSACTION", "Transaction run path escapes the run directory.")
+    return resolved
+
+
+def _transaction_file(transaction: Path, value: object) -> Path:
+    if (
+        not isinstance(value, str)
+        or PurePosixPath(value).name != value
+        or not re.fullmatch(r"(?:artifact|backup)-[0-9]{2}\.bin|state\.next", value)
+    ):
+        raise ControllerError("INVALID_TRANSACTION", "Transaction contains an invalid staged path.")
+    return transaction / value
+
+
+def _file_digest(path: Path) -> str:
+    try:
+        return sha256_bytes(path.read_bytes())
+    except OSError as exc:
+        raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not read transaction artifact.") from exc
+
+
+def _cleanup_transaction_files(transaction: Path, allowed: set[str]) -> None:
+    try:
+        present = list(transaction.iterdir())
+    except OSError as exc:
+        raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not inspect transaction.") from exc
+    unexpected = [path.name for path in present if not path.is_file() or path.name not in allowed]
+    if unexpected:
+        raise ControllerError(
+            "INVALID_TRANSACTION",
+            "Transaction contains unexpected recovery artifacts.",
+            unexpected,
+        )
+    try:
+        manifest_path = transaction / "manifest.json"
+        for path in sorted(
+            (path for path in present if path != manifest_path),
+            key=lambda path: path.name,
+        ):
+            path.unlink()
+        if manifest_path in present:
+            manifest_path.unlink()
+        transaction.rmdir()
+    except OSError as exc:
+        raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not clean transaction.") from exc
+
+
+def _recover_transaction(paths: RunPaths, transaction: Path) -> None:
+    manifest_path = transaction / "manifest.json"
+    if not manifest_path.is_file():
+        _cleanup_transaction_files(
+            transaction,
+            {
+                path.name
+                for path in transaction.iterdir()
+                if path.is_file()
+                and re.fullmatch(r"artifact-[0-9]{2}\.bin|state\.next", path.name)
+            },
+        )
+        return
+    manifest = load_json(manifest_path)
+    if set(manifest) != {
+        "schema_version",
+        "operations",
+        "attempt_rename",
+        "old_state_digest",
+        "new_state_digest",
+    } or manifest.get("schema_version") != SCHEMA_VERSION:
+        raise ControllerError("INVALID_TRANSACTION", "Transaction recovery manifest is invalid.")
+    operations = manifest.get("operations")
+    if not isinstance(operations, list):
+        raise ControllerError("INVALID_TRANSACTION", "Transaction operations are invalid.")
+    parsed: list[tuple[Path, Path, Path | None, str, str | None]] = []
+    allowed = {"manifest.json", "state.next"}
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict) or set(operation) != {
+            "destination",
+            "stage",
+            "backup",
+            "new_digest",
+            "old_digest",
+        }:
+            raise ControllerError("INVALID_TRANSACTION", "Transaction operation is invalid.")
+        destination = _manifest_run_path(paths, operation["destination"])
+        stage = _transaction_file(transaction, operation["stage"])
+        backup_value = operation["backup"]
+        backup = None if backup_value is None else _transaction_file(transaction, backup_value)
+        new_digest = operation["new_digest"]
+        old_digest = operation["old_digest"]
+        if not isinstance(new_digest, str) or DIGEST.fullmatch(new_digest) is None:
+            raise ControllerError("INVALID_TRANSACTION", "Transaction new digest is invalid.")
+        if old_digest is not None and (
+            not isinstance(old_digest, str) or DIGEST.fullmatch(old_digest) is None
+        ):
+            raise ControllerError("INVALID_TRANSACTION", "Transaction old digest is invalid.")
+        if (backup is None) != (old_digest is None):
+            raise ControllerError("INVALID_TRANSACTION", "Transaction backup provenance is invalid.")
+        allowed.add(stage.name)
+        if backup is not None:
+            allowed.add(backup.name)
+        parsed.append((destination, stage, backup, new_digest, old_digest))
+
+    attempt = manifest.get("attempt_rename")
+    attempt_paths: tuple[Path, Path, str] | None = None
+    if attempt is not None:
+        if not isinstance(attempt, dict) or set(attempt) != {"source", "destination", "digest"}:
+            raise ControllerError("INVALID_TRANSACTION", "Attempt rename is invalid.")
+        attempt_digest = attempt["digest"]
+        if not isinstance(attempt_digest, str) or DIGEST.fullmatch(attempt_digest) is None:
+            raise ControllerError("INVALID_TRANSACTION", "Attempt rename digest is invalid.")
+        attempt_paths = (
+            _manifest_run_path(paths, attempt["source"]),
+            _manifest_run_path(paths, attempt["destination"]),
+            attempt_digest,
+        )
+    old_state_digest = manifest.get("old_state_digest")
+    new_state_digest = manifest.get("new_state_digest")
+    if any(
+        not isinstance(value, str) or DIGEST.fullmatch(value) is None
+        for value in (old_state_digest, new_state_digest)
+    ):
+        raise ControllerError("INVALID_TRANSACTION", "Transaction state digests are invalid.")
+    state_digest = _file_digest(paths.state)
+    if state_digest == new_state_digest:
+        for destination, _, _, new_digest, _ in parsed:
+            if not destination.is_file() or _file_digest(destination) != new_digest:
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Committed transaction is missing a published artifact.",
+                )
+        if attempt_paths is not None:
+            source, destination, attempt_digest = attempt_paths
+            if (
+                source.exists()
+                or not destination.is_file()
+                or _file_digest(destination) != attempt_digest
+            ):
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Committed transaction has an incomplete attempt rename.",
+                )
+        _cleanup_transaction_files(transaction, allowed)
+        return
+    if state_digest != old_state_digest:
+        raise ControllerError(
+            "TRANSACTION_RECOVERY_FAILED",
+            "Transaction state matches neither committed nor rollback provenance.",
+        )
+
+    if attempt_paths is not None:
+        source, destination, attempt_digest = attempt_paths
+        if destination.exists() and not source.exists():
+            if _file_digest(destination) != attempt_digest:
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Foreign-modified attempt blocks transaction rollback.",
+                )
+            os.replace(destination, source)
+        elif destination.exists() and source.exists():
+            raise ControllerError(
+                "TRANSACTION_RECOVERY_FAILED", "Attempt rename has two live copies."
+            )
+        elif not source.exists():
+            raise ControllerError(
+                "TRANSACTION_RECOVERY_FAILED",
+                "Attempt rename provenance is missing.",
+            )
+    for destination, stage, backup, new_digest, old_digest in reversed(parsed):
+        if backup is None:
+            if stage.exists() and not destination.exists():
+                continue
+            if not destination.exists() or _file_digest(destination) != new_digest:
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Unowned artifact blocks transaction rollback.",
+                )
+            destination.unlink()
+            continue
+        if backup.exists():
+            if not destination.exists() or _file_digest(destination) != new_digest:
+                raise ControllerError(
+                    "TRANSACTION_RECOVERY_FAILED",
+                    "Replaceable artifact changed during transaction rollback.",
+                )
+            destination.unlink()
+            os.replace(backup, destination)
+        if not destination.is_file() or _file_digest(destination) != old_digest:
+            raise ControllerError(
+                "TRANSACTION_RECOVERY_FAILED",
+                "Replaceable artifact backup could not be restored.",
+            )
+    _cleanup_transaction_files(transaction, allowed)
+
+
+def _reconcile_incomplete_transactions(paths: RunPaths) -> None:
+    if not paths.transactions.is_dir():
+        return
+    for transaction in sorted(paths.transactions.iterdir()):
+        if transaction.is_dir() and transaction.name.startswith("consume-"):
+            _recover_transaction(paths, transaction)
+
+
+def _require_manual_recovery(paths: RunPaths) -> None:
+    """Keep interrupted transactions visible; normal commands never repair them."""
+    transactions = _orphan_transaction_paths(paths)
+    if transactions:
+        raise ControllerError(
+            "RECOVERY_REQUIRED",
+            "Manual recovery is required: inspect interrupted transactions and escalate before mutation.",
+            _recovery_details(paths, transactions),
+        )
+
+
+def _orphan_transaction_paths(paths: RunPaths) -> list[Path]:
+    if not paths.transactions.is_dir():
+        return []
+    return sorted(
+        (path for path in paths.transactions.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+    )
+
+
+def _recovery_details(paths: RunPaths, transactions: Sequence[Path]) -> list[str]:
+    return [
+        *(f"transaction_path:{path}" for path in transactions),
+        (
+            "status_command:python skills/gpt-pro-codex-loop/scripts/gpc_loop.py "
+            f"status --repo {paths.repository} --task {paths.task_slug}"
+        ),
+        (
+            "validator_command:python skills/gpt-pro-codex-loop/scripts/validate_packet.py "
+            "transition PREVIOUS_STATE.json CURRENT_STATE.json --requirements-context REQUIREMENTS_CONTEXT.json"
+        ),
+        "preserve_artifacts:true",
+        "user_escalation_required:true",
+    ]
+
+
+def _require_state_digest(paths: RunPaths, expected: str) -> None:
+    if _file_digest(paths.state) != expected:
+        raise ControllerError(
+            "STATE_CHANGED",
+            "Trusted state changed while this command was running.",
+        )
+
+
+def _rollback_uncommitted_transaction(paths: RunPaths, transaction: Path) -> None:
+    """Undo only this command's published artifacts after an external state race."""
+    manifest = load_json(transaction / "manifest.json")
+    operations = manifest.get("operations")
+    if not isinstance(operations, list):
+        raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not roll back transaction artifacts.")
+    attempt = manifest.get("attempt_rename")
+    if isinstance(attempt, dict):
+        source = _manifest_run_path(paths, attempt.get("source"))
+        destination = _manifest_run_path(paths, attempt.get("destination"))
+        attempt_digest = attempt.get("digest")
+        if (
+            destination.exists()
+            and not source.exists()
+            and isinstance(attempt_digest, str)
+            and _file_digest(destination) == attempt_digest
+        ):
+            os.replace(destination, source)
+        elif destination.exists() or not source.exists():
+            raise ControllerError(
+                "RECOVERY_REQUIRED",
+                "Manual recovery is required because a foreign-modified attempt blocks safe rollback.",
+                [str(transaction)],
+            )
+    for operation in reversed(operations):
+        if not isinstance(operation, dict):
+            raise ControllerError("TRANSACTION_RECOVERY_FAILED", "Could not roll back transaction artifacts.")
+        destination = _manifest_run_path(paths, operation.get("destination"))
+        backup_name = operation.get("backup")
+        if backup_name is None:
+            if destination.exists() and _file_digest(destination) == operation.get("new_digest"):
+                destination.unlink()
+            else:
+                raise ControllerError(
+                    "RECOVERY_REQUIRED",
+                    "Manual recovery is required because a foreign-modified artifact blocks safe rollback.",
+                    [str(transaction), str(destination)],
+                )
+            continue
+        backup = _transaction_file(transaction, backup_name)
+        if backup.exists():
+            if (
+                not destination.exists()
+                or _file_digest(destination) != operation.get("new_digest")
+            ):
+                raise ControllerError(
+                    "RECOVERY_REQUIRED",
+                    "Manual recovery is required because a foreign-modified artifact blocks safe rollback.",
+                    [str(transaction), str(destination)],
+                )
+            destination.unlink()
+            os.replace(backup, destination)
+    _cleanup_transaction_files(
+        transaction,
+        {path.name for path in transaction.iterdir() if path.is_file()},
+    )
+
+
+def _commit_artifacts_then_state(
+    paths: RunPaths,
+    artifacts: Sequence[tuple[Path, str | dict[str, object]]],
+    state: dict[str, object],
+    consumed_attempt: Path | None = None,
+    replaceable_artifacts: frozenset[Path] = frozenset(),
+    *,
+    expected_state_digest: str,
+) -> None:
+    """Publish a recoverable artifact transaction with trusted state last."""
+    if not isinstance(expected_state_digest, str) or DIGEST.fullmatch(expected_state_digest) is None:
+        raise ControllerError("INVALID_STATE_DIGEST", "Loaded state digest is invalid.")
+    transaction = paths.transactions / f"consume-{os.getpid()}-{time.time_ns()}"
+    transaction.mkdir()
+    operations: list[dict[str, object]] = []
+    publication_started = False
+    try:
+        for index, (destination, value) in enumerate(artifacts):
+            destination_relative = _run_relative_path(paths, destination)
+            if destination.exists() and destination not in replaceable_artifacts:
+                raise ControllerError("ARTIFACT_EXISTS", "Controller artifact already exists.")
+            destination.parent.mkdir(exist_ok=True)
+            stage = transaction / f"artifact-{index:02d}.bin"
+            if isinstance(value, str):
+                write_text_atomic(stage, value)
+            else:
+                write_json_atomic(stage, value)
+            existed = destination.is_file()
+            backup = f"backup-{index:02d}.bin" if existed else None
+            operations.append(
+                {
+                    "destination": destination_relative,
+                    "stage": stage.name,
+                    "backup": backup,
+                    "new_digest": _file_digest(stage),
+                    "old_digest": _file_digest(destination) if existed else None,
+                }
+            )
+        state_stage = transaction / "state.next"
+        write_json_atomic(state_stage, state)
+        attempt_rename = None
+        if consumed_attempt is not None:
+            source_relative = _run_relative_path(paths, consumed_attempt)
+            consumed_name = consumed_attempt.name.replace("expected-", "consumed-")
+            consumed_destination = paths.run / consumed_name
+            destination_relative = _run_relative_path(paths, consumed_destination)
+            if consumed_destination.exists():
+                raise ControllerError("ARTIFACT_EXISTS", "Consumed attempt receipt already exists.")
+            attempt_rename = {
+                "source": source_relative,
+                "destination": destination_relative,
+                "digest": _file_digest(consumed_attempt),
+            }
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "operations": operations,
+            "attempt_rename": attempt_rename,
+            "old_state_digest": expected_state_digest,
+            "new_state_digest": _file_digest(state_stage),
+        }
+        write_json_atomic(transaction / "manifest.json", manifest)
+        _require_state_digest(paths, expected_state_digest)
+        publication_started = True
+        for operation in operations:
+            destination = _manifest_run_path(paths, operation["destination"])
+            stage = _transaction_file(transaction, operation["stage"])
+            if operation["backup"] is not None:
+                backup = _transaction_file(transaction, operation["backup"])
+                os.replace(destination, backup)
+            os.replace(stage, destination)
+        if attempt_rename is not None:
+            os.replace(
+                _manifest_run_path(paths, attempt_rename["source"]),
+                _manifest_run_path(paths, attempt_rename["destination"]),
+            )
+        _require_state_digest(paths, expected_state_digest)
+        os.replace(state_stage, paths.state)
+    except OSError as exc:
+        _recover_transaction(paths, transaction)
+        raise ControllerError("WRITE_FAILED", "Could not commit controller acceptance artifacts.") from exc
+    except ControllerError as exc:
+        if exc.code == "STATE_CHANGED":
+            if publication_started:
+                _rollback_uncommitted_transaction(paths, transaction)
+            else:
+                _cleanup_transaction_files(
+                    transaction,
+                    {path.name for path in transaction.iterdir() if path.is_file()},
+                )
+        else:
+            _recover_transaction(paths, transaction)
+        raise
+    _recover_transaction(paths, transaction)
+
+
+def accept_requirements(
+    repository: Path,
+    task_slug: str,
+    raw_response_path: Path,
+    observed_conversation_url: str,
+    observed_model_label: str,
+) -> dict[str, object]:
+    """Validate, consume, and route one correlated requirements response."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
+        if state.get("phase") != "REQUIREMENTS_PENDING":
+            raise ControllerError("INVALID_PHASE", "Requirements can be accepted only when pending.")
+        browser_errors = observed_browser_errors(
+            state,
+            observed_conversation_url,
+            observed_model_label,
+            allow_initial_binding=True,
+        )
+        _raise_validation(
+            "BROWSER_IDENTITY_MISMATCH",
+            "Observed browser or model identity is invalid.",
+            browser_errors,
+        )
+        attempts = _outstanding_attempts(paths)
+        if len(attempts) != 1:
+            raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
+        expected_path = paths.run / str(attempts[0]["name"])
+        expected = attempts[0]["expected_header"]
+        attempt_match = ATTEMPT_NAME.fullmatch(expected_path.name)
+        if attempt_match is None:
+            raise ControllerError(
+                "INVALID_EXPECTED_ATTEMPT",
+                "Outstanding requirements attempt name is invalid.",
+            )
+        active_revision = state.get("active_requirements_revision")
+        semantic_sequence = (
+            1
+            if active_revision is None
+            else active_revision + 1
+            if isinstance(active_revision, int) and not isinstance(active_revision, bool)
+            else -1
+        )
+        if not _valid_expected_header(
+            expected,
+            task_slug=task_slug,
+            packet_type="requirements",
+            semantic_sequence=semantic_sequence,
+            expected_nonce=_derive_attempt_nonce(
+                state,
+                task_slug,
+                "requirements",
+                semantic_sequence,
+                int(attempt_match.group(1)),
+            ),
+        ):
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding requirements attempt is invalid.")
+        if (
+            validate_packet.canonical_digest(expected)
+            != state.get("pending_requirements_expected_header_digest")
+        ):
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding requirements attempt is invalid.")
+        raw = _read_input(raw_response_path, "requirements response")
+        try:
+            envelope = validate_packet.extract_single_json_object(raw)
+        except ValueError as exc:
+            raise ControllerError("INVALID_RESPONSE", "Requirements response is not one strict JSON envelope.") from exc
+        transport_errors = validate_packet.validate_transport_envelope(
+            envelope, expected, consumed_chain_heads(state)
+        )
+        _raise_validation("INVALID_RESPONSE", "Requirements response envelope is invalid.", transport_errors)
+        requirements = envelope.get("payload")
+        if not isinstance(requirements, dict):
+            raise ControllerError("INVALID_RESPONSE", "Requirements response payload is invalid.")
+        previous_requirements = None
+        if state.get("active_requirements_digest") is not None:
+            previous_requirements = load_json(paths.run / "requirements.json")
+        requirements_errors = validate_packet.validate_requirements(
+            requirements, previous_requirements
+        )
+        _raise_validation("INVALID_RESPONSE", "Requirements response payload is invalid.", requirements_errors)
+        decision = requirements["decision"]
+        target = REQUIREMENTS_TARGETS.get(decision)
+        if target is None:
+            raise ControllerError("INVALID_RESPONSE", "Requirements response has an invalid decision.")
+
+        envelope_digest = validate_packet.canonical_digest(envelope)
+        requirements_digest = validate_packet.canonical_digest(requirements)
+        staged_previous = dict(state)
+        staged_previous["pending_requirements_envelope_digest"] = envelope_digest
+        is_revision = state.get("active_requirements_digest") is not None
+        if is_revision or decision == "NEED_USER_INPUT":
+            staged_previous.update(
+                pending_requirements_revision=requirements["requirements_revision"],
+                pending_requirements_digest=requirements_digest,
+                pending_supersedes_digest=requirements["supersedes_digest"],
+                **{
+                    field: requirements[field]
+                    for field in validate_packet.MATERIAL_REVISION_FLAGS
+                },
+            )
+        candidate = dict(staged_previous)
+        candidate.update(
+            phase=target,
+            latest_requirements_decision=decision,
+            pending_requirements_envelope_digest=None,
+            pending_requirements_expected_header_digest=None,
+            last_consumed_packet_digest=envelope_digest,
+        )
+        if state.get("conversation_binding_state") == "CONVERSATION_UNBOUND":
+            candidate.update(
+                conversation_binding_state="CONVERSATION_BOUND",
+                bound_conversation_url=observed_conversation_url,
+                visible_model_label=observed_model_label,
+            )
+            staged_previous.update(
+                conversation_binding_state="CONVERSATION_BOUND",
+                bound_conversation_url=observed_conversation_url,
+                visible_model_label=observed_model_label,
+            )
+        if target in {"USER_DECISION_REQUIRED", "BLOCKED"}:
+            candidate.update(
+                stop_origin_phase="REQUIREMENTS_PENDING",
+                stop_origin_category=(
+                    "REQUIREMENTS_NEED_USER_INPUT"
+                    if decision == "NEED_USER_INPUT"
+                    else "REQUIREMENTS_BLOCK"
+                ),
+                stop_reason=requirements["change_reason"],
+                stop_sequence=state["stop_sequence"] + 1,
+            )
+        if target == "BLOCKED" and is_revision:
+            candidate.update(
+                pending_requirements_revision=None,
+                pending_requirements_digest=None,
+                pending_supersedes_digest=None,
+                pending_approval_sequence=None,
+                pending_approved_requirements_digest=None,
+                pending_user_approval_evidence=None,
+                **{field: False for field in validate_packet.MATERIAL_REVISION_FLAGS},
+            )
+        if target == "REQUIREMENTS_FROZEN":
+            candidate.update(
+                active_requirements_revision=requirements["requirements_revision"],
+                active_requirements_digest=requirements_digest,
+                pending_requirements_revision=None,
+                pending_requirements_digest=None,
+                pending_supersedes_digest=None,
+                pending_approval_sequence=None,
+                pending_approved_requirements_digest=None,
+                pending_user_approval_evidence=None,
+                **{field: False for field in validate_packet.MATERIAL_REVISION_FLAGS},
+            )
+        context = _requirements_context(
+            envelope, expected, consumed_chain_heads(state), requirements
+        )
+        transition_errors = validate_packet.validate_transition(
+            staged_previous, candidate, requirements_context=context
+        )
+        _raise_validation("INVALID_TRANSITION", "Requirements acceptance failed state validation.", transition_errors)
+        revision = requirements["requirements_revision"]
+        trusted_turn_id = f"requirements-{semantic_sequence:02d}"
+        artifacts: list[tuple[Path, str | dict[str, object]]] = [
+            (paths.run / "responses" / f"{trusted_turn_id}.raw.md", raw),
+            (paths.run / f"envelope-{revision:02d}.json", envelope),
+            (_requirements_revision_path(paths, revision), requirements),
+        ]
+        if target == "REQUIREMENTS_FROZEN":
+            artifacts.append((paths.run / "requirements.json", requirements))
+        _commit_artifacts_then_state(
+            paths,
+            artifacts,
+            candidate,
+            expected_path,
+            frozenset({paths.run / "requirements.json"})
+            if target == "REQUIREMENTS_FROZEN"
+            else frozenset(),
+            expected_state_digest=loaded_state_digest,
+        )
+        _record_events_best_effort(paths, [{
+            "schema_version": SCHEMA_VERSION,
+            "event": "REQUIREMENTS_ACCEPTED",
+            "requirements_digest": requirements_digest,
+            "envelope_digest": envelope_digest,
+            "decision": decision,
+            "target_phase": target,
+        }])
+    return status_run(paths.repository, task_slug)
+
+
+def review_target(decision: str, actions: Sequence[str]) -> str:
+    """Route a validated review decision without authorizing extra work."""
+    action_set = set(actions)
+    if decision == "PASS":
+        return "FINAL_VERIFICATION"
+    if decision == "BLOCK" or "USER_DECISION" in action_set:
+        return "USER_DECISION_REQUIRED"
+    if "REQUIREMENTS_REVISION" in action_set:
+        return "REQUIREMENTS_PENDING"
+    if action_set & {"CODE_CHANGE", "TEST_CHANGE"}:
+        return "IMPLEMENTING"
+    if action_set == {"PROVIDE_EVIDENCE"}:
+        return "LOCAL_VERIFICATION"
+    raise ControllerError("INVALID_REVIEW_ROUTE", "Review has no valid route.")
+
+
+def _review_context(
+    envelope: dict[str, object],
+    expected: dict[str, object],
+    consumed: set[str],
+    requirements: dict[str, object],
+    report: dict[str, object],
+    snapshot: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "envelope": envelope,
+        "expected": expected,
+        "consumed_digests": sorted(consumed),
+        "requirements": requirements,
+        "report": report,
+        "snapshot": snapshot,
+    }
+
+
+def _review_stop_provenance(
+    state: Mapping[str, object],
+    decision: str,
+    actions: Sequence[str],
+    reason: object,
+) -> dict[str, object]:
+    if decision != "BLOCK" and "USER_DECISION" not in set(actions):
+        return {}
+    if not isinstance(reason, str) or not reason.strip():
+        raise ControllerError("INVALID_RESPONSE", "Review stop requires a non-empty instruction.")
+    return {
+        "stop_origin_phase": "REVIEW_PENDING",
+        "stop_origin_category": (
+            "REVIEW_BLOCK" if decision == "BLOCK" else "REVIEW_USER_DECISION"
+        ),
+        "stop_reason": reason,
+        "stop_sequence": state["stop_sequence"] + 1,
+    }
+
+
+def _terminal_review_stop_provenance(
+    state: Mapping[str, object],
+    category: str | None,
+) -> dict[str, object]:
+    if category is None:
+        return {}
+    reasons = {
+        "REVIEW_REPEATED_BLOCKER": (
+            "A blocker persisted across two consecutive valid review rounds."
+        ),
+        "REVIEW_ROUND_LIMIT": (
+            "The maximum number of semantic review rounds was consumed."
+        ),
+    }
+    return {
+        "stop_origin_phase": "REVIEW_PENDING",
+        "stop_origin_category": category,
+        "stop_reason": reasons[category],
+        "stop_sequence": state["stop_sequence"] + 1,
+    }
+
+
+def _is_evidence_only_review(
+    paths: RunPaths,
+    state: Mapping[str, object],
+) -> bool:
+    review_round = state.get("review_round")
+    if (
+        not isinstance(review_round, int)
+        or isinstance(review_round, bool)
+        or review_round < 1
+        or state.get("latest_decision") != "CHANGES_REQUESTED"
+        or state.get("required_actions") != ["PROVIDE_EVIDENCE"]
+        or not isinstance(state.get("active_review_packet_digest"), str)
+    ):
+        return False
+    report = load_json(paths.run / "implementation-report.json")
+    return (
+        report.get("review_round") == review_round - 1
+        and validate_packet.canonical_digest(report)
+        == state.get("active_report_digest")
+    )
+
+
+def accept_review(
+    repository: Path,
+    task_slug: str,
+    raw_response_path: Path,
+    observed_conversation_url: str,
+    observed_model_label: str,
+) -> dict[str, object]:
+    """Validate, consume, and deterministically route one review response."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
+        if state.get("phase") != "REVIEW_PENDING":
+            raise ControllerError("INVALID_PHASE", "Review can be accepted only when pending.")
+        _raise_validation(
+            "BROWSER_IDENTITY_MISMATCH",
+            "Observed browser or model identity is invalid.",
+            observed_browser_errors(
+                state,
+                observed_conversation_url,
+                observed_model_label,
+                allow_initial_binding=False,
+            ),
+        )
+        attempts = _outstanding_attempts(paths)
+        if len(attempts) != 1:
+            raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
+        expected_path = paths.run / str(attempts[0]["name"])
+        expected = attempts[0]["expected_header"]
+        match = ATTEMPT_NAME.fullmatch(expected_path.name)
+        review_round = state.get("review_round")
+        if (
+            match is None
+            or not isinstance(review_round, int)
+            or isinstance(review_round, bool)
+            or not _valid_expected_header(
+                expected,
+                task_slug=task_slug,
+                packet_type="review",
+                semantic_sequence=review_round + 1,
+                expected_nonce=_derive_attempt_nonce(
+                    state,
+                    task_slug,
+                    "review",
+                    review_round + 1,
+                    int(match.group(1)) if match is not None else -1,
+                ),
+            )
+        ):
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding review attempt is invalid.")
+        if (
+            validate_packet.canonical_digest(expected)
+            != state.get("pending_review_expected_header_digest")
+        ):
+            raise ControllerError(
+                "INVALID_EXPECTED_ATTEMPT",
+                "Outstanding review attempt is invalid.",
+            )
+        raw = _read_input(raw_response_path, "review response")
+        try:
+            envelope = validate_packet.extract_single_json_object(raw)
+        except ValueError as exc:
+            raise ControllerError("INVALID_RESPONSE", "Review response is not one strict JSON envelope.") from exc
+        consumed = consumed_chain_heads(state)
+        _raise_validation(
+            "INVALID_RESPONSE",
+            "Review response envelope is invalid.",
+            validate_packet.validate_transport_envelope(envelope, expected, consumed),
+        )
+        review = envelope.get("payload")
+        if not isinstance(review, dict):
+            raise ControllerError("INVALID_RESPONSE", "Review response payload is invalid.")
+        evidence_only = _is_evidence_only_review(paths, state)
+        requirements, report, snapshot = _active_report_context(
+            paths,
+            state,
+            prior_reviewed_report=evidence_only,
+        )
+        if evidence_only:
+            _active_prior_review(paths, state, requirements, report)
+        _raise_validation(
+            "INVALID_RESPONSE",
+            "Review response payload is invalid.",
+            validate_packet.validate_review(review, requirements, report),
+        )
+        actions = sorted(
+            {
+                finding["required_action"]
+                for finding in review["findings"]
+                if isinstance(finding, dict) and isinstance(finding.get("required_action"), str)
+            }
+        )
+        finding_ids = sorted(
+            {
+                finding["id"]
+                for finding in review["findings"]
+                if isinstance(finding, dict) and isinstance(finding.get("id"), str)
+            }
+        )
+        fingerprints = sorted(
+            {
+                fingerprint
+                for finding in review["findings"]
+                if isinstance(finding, dict)
+                for fingerprint in (
+                    validate_packet.derive_root_cause_fingerprint(finding),
+                    validate_packet.derive_root_cause_route_fingerprint(finding),
+                )
+            }
+        )
+        decision = review["decision"]
+        if not isinstance(decision, str):
+            raise ControllerError("INVALID_RESPONSE", "Review response decision is invalid.")
+        target = review_target(decision, actions)
+        envelope_digest = validate_packet.canonical_digest(envelope)
+        review_digest = validate_packet.canonical_digest(review)
+        staged = dict(state)
+        staged.update(
+            pending_review_envelope_digest=envelope_digest,
+            active_review_packet_digest=review_digest,
+            reviewed_snapshot_digest=review["reviewed_snapshot_digest"],
+            latest_decision=decision,
+            required_actions=actions,
+            unresolved_finding_ids=finding_ids,
+            blocker_fingerprints=fingerprints,
+        )
+        context = _review_context(
+            envelope, expected, consumed, requirements, report, snapshot
+        )
+        review_context_state = dict(staged)
+        if evidence_only:
+            review_context_state["review_round"] = review_round - 1
+        _raise_validation(
+            "INVALID_REVIEW_CONTEXT",
+            "Review response failed context validation.",
+            validate_packet.validate_review_context(
+                envelope, requirements, report, review_context_state, snapshot
+            ),
+        )
+        transition_previous = dict(staged)
+        transition_previous.update(
+            unresolved_finding_ids=state["unresolved_finding_ids"],
+            blocker_fingerprints=state["blocker_fingerprints"],
+        )
+        repeated_blocker = review_round >= 1 and (
+            set(state["unresolved_finding_ids"]) & set(finding_ids)
+            or set(state["blocker_fingerprints"]) & set(fingerprints)
+        )
+        terminal_category = (
+            "REVIEW_REPEATED_BLOCKER"
+            if repeated_blocker
+            else (
+                "REVIEW_ROUND_LIMIT"
+                if decision == "CHANGES_REQUESTED"
+                and review_round + 1 == validate_packet.MAX_REVIEW_ROUNDS
+                else None
+            )
+        )
+        if terminal_category is not None:
+            target = "BLOCKED"
+        candidate = dict(staged)
+        candidate.update(
+            phase=target,
+            review_round=review_round + 1,
+            pending_review_envelope_digest=None,
+            pending_review_expected_header_digest=None,
+            last_consumed_packet_digest=envelope_digest,
+            last_consumed_review_envelope_digest=envelope_digest,
+            **_review_stop_provenance(
+                state, decision, actions, review.get("next_instruction")
+            ),
+            **_terminal_review_stop_provenance(state, terminal_category),
+        )
+        _raise_validation(
+            "INVALID_TRANSITION",
+            "Review acceptance failed state validation.",
+            validate_packet.validate_transition(
+                transition_previous, candidate, review_context=context
+            ),
+        )
+        turn_id = expected.get("turn_id")
+        if not isinstance(turn_id, str):
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding review attempt is invalid.")
+        _commit_artifacts_then_state(
+            paths,
+            [
+                (paths.run / "responses" / f"{turn_id}.raw.md", raw),
+                (paths.run / f"review-envelope-{review_round + 1:02d}.json", envelope),
+                (paths.run / "review.json", review),
+            ],
+            candidate,
+            expected_path,
+            frozenset({paths.run / "review.json"}),
+            expected_state_digest=loaded_state_digest,
+        )
+        _record_events_best_effort(paths, [{
+            "schema_version": SCHEMA_VERSION,
+            "event": "REVIEW_ACCEPTED",
+            "review_digest": review_digest,
+            "envelope_digest": envelope_digest,
+            "decision": decision,
+            "target_phase": target,
+        }])
+    return status_run(paths.repository, task_slug)
+
+
+def metadata_hygiene_is_clean(repository: Path) -> bool:
+    """Return whether controller metadata is neither tracked nor staged by Git."""
+    for command in (
+        ["git", "-C", str(repository), "ls-files", "--", ".ai-pro-loop"],
+        ["git", "-C", str(repository), "diff", "--cached", "--name-only", "--", ".ai-pro-loop"],
+    ):
+        completed = subprocess.run(
+            command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        if completed.returncode:
+            raise ControllerError("GIT_CHECK_FAILED", "Could not verify controller metadata hygiene.")
+        if completed.stdout.strip():
+            return False
+    return True
+
+
+def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
+    """Derive and validate the final gate from trusted artifacts and Git state."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
+        if state.get("phase") != "FINAL_VERIFICATION":
+            raise ControllerError("INVALID_PHASE", "Final verification is available only after PASS review.")
+        requirements, report, _bound_snapshot = _active_report_context(
+            paths,
+            state,
+            prior_reviewed_report=True,
+            allow_final_verification=True,
+        )
+        review = _active_prior_review(paths, state, requirements, report)
+        current_snapshot = _capture_snapshot(paths, state)
+        test_commands = report.get("test_commands")
+        gate = {
+            "schema_version": SCHEMA_VERSION,
+            "requirements_digest": state["active_requirements_digest"],
+            "review_packet_digest": state["active_review_packet_digest"],
+            "reviewed_snapshot_digest": state["reviewed_snapshot_digest"],
+            "current_snapshot_digest": current_snapshot["snapshot_digest"],
+            "acceptance_gate_passed": (
+                review.get("decision") == "PASS"
+                and isinstance(review.get("acceptance_results"), dict)
+                and all(
+                    isinstance(item, dict) and item.get("status") == "PASS"
+                    for item in review["acceptance_results"].values()
+                )
+            ),
+            "local_checks_passed": (
+                isinstance(test_commands, list)
+                and bool(test_commands)
+                and all(
+                    isinstance(item, dict) and item.get("outcome") == "PASS"
+                    for item in test_commands
+                )
+                and report.get("omissions") == []
+                and report.get("unresolved_risks_or_blockers") == []
+            ),
+            "scope_gate_passed": review.get("scope_violations") == [],
+            "artifact_hygiene_passed": metadata_hygiene_is_clean(paths.repository),
+        }
+        candidate = dict(state)
+        candidate["phase"] = "COMPLETE"
+        _raise_validation(
+            "FINAL_GATE_REJECTED",
+            "Final verification gate did not pass.",
+            validate_packet.validate_final_gate(gate, state, report, requirements),
+        )
+        _raise_validation(
+            "INVALID_TRANSITION",
+            "Final verification failed state validation.",
+            validate_packet.validate_transition(
+                state,
+                candidate,
+                final_gate_evidence=gate,
+                final_gate_report=report,
+                final_gate_requirements=requirements,
+            ),
+        )
+        _commit_artifacts_then_state(
+            paths,
+            [
+                (paths.run / "snapshot.json", current_snapshot),
+                (paths.run / "final-gate.json", gate),
+            ],
+            candidate,
+            replaceable_artifacts=frozenset({paths.run / "snapshot.json"}),
+            expected_state_digest=loaded_state_digest,
+        )
+        _record_events_best_effort(paths, [{
+            "schema_version": SCHEMA_VERSION,
+            "event": "FINAL_VERIFIED",
+            "final_gate_digest": validate_packet.canonical_digest(gate),
+            "snapshot_digest": current_snapshot["snapshot_digest"],
+        }])
+    return status_run(paths.repository, task_slug)
+
+
+def approve_requirements(
+    repository: Path,
+    task_slug: str,
+    approval_evidence_path: Path,
+) -> dict[str, object]:
+    """Promote one exact stopped material proposal with local approval evidence."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    with run_lock(paths.lock):
+        _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
+        if (
+            state.get("phase") != "USER_DECISION_REQUIRED"
+            or state.get("stop_origin_category") != "REQUIREMENTS_NEED_USER_INPUT"
+        ):
+            raise ControllerError(
+                "INVALID_PHASE", "Requirements approval is available only for a stopped proposal."
+            )
+        evidence = _read_input(approval_evidence_path, "approval evidence")
+        if not evidence.strip():
+            raise ControllerError("INVALID_APPROVAL", "Approval evidence must not be empty.")
+        revision = state.get("pending_requirements_revision")
+        digest = state.get("pending_requirements_digest")
+        if not isinstance(revision, int) or isinstance(revision, bool) or not isinstance(digest, str):
+            raise ControllerError("INVALID_STATE", "Stopped proposal lacks trusted requirements provenance.")
+        proposal = load_json(_requirements_revision_path(paths, revision))
+        if validate_packet.canonical_digest(proposal) != digest:
+            raise ControllerError("INVALID_STATE", "Stored proposal does not match trusted requirements digest.")
+        envelope = load_json(paths.run / f"envelope-{revision:02d}.json")
+        if envelope.get("payload") != proposal or validate_packet.canonical_digest(envelope) != state.get(
+            "last_consumed_packet_digest"
+        ):
+            raise ControllerError("INVALID_STATE", "Stored proposal envelope does not match trusted state.")
+        receipt = f"user-approval:stop-{state['stop_sequence']}:{digest}"
+        candidate = dict(state)
+        candidate.update(
+            phase="REQUIREMENTS_FROZEN",
+            latest_decision=None,
+            latest_requirements_decision=None,
+            required_actions=[],
+            unresolved_finding_ids=[],
+            blocker_fingerprints=[],
+            active_requirements_revision=revision,
+            active_requirements_digest=digest,
+            approval_sequence=state["approval_sequence"] + 1,
+            pending_requirements_revision=None,
+            pending_requirements_digest=None,
+            pending_supersedes_digest=None,
+            pending_approval_sequence=None,
+            pending_approved_requirements_digest=None,
+            pending_user_approval_evidence=None,
+            **{field: False for field in validate_packet.MATERIAL_REVISION_FLAGS},
+            stop_origin_phase=None,
+            stop_origin_category=None,
+            stop_reason=None,
+            resolution_evidence=receipt,
+            resolution_stop_sequence=state["stop_sequence"],
+            review_round=0,
+            pending_review_envelope_digest=None,
+            pending_review_expected_header_digest=None,
+            active_report_digest=None,
+            current_snapshot_digest=None,
+            active_review_packet_digest=None,
+            reviewed_snapshot_digest=None,
+        )
+        context = _requirements_context(
+            envelope,
+            {key: envelope[key] for key in EXPECTED_HEADER_FIELDS},
+            consumed_chain_heads(state),
+            proposal,
+            receipt,
+        )
+        transition_errors = validate_packet.validate_transition(
+            state, candidate, requirements_context=context
+        )
+        _raise_validation("INVALID_TRANSITION", "Requirements approval failed state validation.", transition_errors)
+        _commit_artifacts_then_state(
+            paths,
+            [
+                (paths.run / f"approval-stop-{state['stop_sequence']:02d}.txt", evidence),
+                (paths.run / "requirements.json", proposal),
+            ],
+            candidate,
+            replaceable_artifacts=frozenset({paths.run / "requirements.json"}),
+            expected_state_digest=loaded_state_digest,
+        )
+        _record_events_best_effort(paths, [{
+            "schema_version": SCHEMA_VERSION,
+            "event": "MATERIAL_REQUIREMENTS_APPROVED",
+            "requirements_digest": digest,
+            "stop_sequence": state["stop_sequence"],
+        }])
+    return status_run(paths.repository, task_slug)
+
+
+def _matches_sent_artifact(paths: RunPaths, expected: Mapping[str, object]) -> bool:
+    nonce = expected.get("nonce")
+    turn_id = expected.get("turn_id")
+    if not isinstance(nonce, str) or not isinstance(turn_id, str):
+        return True
+    response_directory = paths.run / "responses"
+    if response_directory.exists():
+        if not response_directory.is_dir():
+            return True
+        for response in response_directory.iterdir():
+            if not response.is_file():
+                return True
+            try:
+                text = response.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                return True
+            if nonce in text or turn_id in text:
+                return True
+    for envelope_path in paths.run.glob("envelope-*.json"):
+        try:
+            envelope = load_json(envelope_path)
+        except ControllerError:
+            return True
+        if envelope.get("nonce") == nonce or envelope.get("turn_id") == turn_id:
+            return True
+    return False
+
+
+def abandon_attempt(
+    repository: Path,
+    task_slug: str,
+    send_status: str,
+    evidence_path: Path,
+) -> dict[str, object]:
+    """Close an unambiguously unsent expected attempt without changing state."""
+    if send_status != "NOT_SENT":
+        raise ControllerError("SEND_STATUS_REQUIRED", "Attempt abandonment requires NOT_SENT status.")
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    evidence = _read_input(evidence_path, "not-sent evidence")
+    evidence = _normalize_prompt(evidence)
+    if not evidence.strip():
+        raise ControllerError("EMPTY_EVIDENCE", "Not-sent evidence must not be empty.")
+    bounded_evidence = evidence.encode("utf-8")[:MAX_ABANDON_EVIDENCE_BYTES].decode(
+        "utf-8", errors="ignore"
+    )
+    with run_lock(paths.lock):
+        _require_manual_recovery(paths)
+        state, loaded_state_digest = _load_mutator_state(paths)
+        attempts = _outstanding_attempts(paths)
+        if len(attempts) != 1:
+            raise ControllerError("OUTSTANDING_ATTEMPT_REQUIRED", "Exactly one outstanding attempt is required.")
+        expected_path = paths.run / str(attempts[0]["name"])
+        expected = attempts[0]["expected_header"]
+        if not _valid_expected_header(expected):
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding attempt header is invalid.")
+        expected_digest = validate_packet.canonical_digest(expected)
+        anchor_field = (
+            "pending_requirements_expected_header_digest"
+            if expected.get("packet_type") == "requirements"
+            else "pending_review_expected_header_digest"
+        )
+        if state.get(anchor_field) != expected_digest:
+            raise ControllerError(
+                "INVALID_EXPECTED_ATTEMPT",
+                "Outstanding attempt does not match trusted state.",
+            )
+        if _matches_sent_artifact(paths, expected):
+            raise ControllerError("AMBIGUOUS_SEND", "Attempt may have been sent or received.")
+        match = ATTEMPT_NAME.fullmatch(expected_path.name)
+        if match is None:
+            raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding attempt name is invalid.")
+        abandoned_path = expected_path
+        abandoned = {
+            "schema_version": SCHEMA_VERSION,
+            "status": "ABANDONED_NOT_SENT",
+            "expected_header": expected,
+            "expected_header_digest": expected_digest,
+            "nonce": expected["nonce"],
+            "prompt_digest": expected["prompt_digest"],
+            "evidence": bounded_evidence,
+            "abandoned_at_unix": int(time.time()),
+        }
+        transaction = paths.transactions / f"abandon-{os.getpid()}-{time.time_ns()}"
+        transaction.mkdir()
+        staged = transaction / abandoned_path.name
+        staged_paths: list[tuple[Path, os.stat_result]] = []
+        try:
+            write_json_atomic(staged, abandoned)
+            staged_paths.append(_owned_path(staged))
+            _require_state_digest(paths, loaded_state_digest)
+            os.replace(staged, abandoned_path)
+        except OSError as exc:
+            raise ControllerError("WRITE_FAILED", "Could not atomically abandon the attempt.") from exc
+        finally:
+            _cleanup_owned_transaction(transaction, staged_paths)
+    return {
+        "abandoned_attempt_path": str(abandoned_path),
+        "nonce": expected["nonce"],
+        "prompt_digest": expected["prompt_digest"],
+    }
+
+
+def next_commands(
+    state: Mapping[str, object],
+    outstanding_attempt: Mapping[str, object] | None,
+) -> list[str]:
+    """Return only commands valid for the current phase and pre-send attempt."""
+    if (
+        state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS
+        and state.get("phase") not in {"FINAL_VERIFICATION", "COMPLETE"}
+    ):
+        return []
+    if outstanding_attempt is not None:
+        expected = outstanding_attempt.get("expected_header")
+        packet_type = expected.get("packet_type") if isinstance(expected, Mapping) else None
+        if packet_type == "requirements" and state["phase"] == "REQUIREMENTS_PENDING":
+            return ["accept-requirements", "abandon-attempt"]
+        if packet_type == "review" and state["phase"] == "REVIEW_PENDING":
+            return ["accept-review", "abandon-attempt"]
+        return []
+    if state["phase"] == "USER_DECISION_REQUIRED":
+        return (
+            ["approve-requirements"]
+            if state["stop_origin_category"] == "REQUIREMENTS_NEED_USER_INPUT"
+            and state.get("user_approval_required") is True
+            and isinstance(state.get("active_requirements_revision"), int)
+            else []
+        )
+    return {
+        "REQUIREMENTS_PENDING": ["prepare-requirements"],
+        "REQUIREMENTS_FROZEN": ["build-report"],
+        "IMPLEMENTING": ["build-report"],
+        "LOCAL_VERIFICATION": ["build-report", "prepare-review"],
+        "REVIEW_PENDING": ["prepare-review"],
+        "FINAL_VERIFICATION": ["final-verify"],
+        "COMPLETE": [],
+        "BLOCKED": [],
+        "PREFLIGHT": [],
+    }[str(state["phase"])]
+
+
+def _outstanding_attempts(paths: RunPaths) -> list[dict[str, object]]:
+    attempts: list[dict[str, object]] = []
+    for path in sorted(paths.run.glob("expected-attempt-*.json")):
+        if not path.is_file():
+            continue
+        try:
+            artifact = load_json(path)
+        except ControllerError:
+            attempts.append({"name": path.name, "expected_header": {}})
+            continue
+        if artifact.get("status") == "ABANDONED_NOT_SENT":
+            try:
+                _validate_abandoned_attempt_receipt(artifact)
+            except ControllerError:
+                attempts.append({"name": path.name, "expected_header": {}})
+            continue
+        expected = artifact.get("expected_header", artifact)
+        attempts.append(
+            {
+                "name": path.name,
+                "expected_header": expected if isinstance(expected, dict) else {},
+            }
+        )
+    return attempts
+
+
+def _unreachable_artifacts(
+    paths: RunPaths, state: Mapping[str, object]
+) -> list[str]:
+    allowed_names = {
+        "request.md",
+        "repository-context.md",
+        "preflight.json",
+        "state.json",
+        "events.jsonl",
+        "transactions",
+        ".lock",
+        "prompts",
+        "responses",
+    }
+    reachable_digests = {
+        value
+        for value in state.values()
+        if isinstance(value, str) and value.startswith("sha256:")
+    }
+    unreachable: list[str] = []
+    for path in paths.run.iterdir():
+        if path.name in allowed_names or path.name.startswith(
+            ("expected-attempt-", "consumed-attempt-", "approval-stop-")
+        ):
+            continue
+        if path.is_file() and path.suffix == ".json":
+            try:
+                artifact = load_json(path)
+            except ControllerError:
+                unreachable.append(path.name)
+                continue
+            if validate_packet.canonical_digest(artifact) in reachable_digests:
+                continue
+        unreachable.append(path.name)
+    return sorted(unreachable)
+
+
+def status_run(repository: Path, task_slug: str) -> dict[str, object]:
+    """Report controller progress without modifying run artifacts or locks."""
+    paths = resolve_run(repository, task_slug)
+    if not paths.run.is_dir() or not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    state = load_json(paths.state)
+    attempts = _outstanding_attempts(paths)
+    outstanding = attempts[0] if len(attempts) == 1 else None
+    orphan_transaction_paths = _orphan_transaction_paths(paths)
+    orphan_transactions = [path.name for path in orphan_transaction_paths]
+    recovery_required = bool(orphan_transaction_paths)
+    recovery_details = _recovery_details(paths, orphan_transaction_paths) if recovery_required else []
+    return {
+        "phase": state.get("phase"),
+        "active_requirements_revision": state.get("active_requirements_revision"),
+        "review_round": state.get("review_round"),
+        "conversation": {
+            "binding_state": state.get("conversation_binding_state"),
+            "url": state.get("bound_conversation_url"),
+        },
+        "model": {
+            "policy": state.get("model_policy"),
+            "requested_label": state.get("requested_model_label"),
+            "visible_label": state.get("visible_model_label"),
+        },
+        "required_actions": state.get("required_actions"),
+        "unresolved_finding_ids": state.get("unresolved_finding_ids"),
+        "blocker_fingerprints": state.get("blocker_fingerprints"),
+        "stop_origin_category": state.get("stop_origin_category"),
+        "outstanding_attempts": [attempt["name"] for attempt in attempts],
+        "lock_present": paths.lock.exists(),
+        "orphan_transactions": orphan_transactions,
+        "recovery_required": recovery_required,
+        "recovery_transaction_paths": [str(path) for path in orphan_transaction_paths],
+        "recovery_guidance": " ".join(recovery_details),
+        "unreachable_artifacts": _unreachable_artifacts(paths, state),
+        "next_commands": [] if recovery_required else next_commands(state, outstanding),
+    }
