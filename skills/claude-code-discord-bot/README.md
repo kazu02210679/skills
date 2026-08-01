@@ -18,7 +18,7 @@ bridgeが起こしたsessionと、自分でterminalから起こしたsessionで�
 | 通知 | SDKのmessage stream | stream-json events | `Stop` / `Notification` hook |
 | 承認 | `canUseTool` callback | **なし** | `PermissionRequest` hook |
 
-**`claude -p` では `PermissionRequest` hook が発火しません**（実測: `PreToolUse` は毎回発火、`PermissionRequest` は0回）。したがって**このSkillのCLI transportは承認経路を実装しません**。Claude Code側に経路が皆無という意味ではなく、`PreToolUse` の `defer` を使えば別transportとして構築可能です（全tool callが飛んでくる量は受け入れる必要あり）。Discordのthread 1本がClaude Code session 1本に対応し、`session_id`を保存して次のturnで`resume`に渡します。
+**`claude -p` では `PermissionRequest` hook が発火しません**（実測: `PreToolUse` は毎回発火、`PermissionRequest` は0回）。したがって**このSkillのCLI transportは承認経路を実装しません**。Claude Code側に経路が皆無という意味ではありません。`PreToolUse` の `defer` を使う設計や、MCP の permission-prompt transport は別設計として構築可能です（前者は全tool callが飛んでくる量を受け入れる必要あり）。Discordのthread 1本がClaude Code session 1本に対応し、`session_id`を保存して次のturnで`resume`に渡します。
 
 ## 信頼境界
 
@@ -32,7 +32,7 @@ bridgeが起こしたsessionと、自分でterminalから起こしたsessionで�
 
 `bypassPermissions` と `dontAsk` はpermission promptに到達しないため承認flowと併用できません。`acceptEdits` / `auto` / `plan` は一部だけ素通りするので `approval.coverage: "partial"` の明示が要ります。validatorが弾きます。
 
-`sandbox.enabled` だけでは不十分です。`allowUnsandboxedCommands` の既定は true（コマンド側がsandboxを抜けられる）、`failIfUnavailable` の既定は false（sandboxが起動できなければ警告のみで非sandbox実行）。両方の固定をvalidatorが要求します。
+`sandbox.enabled` だけでは姿勢が暗黙のままです。`allowUnsandboxedCommands` の既定は true（`dangerouslyDisableSandbox` でコマンド側がsandboxを抜けられる）。`failIfUnavailable` の既定は**層によって違い**、SDK の `Options.sandbox` 経由なら true（sandboxを起動できなければ `query()` がエラー終了）、Claude Code settings 側なら false（警告のみで非sandbox実行）。どちらも固定を要求します — 既定が危険だからではなく、containment の契約をconfig自身に書かせるためです。
 
 **`workspace_root` はsandboxではありません。** 起動可能なproject pathを制限するinput validationであって、Claude Codeは作業ディレクトリ外を読めますし、Bashは絶対pathに届きます。実際の隔離が要るなら SDK の `sandbox` 設定・コンテナ・VMを使ってください。
 

@@ -243,15 +243,16 @@ def _validate_sandbox(sandbox: Any, errors: list[str]) -> None:
     if sandbox.get("allow_unsandboxed_commands") is not False:
         errors.append(
             f"{location}.allow_unsandboxed_commands must be false when the "
-            "sandbox is enabled; it defaults to true, which lets a command opt "
-            "out of the sandbox and sends the decision back to the permission "
-            "system"
+            "sandbox is enabled; the documented default is true, which lets a "
+            "command opt out of the sandbox and sends the decision back to the "
+            "permission system"
         )
     if sandbox.get("fail_if_unavailable") is not True:
         errors.append(
             f"{location}.fail_if_unavailable must be true when the sandbox is "
-            "enabled; it defaults to false, which downgrades a missing sandbox "
-            "to a warning and runs unsandboxed"
+            "enabled; the default differs by layer (true on the SDK "
+            "Options.sandbox path, false in Claude Code settings), so state the "
+            "containment posture here instead of inheriting it"
         )
 
 

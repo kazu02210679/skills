@@ -16,13 +16,17 @@ import type { Options } from "@anthropic-ai/claude-agent-sdk";
 export interface BridgeSandboxConfig {
   enabled: boolean;
   /**
-   * Defaults to false in Claude Code, which downgrades a missing sandbox to a
-   * warning and runs unsandboxed. The validator requires true when enabled.
+   * The default differs by layer: `true` on the SDK `Options.sandbox` path,
+   * where query() errors out rather than running unsandboxed, and `false` in
+   * the Claude Code settings layer, where a missing sandbox is a warning. The
+   * validator requires true when enabled so the containment posture is stated
+   * here rather than inherited from whichever layer applies.
    */
   fail_if_unavailable?: boolean;
   /**
-   * Defaults to true in Claude Code, which lets a command opt out of the
-   * sandbox. The validator requires false when enabled.
+   * Documented default is true, which lets a command opt out of the sandbox
+   * through dangerouslyDisableSandbox. The validator requires false when
+   * enabled.
    */
   allow_unsandboxed_commands?: boolean;
   auto_allow_bash_if_sandboxed?: boolean;
@@ -42,7 +46,11 @@ export function toSdkSandbox(config: BridgeSandboxConfig): Options["sandbox"] {
   };
 }
 
-/** The containment posture the validator enforces, expressed as a value. */
+/**
+ * The containment posture the validator enforces, expressed as a value. Every
+ * field is explicit on purpose: the point is that the config declares the
+ * contract, not that it corrects an unsafe default.
+ */
 export const CONTAINED: BridgeSandboxConfig = {
   enabled: true,
   fail_if_unavailable: true,

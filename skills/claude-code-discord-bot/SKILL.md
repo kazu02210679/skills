@@ -52,9 +52,11 @@ When the host holds anything the operator should not reach through Discord, say 
 configure real containment: the SDK `sandbox` settings, a container, or a VM. Otherwise state the
 limitation and let the user decide.
 
-`sandbox.enabled` alone is weaker than it reads. `allowUnsandboxedCommands` defaults to true, so a
-command can opt back out, and `failIfUnavailable` defaults to false, so a host that cannot start a
-sandbox runs unsandboxed with a warning. Pin both; the validator requires it.
+`sandbox.enabled` alone leaves the posture implicit. `allowUnsandboxedCommands` defaults to true, so
+a command can opt back out. `failIfUnavailable` defaults differently by layer — `true` on the SDK
+`Options.sandbox` path, `false` in Claude Code settings — so what happens on a host without a
+working sandbox depends on how the bridge happens to configure Claude Code. Pin both, so the config
+states the containment contract instead of inheriting it; the validator requires it.
 
 ## Transport Matrix
 
@@ -71,8 +73,8 @@ Two session origins need different plumbing, and the config keeps them in separa
 hook; only `PreToolUse` runs, and it fires on every tool call rather than on ones needing a
 decision. This Skill's CLI transport therefore implements no approval path, and the validator
 rejects the combination instead of letting a bridge advertise a gate that never prompts. Say it that
-way to the user: a `PreToolUse` `defer` transport could be built, it just is not what this Skill
-ships.
+way to the user. A `PreToolUse` `defer` transport, or an MCP permission-prompt transport, could be
+built as separate designs; they are simply not what this Skill ships.
 
 The permission mode narrows this further. Only `default` sends every non-preapproved tool call to
 Discord; `acceptEdits`, `auto`, and `plan` approve some silently and must declare

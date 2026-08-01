@@ -25,13 +25,22 @@ time and `PermissionRequest` never.
 
 **This Skill's CLI transport therefore implements no approval path**, and the validator rejects
 approval on it rather than letting a bridge report a human-in-the-loop channel that silently never
-prompts. That is a scope decision, not a claim that Claude Code offers no route at all: a
-`PreToolUse` hook can return `permissionDecision: "defer"` (`HookPermissionDecision` is
-`allow | deny | ask | defer`), which an external UI could use to collect an answer. Building that
-means a separate transport, because `PreToolUse` fires on every tool call rather than only on ones
-needing a decision, so Discord would see the full volume.
+prompts. That is a scope decision, not a claim that Claude Code offers no route at all. Two other designs
+exist and are simply out of scope here:
 
-`--permission-prompt-tool` is not an option here: it does not exist in Claude Code 2.1.220.
+- a `PreToolUse` hook returning `permissionDecision: "defer"` (`HookPermissionDecision` is
+  `allow | deny | ask | defer`), with an external UI collecting the answer and resuming. This fires
+  on every tool call rather than only on ones needing a decision, so Discord would see the full
+  volume;
+- a permission-prompt transport, where the prompt is routed to a tool the bridge exposes. This is
+  not exotic: `canUseTool` is itself implemented this way. The SDK passes
+  `--permission-prompt-tool stdio` to the CLI when the callback is set, and rejects the combination
+  of `canUseTool` and `permissionPromptToolName` because they are the same channel.
+
+Either would be a separate transport with its own contract. Build one deliberately if the user
+wants CLI approval; do not imply the current CLI transport already gates anything. Do not conclude
+a CLI flag is absent because `claude --help` omits it — the help output is not the complete flag
+list, as `--permission-mode default` already showed.
 
 ## Config schema
 
@@ -143,14 +152,27 @@ to conclude it is settings-only. The shipped declarations accept it on `Options.
 [sandbox-conversion-sample.mts](sandbox-conversion-sample.mts) compiles the whole conversion in CI
 so the question is settled by the type checker rather than re-argued from prose.
 
-Two defaults make `enabled: true` alone weaker than it reads, so the validator requires both to be
-pinned whenever the sandbox is on:
+#### `failIfUnavailable` defaults differ by layer
 
-- `allowUnsandboxedCommands` **defaults to true**. A command can opt out of the sandbox through
-  `dangerouslyDisableSandbox`, and the decision goes back to the permission system. Set it `false`
-  for containment that does not depend on the model's restraint.
-- `failIfUnavailable` **defaults to false**. A host that cannot start a sandbox prints a warning and
-  runs unsandboxed. Set it `true` so a missing sandbox is a startup failure, not a silent downgrade.
+The two layers do not agree, which is why the config pins it rather than inheriting anything:
+
+| Layer | Default when `enabled: true` | Behavior when the sandbox cannot start |
+|---|---|---|
+| SDK `Options.sandbox` | **`true`** | `query()` emits an error result and exits |
+| Claude Code settings | **`false`** | a warning is shown and commands run unsandboxed |
+
+The SDK injects the default rather than leaving it to the CLI: when `enabled` is `true` and
+`failIfUnavailable` is undefined, it substitutes `failIfUnavailable: true` before spawning.
+
+The validator requires `fail_if_unavailable: true` whenever the sandbox is enabled. Not because the
+default is unsafe — on the SDK path it already is `true` — but because the bridge's containment
+posture should be stated in its own config instead of depending on which layer happens to apply. A
+config that survives a move between the SDK and the settings layer, or an upstream default change,
+is worth more than one that is merely correct today.
+
+`allowUnsandboxedCommands` is pinned for the same reason, and there the documented default is `true`:
+a command can opt out of the sandbox through `dangerouslyDisableSandbox`, and the decision returns to
+the permission system. Set it `false` for containment that does not depend on the model's restraint.
 
 `network.strictAllowlist` is honored only from user, managed, or `--settings` sources; project
 settings are ignored for it. Do not put it in `.claude/settings.json` and expect enforcement.
