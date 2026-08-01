@@ -42,6 +42,16 @@
     }
   },
   {
+    "id": "large-existing-initialization",
+    "prompt": "Initialize the GPT Pro Codex loop in a repository with 351 pre-existing product paths, and make the approval and retry procedure practical and fail closed.",
+    "expect": {
+      "inspect_before_approval": true,
+      "use_exact_manifest": true,
+      "enumerate_all_paths_in_cli": false,
+      "automatic_ambiguous_repair": false
+    }
+  },
+  {
     "id": "ordinary-implementation-non-trigger",
     "prompt": "Fix the typo and run the existing unit test.",
     "expect": {

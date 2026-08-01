@@ -15,11 +15,19 @@ Read [references/packet-contract.md](references/packet-contract.md) before creat
 
 Use `scripts/gpc_loop.py` for the normal loop. Run `status` before each mutation and execute only a command it lists. Use `validate_packet.py` and `capture_snapshot.py` directly only for documented diagnostic or recovery paths.
 
-`init` is the sole exception to the status-first rule because the run does not exist yet. Do the repository investigation and disclosure review outside the controller, write the bounded request and repository-context inputs, then initialize the run:
+`init` is the sole exception to the status-first rule because the run does not exist yet. Do the repository investigation and disclosure review outside the controller, then inspect the exact pre-existing product-path set without creating run state. Write the candidate manifest outside the repository so the manifest does not change the set it describes:
 
 ```powershell
-python skills/gpt-pro-codex-loop/scripts/gpc_loop.py init --repo REPOSITORY --task TASK --request REQUEST.md --repository-context CONTEXT.md --model-policy PRO_CLASS
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py inspect-init --repo REPOSITORY --task TASK --write-approval-manifest ..\REPOSITORY-TASK-approved-existing-paths.json
 ```
+
+Review the complete manifest and obtain explicit user approval. Manifest generation is inspection, not approval. Then write the bounded request and repository-context inputs and initialize with the exact approved manifest:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py init --repo REPOSITORY --task TASK --request REQUEST.md --repository-context CONTEXT.md --model-policy PRO_CLASS --approved-existing-path-manifest ..\REPOSITORY-TASK-approved-existing-paths.json
+```
+
+For a small set, repeat `--approved-existing-path PATH` instead. Never combine per-path approval with `--approved-existing-path-manifest`. Init re-inspects under its lock, so a stale, changed, mismatched, malformed, or non-canonical manifest fails before state publication. `PREFLIGHT_APPROVAL_REQUIRED` and manifest errors return at most 20 preview paths plus total/omitted counts, the set digest, and JSON argv for generating a fresh manifest and retrying.
 
 After `init`, before every state-changing command, run:
 
@@ -39,7 +47,9 @@ All Browser interaction, project-command execution, detailed design, implementat
 
 ## Recovery
 
-If `status` reports `recovery_required: true` or a mutation returns `RECOVERY_REQUIRED`, stop the normal loop. Preserve `state.json`, every transaction directory, and all referenced artifacts byte-for-byte; do not delete, rename, repair, or consume them. Escalate to the user with the reported transaction paths and run only the read-only status command:
+`status` is read-only. A genuinely absent task returns `RUN_NOT_FOUND`. If it reports `phase: INIT_INCOMPLETE` and lists `init --retry-incomplete`, the controller has recognized only allowlisted, controller-owned pre-state scaffolding. Re-run init with `--retry-incomplete` and all original request, context, model, and approval arguments. Retry refuses a live lock, an established or malformed state, links/reparse points, unexpected files, or any ambiguous ownership; it never repairs those cases automatically.
+
+For every other `recovery_required: true`, `INIT_RECOVERY_REQUIRED`, or `RECOVERY_REQUIRED` result, stop the normal loop. Preserve `state.json`, every transaction directory, and all referenced artifacts byte-for-byte; do not delete, rename, repair, or consume them. Escalate to the user with the reported paths and run only the read-only status command:
 
 ```powershell
 python skills/gpt-pro-codex-loop/scripts/gpc_loop.py status --repo REPOSITORY --task TASK

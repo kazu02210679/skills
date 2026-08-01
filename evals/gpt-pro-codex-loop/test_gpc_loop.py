@@ -464,10 +464,13 @@ class ControllerCase(unittest.TestCase):
 
     def test_cli_help_covers_each_command_and_its_special_arguments(self) -> None:
         expected_arguments = {
+            "inspect-init": ["--write-approval-manifest"],
             "init": [
                 "--request",
                 "--repository-context",
                 "--approved-existing-path",
+                "--approved-existing-path-manifest",
+                "--retry-incomplete",
                 "--model-policy",
                 "--requested-model-label",
             ],
@@ -611,6 +614,10 @@ class ControllerCase(unittest.TestCase):
 
     def test_cli_rejects_missing_common_and_command_arguments(self) -> None:
         required_arguments = {
+            "inspect-init": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+            ],
             "init": [
                 ("--repo", str(self.repository)),
                 ("--task", "controller-test"),
@@ -687,6 +694,14 @@ class ControllerCase(unittest.TestCase):
         evidence = Path("evidence.txt")
         cases = [
             (
+                "inspect_initialization",
+                [
+                    "inspect-init", "--repo", ".", "--task", "run",
+                    "--write-approval-manifest", "approved.json",
+                ],
+                (Path("."), "run", Path("approved.json")),
+            ),
+            (
                 "initialize_run",
                 [
                     "init", "--repo", ".", "--task", "run", "--request", str(request),
@@ -694,7 +709,10 @@ class ControllerCase(unittest.TestCase):
                     "--approved-existing-path", "legacy.py", "--model-policy", "EXACT_LABEL",
                     "--requested-model-label", "Pro",
                 ],
-                (Path("."), "run", request, context, ["old.py", "legacy.py"], "EXACT_LABEL", "Pro"),
+                (
+                    Path("."), "run", request, context,
+                    ["old.py", "legacy.py"], "EXACT_LABEL", "Pro", None, False,
+                ),
             ),
             ("prepare_requirements", ["prepare-requirements", "--repo", ".", "--task", "run", "--conflict-evidence", str(evidence)], (Path("."), "run", evidence)),
             ("accept_requirements", ["accept-requirements", "--repo", ".", "--task", "run", "--raw-response", str(response), "--observed-conversation-url", "https://chatgpt.com/c/1", "--observed-model-label", "Pro"], (Path("."), "run", response, "https://chatgpt.com/c/1", "Pro")),
@@ -712,6 +730,321 @@ class ControllerCase(unittest.TestCase):
                     with patch.object(cli, "_write"):
                         self.assertEqual(cli.main(arguments), 0)
                 dispatch.assert_called_once_with(*expected)
+
+    def test_inspect_manifest_bulk_approval_succeeds_without_creating_run(self) -> None:
+        for index in range(305):
+            (self.repository / f"existing-{index:03d}.txt").write_text(
+                f"{index}\n", encoding="utf-8"
+            )
+        manifest_path = self.input_directory / "approved-paths.json"
+        before = sorted(
+            str(path.relative_to(self.repository)) for path in self.repository.rglob("*")
+        )
+        inspected = controller.inspect_initialization(
+            self.repository, "bulk-test", manifest_path
+        )
+        after = sorted(
+            str(path.relative_to(self.repository)) for path in self.repository.rglob("*")
+        )
+        paths = controller.resolve_run(self.repository, "bulk-test")
+        self.assertEqual(before, after)
+        self.assertFalse(paths.run.exists())
+        self.assertEqual(inspected["initial_product_path_count"], 305)
+        manifest = controller.load_json(manifest_path)
+        self.assertEqual(manifest["path_count"], 305)
+        self.assertEqual(len(manifest["initial_product_paths"]), 305)
+
+        result = controller.initialize_run(
+            self.repository,
+            "bulk-test",
+            self.request,
+            self.context,
+            [],
+            "PRO_CLASS",
+            None,
+            manifest_path,
+        )
+        self.assertEqual(result["phase"], "REQUIREMENTS_PENDING")
+        self.assertEqual(self._load_state_for(paths)["approved_existing_paths"], manifest["initial_product_paths"])
+
+    def _load_state_for(self, paths: controller.RunPaths) -> dict[str, object]:
+        return controller.load_json(paths.state)
+
+    def test_manifest_is_exact_bound_and_rejects_stale_paths(self) -> None:
+        product = self.repository / "existing.txt"
+        product.write_text("one\n", encoding="utf-8")
+        manifest_path = self.input_directory / "approved-paths.json"
+        controller.inspect_initialization(self.repository, "manifest-test", manifest_path)
+        (self.repository / "later.txt").write_text("two\n", encoding="utf-8")
+        with self.assertRaisesRegex(controller.ControllerError, "manifest"):
+            controller.initialize_run(
+                self.repository, "manifest-test", self.request, self.context,
+                [], "PRO_CLASS", None, manifest_path,
+            )
+        self.assertFalse(controller.resolve_run(self.repository, "manifest-test").run.exists())
+
+    def test_manifest_rejects_malformed_unsafe_duplicate_and_mismatched_paths(self) -> None:
+        product = self.repository / "existing.txt"
+        product.write_text("one\n", encoding="utf-8")
+        manifest_path = self.input_directory / "approved-paths.json"
+        controller.inspect_initialization(self.repository, "invalid-manifest", manifest_path)
+        original = controller.load_json(manifest_path)
+        cases: list[tuple[str, object]] = [
+            ("absolute", {**original, "initial_product_paths": ["C:/outside.txt"]}),
+            ("traversal", {**original, "initial_product_paths": ["../escape.txt"]}),
+            ("duplicate", {**original, "initial_product_paths": ["existing.txt", "existing.txt"]}),
+            ("non-string", {**original, "initial_product_paths": [1]}),
+            ("wrong-repository", {**original, "repository": str(self.repository.parent)}),
+            ("wrong-task", {**original, "task": "another-task"}),
+            ("boolean-count", {**original, "path_count": True}),
+            ("not-an-object", []),
+        ]
+        for label, candidate in cases:
+            with self.subTest(label=label):
+                if (
+                    label != "boolean-count"
+                    and isinstance(candidate, dict)
+                    and "initial_product_paths" in candidate
+                ):
+                    values = candidate["initial_product_paths"]
+                    candidate["path_count"] = len(values)
+                    candidate["path_set_digest"] = controller._path_set_digest(values)
+                manifest_path.write_text(
+                    json.dumps(candidate, ensure_ascii=False), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(controller.ControllerError, "manifest"):
+                    controller.initialize_run(
+                        self.repository, "invalid-manifest", self.request, self.context,
+                        [], "PRO_CLASS", None, manifest_path,
+                    )
+                self.assertFalse(
+                    controller.resolve_run(self.repository, "invalid-manifest").run.exists()
+                )
+
+    def test_cli_rejects_mixed_bulk_and_per_path_approval(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable, str(SCRIPT_DIR / "gpc_loop.py"), "init",
+                "--repo", str(self.repository), "--task", "mixed-test",
+                "--request", str(self.request), "--repository-context", str(self.context),
+                "--model-policy", "PRO_CLASS", "--approved-existing-path", "a.py",
+                "--approved-existing-path-manifest", str(self.input_directory / "a.json"),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(json.loads(completed.stdout)["error"]["code"], "ARGUMENT_ERROR")
+
+    def test_unapproved_path_error_is_bounded_and_actionable(self) -> None:
+        for index in range(35):
+            (self.repository / f"unapproved-{index:02d}.txt").write_text("x\n", encoding="utf-8")
+        with self.assertRaises(controller.ControllerError) as raised:
+            self._init_run()
+        error = raised.exception
+        self.assertEqual(error.code, "PREFLIGHT_APPROVAL_REQUIRED")
+        previews = [item for item in error.details if item.startswith("path_preview:")]
+        self.assertLessEqual(len(previews), 20)
+        self.assertTrue(any(item.startswith("initial_product_path_count:35") for item in error.details))
+        self.assertTrue(any(item.startswith("omitted_path_count:15") for item in error.details))
+        self.assertTrue(any(item.startswith("path_set_digest:sha256:") for item in error.details))
+        self.assertTrue(any(item.startswith("generate_manifest_argv:") for item in error.details))
+        self.assertTrue(any(item.startswith("retry_init_argv:") for item in error.details))
+
+    def test_error_recovery_argv_generates_manifest_and_completes_init(self) -> None:
+        (self.repository / "existing.txt").write_text("x\n", encoding="utf-8")
+        with self.assertRaises(controller.ControllerError) as raised:
+            controller.initialize_run(
+                self.repository, "actionable-test", self.request, self.context,
+                [], "PRO_CLASS", None,
+            )
+        details = raised.exception.details
+        generate = json.loads(
+            next(item.removeprefix("generate_manifest_argv:") for item in details
+                 if item.startswith("generate_manifest_argv:"))
+        )
+        retry = json.loads(
+            next(item.removeprefix("retry_init_argv:") for item in details
+                 if item.startswith("retry_init_argv:"))
+        )
+        generate[0] = sys.executable
+        retry[0] = sys.executable
+        source_root = SCRIPT_DIR.parents[2]
+        generated = subprocess.run(
+            generate, cwd=source_root, check=False, capture_output=True, text=True
+        )
+        self.assertEqual(generated.returncode, 0, generated.stdout + generated.stderr)
+        initialized = subprocess.run(
+            retry, cwd=source_root, check=False, capture_output=True, text=True
+        )
+        self.assertEqual(initialized.returncode, 0, initialized.stdout + initialized.stderr)
+        self.assertEqual(json.loads(initialized.stdout)["result"]["phase"], "REQUIREMENTS_PENDING")
+
+    def test_status_and_retry_recover_only_recognized_incomplete_initialization(self) -> None:
+        paths = controller.resolve_run(self.repository, "incomplete-test")
+        paths.transactions.mkdir(parents=True)
+        before = sorted(str(path.relative_to(paths.run)) for path in paths.run.rglob("*"))
+        status = controller.status_run(self.repository, "incomplete-test")
+        after = sorted(str(path.relative_to(paths.run)) for path in paths.run.rglob("*"))
+        self.assertEqual(before, after)
+        self.assertEqual(status["phase"], "INIT_INCOMPLETE")
+        self.assertEqual(status["next_commands"], ["init --retry-incomplete"])
+
+        result = controller.initialize_run(
+            self.repository, "incomplete-test", self.request, self.context,
+            [], "PRO_CLASS", None, None, True,
+        )
+        self.assertEqual(result["phase"], "REQUIREMENTS_PENDING")
+        self.assertTrue(paths.state.is_file())
+
+    def test_retry_recovers_each_allowed_pre_state_interruption_shape(self) -> None:
+        stages = (
+            "empty-run",
+            "marker-temporary",
+            "marker-only",
+            "transactions-created",
+            "transaction-staged",
+            "artifacts-partly-committed",
+        )
+        for index, stage in enumerate(stages):
+            with self.subTest(stage=stage):
+                task = f"interruption-{index}"
+                paths = controller.resolve_run(self.repository, task)
+                paths.run.mkdir(parents=True)
+                if stage == "marker-temporary":
+                    (paths.run / ".initialization.json.interrupted").write_text(
+                        "{}\n", encoding="utf-8"
+                    )
+                if stage in {
+                    "marker-only",
+                    "transactions-created",
+                    "transaction-staged",
+                    "artifacts-partly-committed",
+                }:
+                    controller.write_json_atomic(
+                        paths.run / controller.INITIALIZATION_MARKER_NAME,
+                        {
+                            "schema_version": 1,
+                            "kind": "gpc-loop-initialization",
+                            "repository": str(self.repository.resolve()),
+                            "task": task,
+                            "baseline_head": controller._head_commit(self.repository),
+                            "pid": os.getpid(),
+                            "hostname": controller.socket.gethostname(),
+                            "created_at_unix": 1,
+                        },
+                    )
+                if stage in {
+                    "transactions-created",
+                    "transaction-staged",
+                    "artifacts-partly-committed",
+                }:
+                    paths.transactions.mkdir()
+                if stage == "transaction-staged":
+                    transaction = paths.transactions / "initialize-interrupted"
+                    transaction.mkdir()
+                    (transaction / "request.md").write_text("partial\n", encoding="utf-8")
+                    (transaction / ".state.json.interrupted").write_text(
+                        "partial\n", encoding="utf-8"
+                    )
+                if stage == "artifacts-partly-committed":
+                    (paths.run / "request.md").write_text("partial\n", encoding="utf-8")
+                    (paths.run / "repository-context.md").write_text(
+                        "partial\n", encoding="utf-8"
+                    )
+                    (paths.run / "preflight.json").write_text("{}\n", encoding="utf-8")
+
+                before = sorted(
+                    (str(path.relative_to(paths.run)), path.read_bytes() if path.is_file() else None)
+                    for path in paths.run.rglob("*")
+                )
+                status = controller.status_run(self.repository, task)
+                after = sorted(
+                    (str(path.relative_to(paths.run)), path.read_bytes() if path.is_file() else None)
+                    for path in paths.run.rglob("*")
+                )
+                self.assertEqual(status["phase"], "INIT_INCOMPLETE")
+                self.assertEqual(before, after)
+                result = controller.initialize_run(
+                    self.repository, task, self.request, self.context,
+                    [], "PRO_CLASS", None, None, True,
+                )
+                self.assertEqual(result["phase"], "REQUIREMENTS_PENDING")
+                self.assertTrue(paths.state.is_file())
+
+    def test_retry_refuses_established_or_ambiguous_run(self) -> None:
+        self._init_run()
+        with self.assertRaisesRegex(controller.ControllerError, "established"):
+            controller.initialize_run(
+                self.repository, "controller-test", self.request, self.context,
+                [], "PRO_CLASS", None, None, True,
+            )
+
+        paths = controller.resolve_run(self.repository, "ambiguous-test")
+        paths.run.mkdir(parents=True)
+        (paths.run / "foreign.txt").write_text("do not remove\n", encoding="utf-8")
+        with self.assertRaisesRegex(controller.ControllerError, "ambiguous"):
+            controller.initialize_run(
+                self.repository, "ambiguous-test", self.request, self.context,
+                [], "PRO_CLASS", None, None, True,
+            )
+        self.assertTrue((paths.run / "foreign.txt").is_file())
+
+        malformed = controller.resolve_run(self.repository, "malformed-state-test")
+        malformed.run.mkdir(parents=True)
+        malformed.state.write_text("not json\n", encoding="utf-8")
+        before = malformed.state.read_bytes()
+        with self.assertRaisesRegex(controller.ControllerError, "established"):
+            controller.initialize_run(
+                self.repository, "malformed-state-test", self.request, self.context,
+                [], "PRO_CLASS", None, None, True,
+            )
+        self.assertEqual(malformed.state.read_bytes(), before)
+
+    def test_retry_refuses_active_initialization_lock_without_mutation(self) -> None:
+        paths = controller.resolve_run(self.repository, "active-init-test")
+        initialization_lock = paths.run.parent / ".active-init-test.initialize.lock"
+        paths.run.parent.mkdir(parents=True, exist_ok=True)
+        before = sorted(str(path.relative_to(paths.run.parent)) for path in paths.run.parent.rglob("*"))
+        with controller.run_lock(initialization_lock):
+            with self.assertRaises(controller.ControllerError) as raised:
+                controller.initialize_run(
+                    self.repository, "active-init-test", self.request, self.context,
+                    [], "PRO_CLASS", None, None, True,
+                )
+            self.assertEqual(raised.exception.code, "RUN_LOCKED")
+            self.assertTrue(initialization_lock.is_file())
+            during = sorted(
+                str(path.relative_to(paths.run.parent))
+                for path in paths.run.parent.rglob("*")
+                if path != initialization_lock
+            )
+            self.assertEqual(before, during)
+        self.assertFalse(paths.run.exists())
+
+    def test_process_liveness_uses_non_signaling_windows_probe(self) -> None:
+        paths = controller.resolve_run(self.repository, "windows-lock-probe-test")
+        paths.run.mkdir(parents=True)
+        controller.write_json_atomic(
+            paths.lock,
+            {
+                "schema_version": controller.SCHEMA_VERSION,
+                "pid": 123,
+                "hostname": controller.socket.gethostname(),
+                "created_at_unix": 1,
+            },
+        )
+        with (
+            patch.object(controller.os, "name", "nt"),
+            patch.object(
+                controller, "_windows_process_status", return_value="active"
+            ) as probe,
+            patch.object(controller.os, "kill") as kill,
+        ):
+            self.assertEqual(controller._lock_status(paths.lock), "active")
+        probe.assert_called_once_with(123)
+        kill.assert_not_called()
 
     def test_failed_preflight_cleans_owned_run_and_allows_same_slug_retry(self) -> None:
         (self.repository / "new-product.py").write_text("value = 1\n", encoding="utf-8")
@@ -763,6 +1096,42 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn(failures[0].code, {"RUN_LOCKED", "RUN_EXISTS"})
         paths = controller.resolve_run(self.repository, "race-test")
+        self.assertTrue(paths.state.is_file())
+        self.assertEqual(list(paths.transactions.iterdir()), [])
+
+    def test_concurrent_incomplete_retries_have_one_owner_and_one_valid_run(self) -> None:
+        paths = controller.resolve_run(self.repository, "retry-race-test")
+        paths.transactions.mkdir(parents=True)
+        barrier = threading.Barrier(2)
+
+        def retry() -> object:
+            barrier.wait()
+            try:
+                return controller.initialize_run(
+                    self.repository,
+                    "retry-race-test",
+                    self.request,
+                    self.context,
+                    [],
+                    "PRO_CLASS",
+                    None,
+                    None,
+                    True,
+                )
+            except controller.ControllerError as exc:
+                return exc
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _: retry(), range(2)))
+        successes = [result for result in results if isinstance(result, dict)]
+        failures = [result for result in results if isinstance(result, controller.ControllerError)]
+        self.assertEqual(len(successes), 1)
+        self.assertEqual(successes[0]["phase"], "REQUIREMENTS_PENDING")
+        self.assertEqual(len(failures), 1)
+        self.assertIn(
+            failures[0].code,
+            {"RUN_LOCKED", "INIT_RECOVERY_REFUSED"},
+        )
         self.assertTrue(paths.state.is_file())
         self.assertEqual(list(paths.transactions.iterdir()), [])
 

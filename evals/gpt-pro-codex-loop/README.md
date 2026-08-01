@@ -7,9 +7,10 @@ This directory combines deterministic protocol/snapshot tests with observed, non
 ```powershell
 python evals/gpt-pro-codex-loop/test_validate_packet.py -v
 python evals/gpt-pro-codex-loop/test_capture_snapshot.py -v
+python -m unittest evals.gpt-pro-codex-loop.test_gpc_loop -v
 ```
 
-The tests cover strict JSON, closed/versioned objects, correlated envelopes and replay, requirements approval/lineage, report/review context, locally derived finding fingerprints, state transitions, final-gate evidence, immutable preflight, canonical product identity, attribution, path/metadata safety, unstable observation, and all snapshot CLI commands.
+The tests cover strict JSON, closed/versioned objects, correlated envelopes and replay, requirements approval/lineage, report/review context, locally derived finding fingerprints, state transitions, final-gate evidence, immutable preflight, canonical product identity, attribution, path/metadata safety, unstable observation, and all snapshot CLI commands. Controller coverage also exercises 300+ path manifests, exact and stale approval, unsafe manifest paths, bounded actionable errors, executable recovery argv, pre-state interruption shapes, live-lock refusal, ambiguous/established-run refusal, and concurrent initialization.
 
 ## Fresh-context behavior method
 

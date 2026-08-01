@@ -14,6 +14,7 @@ import gpc_loop_controller as controller
 
 COMMANDS = frozenset(
     {
+        "inspect-init",
         "init",
         "prepare-requirements",
         "accept-requirements",
@@ -52,10 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="gpc_loop.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    inspect = _command_parser(subparsers, "inspect-init")
+    inspect.add_argument("--write-approval-manifest", type=Path)
+
     init = _command_parser(subparsers, "init")
     init.add_argument("--request", required=True, type=Path)
     init.add_argument("--repository-context", required=True, type=Path)
-    init.add_argument("--approved-existing-path", action="append", default=[])
+    approval = init.add_mutually_exclusive_group()
+    approval.add_argument("--approved-existing-path", action="append", default=[])
+    approval.add_argument("--approved-existing-path-manifest", type=Path)
+    init.add_argument("--retry-incomplete", action="store_true")
     init.add_argument("--model-policy", required=True, choices=("PRO_CLASS", "EXACT_LABEL"))
     init.add_argument("--requested-model-label")
 
@@ -91,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _dispatch(args: argparse.Namespace) -> dict[str, object]:
+    if args.command == "inspect-init":
+        return controller.inspect_initialization(
+            args.repo, args.task, args.write_approval_manifest
+        )
     if args.command == "init":
         return controller.initialize_run(
             args.repo,
@@ -100,6 +111,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
             args.approved_existing_path,
             args.model_policy,
             args.requested_model_label,
+            args.approved_existing_path_manifest,
+            args.retry_incomplete,
         )
     if args.command == "prepare-requirements":
         return controller.prepare_requirements(args.repo, args.task, args.conflict_evidence)

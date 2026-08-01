@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -30,6 +31,28 @@ ATTEMPT_NAME = re.compile(r"(?:expected|abandoned|consumed)-attempt-(\d+)\.json\
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 NONCE = re.compile(r"[0-9a-f]{32}\Z")
 MAX_ABANDON_EVIDENCE_BYTES = 8192
+MAX_PATH_PREVIEW = 20
+INITIALIZATION_MARKER_NAME = "initialization.json"
+APPROVAL_MANIFEST_FIELDS = {
+    "schema_version",
+    "repository",
+    "task",
+    "baseline_head",
+    "initial_product_paths",
+    "path_count",
+    "path_set_digest",
+}
+INITIALIZATION_MARKER_FIELDS = {
+    "schema_version",
+    "kind",
+    "repository",
+    "task",
+    "baseline_head",
+    "pid",
+    "hostname",
+    "created_at_unix",
+}
+LOCK_FIELDS = {"schema_version", "pid", "hostname", "created_at_unix"}
 EXPECTED_HEADER_FIELDS = {
     "schema_version",
     "packet_type",
@@ -520,6 +543,497 @@ def _head_commit(repository: Path) -> str:
         raise ControllerError("PREFLIGHT_FAILED", "Git returned an invalid baseline commit.") from exc
 
 
+def _path_set_digest(paths: Sequence[str]) -> str:
+    return validate_packet.canonical_digest(
+        {"schema_version": SCHEMA_VERSION, "paths": list(paths)}
+    )
+
+
+def _approval_manifest(
+    paths: RunPaths, preflight: Mapping[str, object]
+) -> dict[str, object]:
+    initial = list(preflight["initial_product_paths"])
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "repository": str(paths.repository),
+        "task": paths.task_slug,
+        "baseline_head": preflight["baseline_head"],
+        "initial_product_paths": initial,
+        "path_count": len(initial),
+        "path_set_digest": _path_set_digest(initial),
+    }
+
+
+def _command_json(arguments: Sequence[str]) -> str:
+    return json.dumps(
+        list(arguments), ensure_ascii=False, separators=(",", ":"), allow_nan=False
+    )
+
+
+def _suggested_approval_manifest_path(paths: RunPaths) -> Path:
+    return (
+        paths.repository.parent
+        / f"{paths.repository.name}-{paths.task_slug}-approved-existing-paths.json"
+    ).resolve()
+
+
+def _init_argv(
+    paths: RunPaths,
+    request_path: Path,
+    repository_context_path: Path,
+    model_policy: str,
+    requested_model_label: str | None,
+    approved_existing_paths: Sequence[str] = (),
+    approved_existing_path_manifest: Path | None = None,
+    retry_incomplete: bool = False,
+) -> list[str]:
+    arguments = [
+        "python",
+        "skills/gpt-pro-codex-loop/scripts/gpc_loop.py",
+        "init",
+        "--repo",
+        str(paths.repository),
+        "--task",
+        paths.task_slug,
+        "--request",
+        str(Path(request_path).resolve()),
+        "--repository-context",
+        str(Path(repository_context_path).resolve()),
+        "--model-policy",
+        model_policy,
+    ]
+    if retry_incomplete:
+        arguments.append("--retry-incomplete")
+    if requested_model_label is not None:
+        arguments.extend(["--requested-model-label", requested_model_label])
+    if approved_existing_path_manifest is not None:
+        arguments.extend(
+            [
+                "--approved-existing-path-manifest",
+                str(Path(approved_existing_path_manifest).resolve()),
+            ]
+        )
+    else:
+        for approved_path in approved_existing_paths:
+            arguments.extend(["--approved-existing-path", approved_path])
+    return arguments
+
+
+def _approval_guidance(
+    paths: RunPaths,
+    preflight: Mapping[str, object],
+    request_path: Path,
+    repository_context_path: Path,
+    model_policy: str,
+    requested_model_label: str | None,
+) -> list[str]:
+    initial = list(preflight["initial_product_paths"])
+    preview = initial[:MAX_PATH_PREVIEW]
+    manifest_path = _suggested_approval_manifest_path(paths)
+    generate = [
+        "python",
+        "skills/gpt-pro-codex-loop/scripts/gpc_loop.py",
+        "inspect-init",
+        "--repo",
+        str(paths.repository),
+        "--task",
+        paths.task_slug,
+        "--write-approval-manifest",
+        str(manifest_path),
+    ]
+    retry = _init_argv(
+        paths,
+        request_path,
+        repository_context_path,
+        model_policy,
+        requested_model_label,
+        approved_existing_path_manifest=manifest_path,
+    )
+    details = [
+        f"initial_product_path_count:{len(initial)}",
+        f"path_set_digest:{_path_set_digest(initial)}",
+        *(f"path_preview:{path}" for path in preview),
+        f"omitted_path_count:{max(0, len(initial) - len(preview))}",
+        f"generate_manifest_argv:{_command_json(generate)}",
+        f"retry_init_argv:{_command_json(retry)}",
+    ]
+    return details
+
+
+def _manifest_errors(
+    manifest: object, paths: RunPaths, preflight: Mapping[str, object]
+) -> list[str]:
+    if not isinstance(manifest, dict):
+        return ["manifest: must be an object"]
+    errors: list[str] = []
+    missing = sorted(APPROVAL_MANIFEST_FIELDS - set(manifest))
+    unknown = sorted(set(manifest) - APPROVAL_MANIFEST_FIELDS)
+    errors.extend(f"manifest.{field}: missing required field" for field in missing)
+    errors.extend(f"manifest.{field}: unknown field" for field in unknown)
+    if missing:
+        return errors
+    if manifest.get("schema_version") != SCHEMA_VERSION or isinstance(
+        manifest.get("schema_version"), bool
+    ):
+        errors.append("manifest.schema_version: must be integer 1")
+    if manifest.get("repository") != str(paths.repository):
+        errors.append("manifest.repository: does not match the canonical repository")
+    if manifest.get("task") != paths.task_slug:
+        errors.append("manifest.task: does not match the requested task")
+    if manifest.get("baseline_head") != preflight.get("baseline_head"):
+        errors.append("manifest.baseline_head: is stale or does not match")
+    values = manifest.get("initial_product_paths")
+    approved: list[str] = []
+    if not isinstance(values, list):
+        errors.append("manifest.initial_product_paths: must be a list")
+    else:
+        for index, value in enumerate(values):
+            if not isinstance(value, str):
+                errors.append(f"manifest.initial_product_paths.{index}: must be a path")
+                continue
+            candidate = PurePosixPath(value)
+            if (
+                not value
+                or "\\" in value
+                or candidate.is_absolute()
+                or not candidate.parts
+                or candidate.parts[0].endswith(":")
+                or any(part in {"", ".", ".."} for part in candidate.parts)
+                or "/".join(candidate.parts) != value
+            ):
+                errors.append(
+                    f"manifest.initial_product_paths.{index}: invalid canonical path"
+                )
+                continue
+            approved.append(value)
+        if approved != sorted(set(approved)):
+            errors.append("manifest.initial_product_paths: must be sorted and unique")
+    if (
+        type(manifest.get("path_count")) is not int
+        or manifest.get("path_count") != len(approved)
+    ):
+        errors.append("manifest.path_count: does not match the path list")
+    if manifest.get("path_set_digest") != _path_set_digest(approved):
+        errors.append("manifest.path_set_digest: does not match the path list")
+    if not errors:
+        errors.extend(
+            capture_snapshot.validate_preflight(
+                dict(preflight), approved, paths.repository
+            )
+        )
+    return sorted(set(errors))
+
+
+def _load_manifest_approval(
+    manifest_path: Path,
+    paths: RunPaths,
+    preflight: Mapping[str, object],
+    request_path: Path,
+    repository_context_path: Path,
+    model_policy: str,
+    requested_model_label: str | None,
+) -> list[str]:
+    try:
+        manifest = load_json(Path(manifest_path))
+    except ControllerError as exc:
+        raise ControllerError(
+            "APPROVAL_MANIFEST_INVALID",
+            "The approved-path manifest could not be read or parsed.",
+        ) from exc
+    errors = _manifest_errors(manifest, paths, preflight)
+    if errors:
+        raise ControllerError(
+            "APPROVAL_MANIFEST_INVALID",
+            "The approved-path manifest is invalid, stale, or does not match the current preflight.",
+            [
+                *errors[:MAX_PATH_PREVIEW],
+                *_approval_guidance(
+                    paths,
+                    preflight,
+                    request_path,
+                    repository_context_path,
+                    model_policy,
+                    requested_model_label,
+                ),
+            ],
+        )
+    return list(manifest["initial_product_paths"])
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    try:
+        value = path.lstat()
+    except OSError:
+        return True
+    if stat.S_ISLNK(value.st_mode):
+        return True
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(value, "st_file_attributes", 0)
+    return bool(reparse and attributes & reparse)
+
+
+def _windows_process_status(pid: int) -> str:
+    """Probe a Windows PID without sending it a console control event."""
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+    error_invalid_parameter = 87
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    get_exit_code = kernel32.GetExitCodeProcess
+    get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    get_exit_code.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = open_process(process_query_limited_information, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == error_invalid_parameter:
+            return "stale"
+        if error == error_access_denied:
+            return "active"
+        return "ambiguous"
+    try:
+        exit_code = wintypes.DWORD()
+        if not get_exit_code(handle, ctypes.byref(exit_code)):
+            return "ambiguous"
+        return "active" if exit_code.value == still_active else "stale"
+    finally:
+        close_handle(handle)
+
+
+def _lock_status(path: Path) -> str:
+    if not path.exists():
+        return "absent"
+    if _is_link_or_reparse(path) or not path.is_file():
+        return "ambiguous"
+    try:
+        record = load_json(path)
+    except ControllerError:
+        return "ambiguous"
+    if set(record) != LOCK_FIELDS:
+        return "ambiguous"
+    if record.get("schema_version") != SCHEMA_VERSION or isinstance(
+        record.get("schema_version"), bool
+    ):
+        return "ambiguous"
+    pid = record.get("pid")
+    hostname = record.get("hostname")
+    created = record.get("created_at_unix")
+    if (
+        not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid <= 0
+        or hostname != socket.gethostname()
+        or not isinstance(created, int)
+        or isinstance(created, bool)
+    ):
+        return "ambiguous"
+    if os.name == "nt":
+        return _windows_process_status(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return "stale"
+    except PermissionError:
+        return "active"
+    except OSError:
+        return "stale"
+    return "active"
+
+
+def _valid_initialization_marker(path: Path, paths: RunPaths) -> bool:
+    try:
+        marker = load_json(path)
+    except ControllerError:
+        return False
+    return (
+        set(marker) == INITIALIZATION_MARKER_FIELDS
+        and marker.get("schema_version") == SCHEMA_VERSION
+        and marker.get("kind") == "gpc-loop-initialization"
+        and marker.get("repository") == str(paths.repository)
+        and marker.get("task") == paths.task_slug
+        and isinstance(marker.get("baseline_head"), str)
+        and isinstance(marker.get("pid"), int)
+        and not isinstance(marker.get("pid"), bool)
+        and marker["pid"] > 0
+        and marker.get("hostname") == socket.gethostname()
+        and isinstance(marker.get("created_at_unix"), int)
+        and not isinstance(marker.get("created_at_unix"), bool)
+    )
+
+
+def _incomplete_initialization(paths: RunPaths) -> dict[str, object]:
+    if not paths.run.exists():
+        return {"recognized": False, "reason": "absent", "lock_status": "absent"}
+    if _is_link_or_reparse(paths.run) or not paths.run.is_dir():
+        return {"recognized": False, "reason": "ambiguous", "lock_status": "ambiguous"}
+    if paths.state.exists():
+        return {"recognized": False, "reason": "established", "lock_status": _lock_status(paths.lock)}
+    children = list(paths.run.iterdir())
+    if any(_is_link_or_reparse(child) for child in children):
+        return {"recognized": False, "reason": "ambiguous", "lock_status": "ambiguous"}
+    names = {child.name for child in children}
+    marker = paths.run / INITIALIZATION_MARKER_NAME
+    marker_valid = marker.is_file() and _valid_initialization_marker(marker, paths)
+    marker_temporaries = {
+        name for name in names if name.startswith(f".{INITIALIZATION_MARKER_NAME}.")
+    }
+    legacy_allowed = {"transactions", ".lock"} | marker_temporaries
+    marker_allowed = {
+        "transactions",
+        ".lock",
+        INITIALIZATION_MARKER_NAME,
+        "request.md",
+        "repository-context.md",
+        "preflight.json",
+    } | marker_temporaries
+    if not marker_valid and not names <= legacy_allowed:
+        return {"recognized": False, "reason": "ambiguous", "lock_status": _lock_status(paths.lock)}
+    if marker_valid and not names <= marker_allowed:
+        return {"recognized": False, "reason": "ambiguous", "lock_status": _lock_status(paths.lock)}
+    transaction_root = paths.transactions
+    if transaction_root.exists():
+        if _is_link_or_reparse(transaction_root) or not transaction_root.is_dir():
+            return {"recognized": False, "reason": "ambiguous", "lock_status": "ambiguous"}
+        transactions = list(transaction_root.iterdir())
+        if not marker_valid and transactions:
+            return {"recognized": False, "reason": "ambiguous", "lock_status": _lock_status(paths.lock)}
+        if len(transactions) > 1:
+            return {"recognized": False, "reason": "ambiguous", "lock_status": _lock_status(paths.lock)}
+        for transaction in transactions:
+            if (
+                _is_link_or_reparse(transaction)
+                or not transaction.is_dir()
+                or not transaction.name.startswith("initialize-")
+            ):
+                return {"recognized": False, "reason": "ambiguous", "lock_status": "ambiguous"}
+            allowed_staged = {"request.md", "repository-context.md", "preflight.json", "state.json"}
+            for staged in transaction.iterdir():
+                temporary = any(
+                    staged.name.startswith(f".{name}.") for name in allowed_staged
+                )
+                if (
+                    _is_link_or_reparse(staged)
+                    or not staged.is_file()
+                    or (staged.name not in allowed_staged and not temporary)
+                ):
+                    return {"recognized": False, "reason": "ambiguous", "lock_status": "ambiguous"}
+    lock_state = _lock_status(paths.lock)
+    if lock_state == "ambiguous":
+        return {"recognized": False, "reason": "ambiguous", "lock_status": lock_state}
+    return {"recognized": True, "reason": "incomplete", "lock_status": lock_state}
+
+
+def _remove_verified_incomplete(paths: RunPaths) -> None:
+    classification = _incomplete_initialization(paths)
+    if not classification["recognized"]:
+        raise ControllerError(
+            "INIT_RECOVERY_REFUSED",
+            "Incomplete initialization is ambiguous; no files were changed.",
+        )
+    if classification["lock_status"] == "active":
+        raise ControllerError("RUN_LOCKED", "Incomplete initialization is still active.")
+    staged_names = {"request.md", "repository-context.md", "preflight.json", "state.json"}
+    if paths.transactions.is_dir():
+        for transaction in list(paths.transactions.iterdir()):
+            for staged in list(transaction.iterdir()):
+                if staged.name not in staged_names and not any(
+                    staged.name.startswith(f".{name}.") for name in staged_names
+                ):
+                    raise ControllerError(
+                        "INIT_RECOVERY_REFUSED",
+                        "Incomplete initialization changed during recovery; no foreign file was removed.",
+                    )
+                staged.unlink()
+            transaction.rmdir()
+        paths.transactions.rmdir()
+    for child in list(paths.run.iterdir()):
+        if child.is_file() and (
+            child.name
+            in {
+                ".lock",
+                INITIALIZATION_MARKER_NAME,
+                "request.md",
+                "repository-context.md",
+                "preflight.json",
+            }
+            or child.name.startswith(f".{INITIALIZATION_MARKER_NAME}.")
+        ):
+            child.unlink()
+    try:
+        paths.run.rmdir()
+    except OSError as exc:
+        raise ControllerError(
+            "INIT_RECOVERY_REFUSED",
+            "Incomplete initialization changed during recovery; no foreign file was removed.",
+        ) from exc
+
+
+def _remove_stale_initialization_lock(path: Path) -> None:
+    try:
+        owned_stat = path.stat()
+    except OSError as exc:
+        raise ControllerError(
+            "INIT_RECOVERY_REFUSED",
+            "Initialization lock changed during recovery; no files were changed.",
+        ) from exc
+    status = _lock_status(path)
+    if status == "active":
+        raise ControllerError("RUN_LOCKED", "Initialization is already active.")
+    if status != "stale":
+        raise ControllerError(
+            "INIT_RECOVERY_REFUSED",
+            "Initialization lock is ambiguous; no files were changed.",
+        )
+    try:
+        if not os.path.samestat(owned_stat, path.stat()):
+            raise ControllerError(
+                "INIT_RECOVERY_REFUSED",
+                "Initialization lock changed during recovery; no files were changed.",
+            )
+        path.unlink()
+    except ControllerError:
+        raise
+    except OSError as exc:
+        raise ControllerError("LOCK_FAILED", "Could not remove the verified stale initialization lock.") from exc
+
+
+def inspect_initialization(
+    repository: Path, task_slug: str, output_path: Path | None = None
+) -> dict[str, object]:
+    """Inspect initial product paths without creating controller run state."""
+    paths = resolve_run(repository, task_slug)
+    if paths.run.exists():
+        classification = _incomplete_initialization(paths)
+        if not classification["recognized"]:
+            raise ControllerError(
+                "RUN_EXISTS", "Cannot inspect initialization for an established or ambiguous run."
+            )
+    preflight = capture_snapshot.inspect_preflight(
+        paths.repository, _head_commit(paths.repository)
+    )
+    manifest = _approval_manifest(paths, preflight)
+    if output_path is not None:
+        write_json_atomic(Path(output_path), manifest)
+    initial = list(manifest["initial_product_paths"])
+    result: dict[str, object] = {
+        "initial_product_path_count": len(initial),
+        "path_set_digest": manifest["path_set_digest"],
+        "path_preview": initial[:MAX_PATH_PREVIEW],
+        "omitted_path_count": max(0, len(initial) - MAX_PATH_PREVIEW),
+        "approval_manifest_path": str(Path(output_path).resolve()) if output_path else None,
+    }
+    return result
+
+
 def _owned_path(path: Path) -> tuple[Path, os.stat_result]:
     return path, path.stat()
 
@@ -567,18 +1081,77 @@ def initialize_run(
     approved_existing_paths: Sequence[str],
     model_policy: str,
     requested_model_label: str | None,
+    approved_existing_path_manifest: Path | None = None,
+    retry_incomplete: bool = False,
 ) -> dict[str, object]:
     """Create a fully validated, conversation-unbound controller run."""
     paths = resolve_run(repository, task_slug)
     _validate_model_policy(model_policy, requested_model_label)
     request_text = _read_input(request_path, "request")
     context_text = _read_input(repository_context_path, "repository context")
+    if approved_existing_path_manifest is not None and approved_existing_paths:
+        raise ControllerError(
+            "APPROVAL_SOURCE_CONFLICT",
+            "Use either approved path arguments or one approved-path manifest, not both.",
+        )
     metadata = paths.run.parent
     metadata.mkdir(parents=True, exist_ok=True)
     initialization_lock = metadata / f".{paths.task_slug}.initialize.lock"
+    if retry_incomplete and initialization_lock.exists():
+        _remove_stale_initialization_lock(initialization_lock)
     with run_lock(initialization_lock):
         if paths.run.exists():
-            raise ControllerError("RUN_EXISTS", "Run already exists.")
+            classification = _incomplete_initialization(paths)
+            if retry_incomplete:
+                if classification["reason"] == "established":
+                    raise ControllerError(
+                        "INIT_RECOVERY_REFUSED",
+                        "Cannot retry an established run; no files were changed.",
+                    )
+                if not classification["recognized"]:
+                    raise ControllerError(
+                        "INIT_RECOVERY_REFUSED",
+                        "Incomplete initialization is ambiguous; no files were changed.",
+                    )
+                _remove_verified_incomplete(paths)
+            elif classification["recognized"]:
+                retry_manifest = approved_existing_path_manifest
+                retry_paths = approved_existing_paths
+                details: list[str] = []
+                if retry_manifest is None and len(retry_paths) > MAX_PATH_PREVIEW:
+                    retry_manifest = _suggested_approval_manifest_path(paths)
+                    retry_paths = []
+                    generate_argv = [
+                        "python",
+                        "skills/gpt-pro-codex-loop/scripts/gpc_loop.py",
+                        "inspect-init",
+                        "--repo",
+                        str(paths.repository),
+                        "--task",
+                        paths.task_slug,
+                        "--write-approval-manifest",
+                        str(retry_manifest),
+                    ]
+                    details.append(f"generate_manifest_argv:{_command_json(generate_argv)}")
+                retry_argv = _init_argv(
+                    paths,
+                    request_path,
+                    repository_context_path,
+                    model_policy,
+                    requested_model_label,
+                    retry_paths,
+                    retry_manifest,
+                    retry_incomplete=True,
+                )
+                details.append(f"retry_init_argv:{_command_json(retry_argv)}")
+                raise ControllerError(
+                    "INIT_INCOMPLETE",
+                    "A recognized incomplete initialization exists; retry explicitly.",
+                    details,
+                )
+            else:
+                raise ControllerError("RUN_EXISTS", "Run already exists or is ambiguous.")
+        baseline_head = _head_commit(paths.repository)
         try:
             paths.run.mkdir()
         except FileExistsError as exc:
@@ -587,26 +1160,62 @@ def initialize_run(
         initialized = False
         committed_paths: list[tuple[Path, os.stat_result]] = []
         try:
+            marker_path = paths.run / INITIALIZATION_MARKER_NAME
+            write_json_atomic(
+                marker_path,
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "kind": "gpc-loop-initialization",
+                    "repository": str(paths.repository),
+                    "task": paths.task_slug,
+                    "baseline_head": baseline_head,
+                    "pid": os.getpid(),
+                    "hostname": socket.gethostname(),
+                    "created_at_unix": int(time.time()),
+                },
+            )
+            committed_paths.append(_owned_path(marker_path))
             paths.transactions.mkdir()
             with run_lock(paths.lock):
                 lock_acquired = True
                 preflight = capture_snapshot.inspect_preflight(
-                    paths.repository, _head_commit(paths.repository)
+                    paths.repository, baseline_head
                 )
+                if approved_existing_path_manifest is not None:
+                    approved_existing_paths = _load_manifest_approval(
+                        approved_existing_path_manifest,
+                        paths,
+                        preflight,
+                        request_path,
+                        repository_context_path,
+                        model_policy,
+                        requested_model_label,
+                    )
                 preflight_errors = capture_snapshot.validate_preflight(
                     preflight, approved_existing_paths, paths.repository
                 )
                 if preflight_errors:
                     message = "Preflight has unapproved or invalid product paths."
+                    code = "PREFLIGHT_INVALID"
+                    details = list(preflight_errors[:MAX_PATH_PREVIEW])
                     if any(
                         error.startswith("unapproved pre-existing")
                         for error in preflight_errors
                     ):
                         message = "Preflight has unapproved pre-existing product paths."
+                        code = "PREFLIGHT_APPROVAL_REQUIRED"
+                        details = _approval_guidance(
+                            paths,
+                            preflight,
+                            request_path,
+                            repository_context_path,
+                            model_policy,
+                            requested_model_label,
+                        )
                     raise ControllerError(
-                        "PREFLIGHT_INVALID",
+                        code,
                         message,
-                        preflight_errors,
+                        details,
                     )
                 approved_paths = _normalize_approved_paths(approved_existing_paths)
                 previous = initial_state(
@@ -2916,6 +3525,7 @@ def _unreachable_artifacts(
         "events.jsonl",
         "transactions",
         ".lock",
+        INITIALIZATION_MARKER_NAME,
         "prompts",
         "responses",
     }
@@ -2945,8 +3555,51 @@ def _unreachable_artifacts(
 def status_run(repository: Path, task_slug: str) -> dict[str, object]:
     """Report controller progress without modifying run artifacts or locks."""
     paths = resolve_run(repository, task_slug)
-    if not paths.run.is_dir() or not paths.state.is_file():
+    if not paths.run.exists():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    if not paths.state.is_file():
+        classification = _incomplete_initialization(paths)
+        if classification["recognized"]:
+            active = classification["lock_status"] == "active"
+            retry_argv = [
+                "python",
+                "skills/gpt-pro-codex-loop/scripts/gpc_loop.py",
+                "init",
+                "--repo",
+                str(paths.repository),
+                "--task",
+                paths.task_slug,
+                "--retry-incomplete",
+                "--request",
+                "REQUEST.md",
+                "--repository-context",
+                "CONTEXT.md",
+                "--model-policy",
+                "PRO_CLASS",
+            ]
+            return {
+                "phase": "INIT_INCOMPLETE",
+                "active_requirements_revision": None,
+                "review_round": 0,
+                "conversation": {"binding_state": "CONVERSATION_UNBOUND", "url": None},
+                "model": {"policy": None, "requested_label": None, "visible_label": None},
+                "required_actions": [],
+                "unresolved_finding_ids": [],
+                "blocker_fingerprints": [],
+                "stop_origin_category": "INITIALIZATION",
+                "outstanding_attempts": [],
+                "lock_present": paths.lock.exists(),
+                "orphan_transactions": [],
+                "recovery_required": True,
+                "recovery_transaction_paths": [],
+                "recovery_guidance": f"retry_init_argv:{_command_json(retry_argv)}",
+                "unreachable_artifacts": [],
+                "next_commands": [] if active else ["init --retry-incomplete"],
+            }
+        raise ControllerError(
+            "INIT_RECOVERY_REQUIRED",
+            "Run state is missing and initialization artifacts are ambiguous; no automatic recovery is allowed.",
+        )
     state = load_json(paths.state)
     attempts = _outstanding_attempts(paths)
     outstanding = attempts[0] if len(attempts) == 1 else None

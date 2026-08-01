@@ -53,7 +53,34 @@ REVIEW_CONTEXT.json:
 
 ## Controller CLI
 
-The normal-loop entry point is `python skills/gpt-pro-codex-loop/scripts/gpc_loop.py COMMAND`. Every command accepts `--repo REPOSITORY --task TASK`. `init` additionally requires `--request FILE --repository-context FILE --model-policy PRO_CLASS|EXACT_LABEL`, with repeatable `--approved-existing-path PATH` and optional `--requested-model-label LABEL`. The other command-specific inputs are:
+The normal-loop entry point is `python skills/gpt-pro-codex-loop/scripts/gpc_loop.py COMMAND`. Every command accepts `--repo REPOSITORY --task TASK`. Initialization has two commands:
+
+```text
+inspect-init  [--write-approval-manifest FILE]
+init          --request FILE --repository-context FILE --model-policy PRO_CLASS|EXACT_LABEL
+              [--requested-model-label LABEL] [--retry-incomplete]
+              [--approved-existing-path PATH ... | --approved-existing-path-manifest FILE]
+```
+
+`inspect-init` is read-only with respect to run-owned state. It returns a path count, canonical set digest, at most 20 preview paths, omitted count, and the resolved output path or `null`. Only an explicit `--write-approval-manifest` atomically writes a candidate manifest; its parent must already exist. Keep that file outside the inspected repository so it does not change the product-path set. Generation does not constitute approval.
+
+The closed manifest schema is:
+
+```json
+{
+  "schema_version": 1,
+  "repository": "CANONICAL-ABSOLUTE-REPOSITORY",
+  "task": "TASK-SLUG",
+  "baseline_head": "40-HEX-GIT-OID",
+  "initial_product_paths": ["canonical/repository-relative/path"],
+  "path_count": 1,
+  "path_set_digest": "sha256:..."
+}
+```
+
+Passing the manifest to `init` explicitly approves exactly its complete sorted unique path list. Init re-inspects under the initialization lock and rejects missing, extra, stale, malformed, non-canonical, absolute, traversal, duplicate, repository-mismatched, or task-mismatched entries before publishing `state.json`. The manifest option and repeated `--approved-existing-path` are mutually exclusive; repeated per-path approval remains supported unchanged. `--retry-incomplete` does not weaken any approval or preflight check.
+
+The remaining command-specific inputs are:
 
 ```text
 prepare-requirements  [--conflict-evidence FILE]
@@ -86,13 +113,17 @@ abandon-attempt       --send-status NOT_SENT --not-sent-evidence FILE
 
 `--request` and `--repository-context` are UTF-8 text inputs read with universal-newline handling: CRLF and bare CR become LF before persistence. No trailing newline is added or removed; any trailing newline sequence is preserved after that line-ending normalization. `--conflict-evidence`, `--supplemental-evidence`, and `--approval-evidence` are readable, non-empty UTF-8 text files. `--not-sent-evidence` is readable, non-empty UTF-8 text normalized to LF and stored up to 8192 UTF-8 bytes; it is valid only with literal `--send-status NOT_SENT`. `accept-*` always receives the complete raw response plus the URL and model label observed in the Browser at acceptance time.
 
-Each non-help invocation prints exactly one canonical UTF-8 JSON object and one LF: success is `{"ok":true,"command":"COMMAND","result":RESULT}`; a stable controller failure is `{"ok":false,"command":"COMMAND","error":{"code":"CODE","message":"MESSAGE","details":[]}}`. Success exits `0`, an expected controller failure exits `2`, and an unexpected failure returns `INTERNAL_ERROR` with exit `1`; `--debug` sends its traceback only to stderr.
+Each non-help invocation prints exactly one canonical UTF-8 JSON object and one LF: success is `{"ok":true,"command":"COMMAND","result":RESULT}`; a stable controller failure is `{"ok":false,"command":"COMMAND","error":{"code":"CODE","message":"MESSAGE","details":[]}}`. Success exits `0`, an expected controller failure exits `2`, and an unexpected failure returns `INTERNAL_ERROR` with exit `1`; `--debug` sends its traceback only to stderr. New expected failures use `PREFLIGHT_APPROVAL_REQUIRED`, `APPROVAL_MANIFEST_INVALID`, `APPROVAL_SOURCE_CONFLICT`, `INIT_INCOMPLETE`, `INIT_RECOVERY_REQUIRED`, or `INIT_RECOVERY_REFUSED`; lock contention remains `RUN_LOCKED`. CLI mutual-exclusion errors remain `ARGUMENT_ERROR`. These all use exit `2` and preserve the envelope shape.
+
+Large approval failures are bounded independently of repository size. `details` contains `initial_product_path_count`, `path_set_digest`, no more than 20 `path_preview` entries, `omitted_path_count`, and `generate_manifest_argv` / `retry_init_argv` JSON arrays. The suggested manifest path is outside the repository, and the argv records the actual request, context, model, repository, and task values so executing the generation argv and then the retry argv is sufficient when the inspected set remains unchanged.
 
 Use `status` before every controller mutation after `init` and follow only its `next_commands`. The controller writes artifacts and validates candidates before replacing `state.json` last. Its consumed-envelope set comes only from trusted chain-head fields in `state.json`, never from scanning artifact history. It derives and validates every prompt/header digest, state transition, snapshot/report binding, and final gate; never hand-author those artifacts. `abandon-attempt` atomically replaces only the outstanding expected attempt with a `NOT_SENT` receipt and preserves `state.json` and all domain artifacts unchanged.
 
 ## Recovery
 
-An existing transaction directory is a manual recovery boundary. `status` remains read-only, returns `recovery_required: true`, reports the exact transaction paths and unreachable artifacts, and returns an empty `next_commands`; every normal mutation returns `RECOVERY_REQUIRED`. Preserve `state.json`, the complete transaction directory, its manifest/staged files/backups, and all run artifacts byte-for-byte. Do not delete, rename, restore, publish, or otherwise repair them through the normal controller. Escalate to the user before any resolution.
+`status` never repairs or removes files. True absence returns `RUN_NOT_FOUND`. A no-state run that matches the versioned controller marker or the documented legacy-minimal allowlist, contains only allowed pre-state files, has no link/reparse-point escape, and has no live lock is reported as `phase: INIT_INCOMPLETE` with `next_commands: ["init --retry-incomplete"]`. Retry must repeat all normal input, model, and approval arguments. It acquires the initialization lock, removes only the reclassified allowlisted scaffolding, and runs a fresh normal initialization. A live lock returns `RUN_LOCKED` without mutation.
+
+Any `state.json` (including malformed state), unexpected or foreign artifact, ambiguous ownership, malformed lock, link/reparse point, or established-run evidence makes retry return `INIT_RECOVERY_REFUSED` without mutation. A no-state ambiguous run is `INIT_RECOVERY_REQUIRED`. An existing transaction on an established run remains a manual recovery boundary: `status` returns `recovery_required: true`, reports exact transaction paths and unreachable artifacts, and returns an empty `next_commands`; normal mutations return `RECOVERY_REQUIRED`. Preserve `state.json`, the complete transaction directory, its manifest/staged files/backups, and all run artifacts byte-for-byte. Do not delete, rename, restore, publish, or otherwise repair them through the normal controller. Escalate to the user before any resolution.
 
 Re-run the exact read-only status command as needed:
 
@@ -269,6 +300,7 @@ Persisted requirements, report, review, state, envelope, preflight, snapshot, an
 
 ```text
 <repo>/.ai-pro-loop/<task-slug>/
+├── initialization.json
 ├── request.md
 ├── repository-context.md
 ├── preflight.json
