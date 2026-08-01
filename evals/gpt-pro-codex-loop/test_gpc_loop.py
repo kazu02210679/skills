@@ -1023,6 +1023,29 @@ class ControllerCase(unittest.TestCase):
             self.assertEqual(before, during)
         self.assertFalse(paths.run.exists())
 
+    def test_process_liveness_uses_non_signaling_windows_probe(self) -> None:
+        paths = controller.resolve_run(self.repository, "windows-lock-probe-test")
+        paths.run.mkdir(parents=True)
+        controller.write_json_atomic(
+            paths.lock,
+            {
+                "schema_version": controller.SCHEMA_VERSION,
+                "pid": 123,
+                "hostname": controller.socket.gethostname(),
+                "created_at_unix": 1,
+            },
+        )
+        with (
+            patch.object(controller.os, "name", "nt"),
+            patch.object(
+                controller, "_windows_process_status", return_value="active"
+            ) as probe,
+            patch.object(controller.os, "kill") as kill,
+        ):
+            self.assertEqual(controller._lock_status(paths.lock), "active")
+        probe.assert_called_once_with(123)
+        kill.assert_not_called()
+
     def test_failed_preflight_cleans_owned_run_and_allows_same_slug_retry(self) -> None:
         (self.repository / "new-product.py").write_text("value = 1\n", encoding="utf-8")
         paths = controller.resolve_run(self.repository, "retry-test")

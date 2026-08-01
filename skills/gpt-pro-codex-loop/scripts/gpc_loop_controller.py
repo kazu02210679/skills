@@ -772,6 +772,43 @@ def _is_link_or_reparse(path: Path) -> bool:
     return bool(reparse and attributes & reparse)
 
 
+def _windows_process_status(pid: int) -> str:
+    """Probe a Windows PID without sending it a console control event."""
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+    error_invalid_parameter = 87
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    get_exit_code = kernel32.GetExitCodeProcess
+    get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    get_exit_code.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = open_process(process_query_limited_information, False, pid)
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == error_invalid_parameter:
+            return "stale"
+        if error == error_access_denied:
+            return "active"
+        return "ambiguous"
+    try:
+        exit_code = wintypes.DWORD()
+        if not get_exit_code(handle, ctypes.byref(exit_code)):
+            return "ambiguous"
+        return "active" if exit_code.value == still_active else "stale"
+    finally:
+        close_handle(handle)
+
+
 def _lock_status(path: Path) -> str:
     if not path.exists():
         return "absent"
@@ -799,6 +836,8 @@ def _lock_status(path: Path) -> str:
         or isinstance(created, bool)
     ):
         return "ambiguous"
+    if os.name == "nt":
+        return _windows_process_status(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
