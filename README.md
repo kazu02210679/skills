@@ -67,6 +67,12 @@ host-specific behavior.
 3. Add or update a focused evaluation when behavior changes.
 4. Regenerate the catalog and run validation.
 
+When a Skill documents an interface this repository does not own, pin the
+version it was verified against and add a check that fails when the real
+interface moves. Prose describing someone else's API goes stale silently;
+`claude-code-discord-bot` carries both a contract checker and a compiled
+example for that reason.
+
 ## Verify
 
 ```bash
@@ -76,12 +82,32 @@ python scripts/validate-skills.py
 python -m unittest discover -s tests -v
 ```
 
+`claude-code-discord-bot` also ships a TypeScript example that is compiled
+against a pinned Claude Agent SDK. It needs Node and runs on every pull
+request:
+
+```bash
+cd evals/claude-code-discord-bot/typecheck
+npm ci
+npm run typecheck
+```
+
+Two CI jobs do not run on pull requests. The `bash-4-4` job covers
+`codex-orchestration` on an old Bash, and `discord-bot-sdk-contract` checks the
+documented Claude Code contract against the latest published SDK and CLI on a
+weekly schedule, so an upstream release surfaces as its own failure instead of
+turning an unrelated pull request red. Trigger it by hand with
+`workflow_dispatch` when changing that Skill's contract.
+
 ## Repository layout
 
 ```text
 skills/       canonical Skills
-evals/        Skill evaluations
+evals/        Skill evaluations, fixtures, and the TypeScript typecheck harness
 scripts/      installation, catalog, and validation tools
 docs/         compatibility and design records
 third_party/  redistributed third-party artifacts and licenses
 ```
+
+Validation and tests are Python only. Node is needed for the one typecheck
+harness under `evals/claude-code-discord-bot/typecheck/`.
