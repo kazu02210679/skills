@@ -3,30 +3,40 @@
 The data contract between Discord, the bridge process, and Claude Code.
 
 Verified against `@anthropic-ai/claude-agent-sdk` 0.3.220 type declarations and Claude Code CLI
-2.1.220 `--help`. Re-verify with `scripts/check_sdk_contract.py` before trusting an older copy of
-this file; these shapes have changed before.
+2.1.220, by reading the shipped declarations and by running the CLI, not by reading prose. Re-verify
+with `scripts/check_sdk_contract.py` before trusting an older copy of this file; these shapes have
+changed before.
 
-## Two session origins, two configuration blocks
+## Two session origins, and only one approval path
 
 A bridge-owned session and a terminal-started session need different plumbing, so the config keeps
-them apart. Never describe one approval path as if it covered both.
+them apart.
 
-| Flow | `bridge_sessions` | `terminal_sessions` |
-|---|---|---|
-| Instruct | Agent SDK `query()`, or `claude -p` | not applicable |
-| Notify | the SDK message stream | `Stop` and `Notification` hooks, type `http` |
-| Approve | the `canUseTool` callback | the `PermissionRequest` hook, type `http` |
+| Flow | `bridge_sessions`, `agent-sdk` | `bridge_sessions`, `cli` | `terminal_sessions` |
+|---|---|---|---|
+| Instruct | `query()` | `claude -p` | not applicable |
+| Notify | the SDK message stream | stream-json events | `Stop` and `Notification` hooks |
+| Approve | the `canUseTool` callback | **none** | the `PermissionRequest` hook |
 
-`canUseTool` is an Agent SDK callback. It does not exist on the CLI transport, and it never covers a
-session the user started in their own terminal.
+**`claude -p` has no approval path.** The `PermissionRequest` hook does not fire in print mode. This
+was measured, not inferred: with a `PermissionRequest` and a `PreToolUse` hook both registered
+through `--settings`, a `Bash` call under `permission_mode` `default` and again under `manual`, with
+a clean `HOME`, fired `PreToolUse` every time and `PermissionRequest` never.
+
+So an approval flow requires `bridge_sessions.transport: "agent-sdk"`. The validator rejects
+approval on the CLI transport rather than letting a bridge report a human-in-the-loop channel that
+silently never prompts. `PreToolUse` fires on every tool call, not only on ones needing a decision,
+so it is not a drop-in substitute; a bridge that wants CLI approval has to define that transport
+deliberately and accept the volume.
 
 ## Config schema
 
-`discord-bridge.json` at the user's project root. `scripts/validate_bridge_config.py` enforces it.
+`discord-bridge.json` at the user's project root. `scripts/validate_bridge_config.py` enforces it,
+and rejects unknown keys so a typo such as `fail_if_unavailble` cannot pass silently.
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "discord": {
     "guild_id": "123456789012345678",
     "command_channel_ids": ["223456789012345678"],
@@ -45,7 +55,11 @@ session the user started in their own terminal.
     "allowed_tools": ["Read", "Grep", "Glob"],
     "disallowed_tools": [],
     "max_concurrent_sessions": 2,
-    "sandbox": { "enabled": true, "fail_if_unavailable": true },
+    "sandbox": {
+      "enabled": true,
+      "fail_if_unavailable": true,
+      "allow_unsandboxed_commands": false
+    },
     "approval": {
       "enabled": true,
       "transport": "can-use-tool",
@@ -78,16 +92,30 @@ Either block may be `{"enabled": false}`. At least one must be enabled.
 
 ### Permission modes
 
-Taken from the shipped declarations, not from prose. The two hosts differ, and the difference is not
-the one an older draft of this file claimed.
-
 | Transport | Accepted values |
 |---|---|
 | Agent SDK (`PermissionMode`) | `default`, `acceptEdits`, `bypassPermissions`, `plan`, `dontAsk`, `auto` |
-| CLI (`--permission-mode` choices) | `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan` |
+| CLI (`--permission-mode`) | the same six, plus `manual` |
 
-The CLI does not accept `default`; omit the flag to get default behavior. The SDK does not accept
-`manual`. Both accept `acceptEdits` and `auto`.
+`claude --help` lists its choices without `default`, but the CLI accepts `--permission-mode default`
+and runs normally. Do not treat the help enumeration as the accepted set; the validator does not.
+
+### Which modes actually reach Discord
+
+The approval callback only sees a tool call that reaches a prompt. The mode decides how many do.
+
+| Mode | Reaches `canUseTool` | Config rule |
+|---|---|---|
+| `default` | everything not pre-approved | the canonical choice |
+| `acceptEdits` | not edits or common filesystem commands | requires `coverage: "partial"` |
+| `auto` | classifier decides most calls first | requires `coverage: "partial"` |
+| `plan` | no execution happens | requires `coverage: "partial"` |
+| `dontAsk` | nothing; unlisted tools are denied outright | rejected with approval enabled |
+| `bypassPermissions` | nothing; no prompts at all | rejected with approval enabled |
+
+`allowed_tools` narrows this further: a tool listed there, or granted by a loaded settings source, is
+auto-approved and never reaches Discord. Say which tools the operator will actually be asked about,
+rather than implying every tool call is gated.
 
 ### Setting sources
 
@@ -100,20 +128,33 @@ approval path ever runs.
 Set it explicitly. `["project"]` keeps `CLAUDE.md` and checked-in project settings, which is the
 usual choice. `[]` is full isolation; the managed-settings policy tier is still read.
 
+### Sandbox
+
+`SandboxSettings` is what `Options.sandbox` takes, and it carries `enabled`, `failIfUnavailable`,
+`autoAllowBashIfSandboxed`, `allowUnsandboxedCommands`, `network`, `filesystem`, and `credentials`.
+The config uses snake_case names and the bridge converts them.
+
+Two defaults make `enabled: true` alone weaker than it reads, so the validator requires both to be
+pinned whenever the sandbox is on:
+
+- `allowUnsandboxedCommands` **defaults to true**. A command can opt out of the sandbox through
+  `dangerouslyDisableSandbox`, and the decision goes back to the permission system. Set it `false`
+  for containment that does not depend on the model's restraint.
+- `failIfUnavailable` **defaults to false**. A host that cannot start a sandbox prints a warning and
+  runs unsandboxed. Set it `true` so a missing sandbox is a startup failure, not a silent downgrade.
+
+`network.strictAllowlist` is honored only from user, managed, or `--settings` sources; project
+settings are ignored for it. Do not put it in `.claude/settings.json` and expect enforcement.
+
 ### What `workspace_root` is, and is not
 
-`workspace_root` restricts **which project directories the bridge may open**. That is a useful
-input-validation rule and the validator enforces it.
+`workspace_root` restricts **which project directories the bridge may open**. That is useful input
+validation and the validator enforces it.
 
-It is not a filesystem sandbox. Claude Code can read outside the working directory, Bash reaches
+It is not a filesystem sandbox. Claude Code reads outside the working directory, Bash reaches
 absolute paths, and a symlink inside the workspace can point anywhere. A config-file validator
 cannot resolve symlinks on the machine that will eventually run the bridge, so it checks path shape
-only.
-
-Real containment needs `sandbox` settings, a container, or a VM. The SDK exposes `sandbox` with
-`enabled`, `failIfUnavailable`, `network.allowedDomains`, `filesystem.allowRead` / `allowWrite` /
-`denyRead` / `denyWrite`, and `credentials` deny rules. Use them when the host holds SSH keys,
-tokens, or other projects the operator should not reach through Discord.
+only. Real containment is the `sandbox` block above, a container, or a VM.
 
 ## Thread to session mapping
 
@@ -131,7 +172,7 @@ One Discord thread is one Claude Code session.
 ```bash
 claude -p "<prompt>" \
   --output-format stream-json --verbose \
-  --permission-mode acceptEdits \
+  --permission-mode default \
   --allowedTools "Read,Grep,Glob"
 ```
 
@@ -141,19 +182,39 @@ Resume a thread:
 claude -p "<prompt>" --output-format stream-json --verbose --resume "<session_id>"
 ```
 
-The CLI transport has no interactive approval callback. Route approval for CLI-driven sessions
-through the `PermissionRequest` hook, the same path terminal sessions use.
+Anything not covered by `--allowedTools` is decided without a prompt. Use this transport only when
+the user accepted that there is no approval step.
 
 ## Instruct and approve flow, Agent SDK transport
 
 `npm install @anthropic-ai/claude-agent-sdk`
 
-`canUseTool` takes the tool name and input as **separate positional arguments**, and returns a
+The code below is the whole of [can-use-tool-sample.mts](can-use-tool-sample.mts), which CI
+type-checks under `strict` against a pinned SDK. Edit that file and copy it here, never the reverse.
+
+`canUseTool` takes the tool name and input as **separate positional arguments** and returns a
 `PermissionResult` discriminated on `behavior`. It is not a request object, and it does not return
 `approved`.
 
 ```ts
 import { query } from "@anthropic-ai/claude-agent-sdk";
+
+type ApprovalAnswer =
+  | { decision: "deny" }
+  | {
+      decision: "allow";
+      editedInput?: Record<string, unknown>;
+      persistPermission?: boolean;
+    };
+
+declare function askDiscord(request: {
+  toolUseID: string;
+  prompt: string;
+  label: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  signal: AbortSignal;
+}): Promise<ApprovalAnswer>;
 
 const q = query({
   prompt: userMessage,
@@ -164,43 +225,42 @@ const q = query({
     settingSources: ["project"],      // omitting this loads user + project + local
     allowedTools: ["Read", "Grep", "Glob"],
 
-    canUseTool: async (toolName, input, { signal, suggestions, title, displayName }) => {
+    canUseTool: async (toolName, input, options) => {
       const answer = await askDiscord({
+        toolUseID: options.toolUseID,
         // `title` is the prompt sentence Claude Code already rendered, for example
-        // "Claude wants to read foo.txt". Prefer it over rebuilding text from toolName.
-        prompt: title ?? `${toolName}`,
-        label: displayName ?? toolName,
+        // "Claude wants to read foo.txt". Prefer it over rebuilding text yourself.
+        prompt: options.title ?? toolName,
+        label: options.displayName ?? toolName,
         toolName,
         input,
-        signal,
+        signal: options.signal,
       });
 
-      if (answer === "deny") {
+      if (answer.decision === "deny") {
         return { behavior: "deny", message: "Denied in Discord" };
       }
+
       return {
         behavior: "allow",
-        // Optional. Send it only when the approver edited the arguments.
         updatedInput: answer.editedInput,
-        // Only when the approver chose "always allow": pass the suggestions through
-        // so the same call is not asked again this session.
-        updatedPermissions: answer === "always" ? suggestions : undefined,
+        updatedPermissions: answer.persistPermission ? options.suggestions : undefined,
       };
     },
   },
 });
-
-for await (const message of q) {
-  // stream tool activity and assistant text to the thread
-}
 ```
 
-`canUseTool` runs only when the permission flow falls through to a prompt. A tool listed in
-`allowedTools`, or granted by a loaded settings source, is auto-approved and never reaches Discord.
+The callback options also carry `toolUseID`, `requestId`, `agentID`, `blockedPath`,
+`decisionReason`, and `matchedAskRule`. **Correlate with `toolUseID`**, which the SDK path does
+supply; the hook path is the one with no tool use ID. Never put either value in a Discord button ID
+where a guild member can read or forge it: mint an unguessable nonce for the button and keep the
+mapping in the bridge.
 
-The callback has no deadline: an unanswered permission prompt blocks that session indefinitely. The
-bridge owns the timeout. Resolve with `{ behavior: "deny", message: "Approval timed out" }` when the
-window expires, and honor `signal` so an aborted session does not leak a pending approval.
+`canUseTool` runs only when the permission flow falls through to a prompt, and it has no deadline of
+its own: an unanswered prompt blocks that session indefinitely. The bridge owns the timeout. Resolve
+with `{ behavior: "deny", message: "Approval timed out" }` when the window expires, and honor
+`signal` so an aborted session does not leak a pending approval.
 
 ## Notify flow, hook transport
 
@@ -261,8 +321,9 @@ Return `204` with an empty body. These hooks need no decision.
 
 ## Approve flow, hook transport
 
-`PermissionRequest` fires only when a tool call needs a decision, which is what a human-in-the-loop
-channel wants. `PreToolUse` fires on every tool call and would flood Discord.
+For sessions the user starts in their own terminal. `PermissionRequest` fires only when a tool call
+needs a decision, which is what a human-in-the-loop channel wants. `PreToolUse` fires on every tool
+call and would flood Discord.
 
 ```json
 {

@@ -122,39 +122,24 @@ class WorkspaceTests(BridgeConfigTestCase):
 
 
 class PermissionModeTests(BridgeConfigTestCase):
-    def test_agent_sdk_accepts_accept_edits(self):
+    def test_cli_accepts_default(self):
+        """`claude --help` omits it, but the CLI runs it. Verified by invoking it."""
         document = fixture("bridge-sessions.json")
-        document["bridge_sessions"]["permission_mode"] = "acceptEdits"
-        self.assertNoErrorMentions(
-            MODULE.validate_document(document), "permission_mode"
-        )
-
-    def test_agent_sdk_accepts_auto(self):
-        document = fixture("bridge-sessions.json")
-        document["bridge_sessions"]["permission_mode"] = "auto"
-        self.assertNoErrorMentions(
-            MODULE.validate_document(document), "permission_mode"
-        )
-
-    def test_agent_sdk_rejects_manual(self):
-        document = fixture("bridge-sessions.json")
-        document["bridge_sessions"]["permission_mode"] = "manual"
-        self.assertErrorMentions(MODULE.validate_document(document), "permission_mode")
+        document["bridge_sessions"]["transport"] = "cli"
+        document["bridge_sessions"]["approval"] = {"enabled": False}
+        document["bridge_sessions"]["permission_mode"] = "default"
+        self.assertEqual(MODULE.validate_document(document), [])
 
     def test_cli_accepts_manual(self):
         document = fixture("bridge-sessions.json")
         document["bridge_sessions"]["transport"] = "cli"
+        document["bridge_sessions"]["approval"] = {"enabled": False}
         document["bridge_sessions"]["permission_mode"] = "manual"
-        document["bridge_sessions"]["approval"] = {"enabled": False}
-        self.assertNoErrorMentions(
-            MODULE.validate_document(document), "permission_mode"
-        )
+        self.assertEqual(MODULE.validate_document(document), [])
 
-    def test_cli_rejects_default(self):
+    def test_agent_sdk_rejects_manual(self):
         document = fixture("bridge-sessions.json")
-        document["bridge_sessions"]["transport"] = "cli"
-        document["bridge_sessions"]["permission_mode"] = "default"
-        document["bridge_sessions"]["approval"] = {"enabled": False}
+        document["bridge_sessions"]["permission_mode"] = "manual"
         self.assertErrorMentions(MODULE.validate_document(document), "permission_mode")
 
     def test_unknown_permission_mode_is_rejected(self):
@@ -162,11 +147,54 @@ class PermissionModeTests(BridgeConfigTestCase):
         document["bridge_sessions"]["permission_mode"] = "yolo"
         self.assertErrorMentions(MODULE.validate_document(document), "permission_mode")
 
-    def test_bypass_permissions_with_approval_is_rejected(self):
+
+class ApprovalCoverageTests(BridgeConfigTestCase):
+    def _with_mode(self, mode: str, coverage: str | None = None) -> dict:
         document = fixture("bridge-sessions.json")
-        document["bridge_sessions"]["permission_mode"] = "bypassPermissions"
+        document["bridge_sessions"]["permission_mode"] = mode
+        if coverage is not None:
+            document["bridge_sessions"]["approval"]["coverage"] = coverage
+        return document
+
+    def test_bypass_permissions_with_approval_is_rejected(self):
         self.assertErrorMentions(
-            MODULE.validate_document(document), "suppresses the permission prompt"
+            MODULE.validate_document(self._with_mode("bypassPermissions")),
+            "never reaches the approval callback",
+        )
+
+    def test_dont_ask_with_approval_is_rejected(self):
+        self.assertErrorMentions(
+            MODULE.validate_document(self._with_mode("dontAsk")),
+            "never reaches the approval callback",
+        )
+
+    def test_accept_edits_needs_partial_coverage(self):
+        self.assertErrorMentions(
+            MODULE.validate_document(self._with_mode("acceptEdits")),
+            "approves some tools without prompting",
+        )
+
+    def test_auto_needs_partial_coverage(self):
+        self.assertErrorMentions(
+            MODULE.validate_document(self._with_mode("auto")),
+            "approves some tools without prompting",
+        )
+
+    def test_accept_edits_with_partial_coverage_is_accepted(self):
+        self.assertEqual(
+            MODULE.validate_document(self._with_mode("acceptEdits", "partial")), []
+        )
+
+    def test_partial_coverage_contradicts_default_mode(self):
+        self.assertErrorMentions(
+            MODULE.validate_document(self._with_mode("default", "partial")),
+            "contradicts permission_mode",
+        )
+
+    def test_unknown_coverage_is_rejected(self):
+        self.assertErrorMentions(
+            MODULE.validate_document(self._with_mode("default", "everything")),
+            "coverage must be one of",
         )
 
     def test_bypass_permissions_without_approval_is_accepted(self):
@@ -196,12 +224,22 @@ class SettingSourceTests(BridgeConfigTestCase):
 
 
 class ApprovalTransportTests(BridgeConfigTestCase):
-    def test_can_use_tool_requires_the_agent_sdk_transport(self):
+    """`claude -p` never fires PermissionRequest, so CLI sessions cannot be gated."""
+
+    def test_cli_transport_cannot_enable_approval(self):
         document = fixture("bridge-sessions.json")
         document["bridge_sessions"]["transport"] = "cli"
-        document["bridge_sessions"]["permission_mode"] = "acceptEdits"
         self.assertErrorMentions(
-            MODULE.validate_document(document), "is an Agent SDK callback"
+            MODULE.validate_document(document), "requires transport 'agent-sdk'"
+        )
+
+    def test_bridge_sessions_reject_the_permission_request_hook(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["approval"]["transport"] = (
+            "permission-request-hook"
+        )
+        self.assertErrorMentions(
+            MODULE.validate_document(document), "does not fire the PermissionRequest"
         )
 
     def test_terminal_sessions_reject_can_use_tool(self):
@@ -211,17 +249,10 @@ class ApprovalTransportTests(BridgeConfigTestCase):
             MODULE.validate_document(document), "terminal_sessions.approval.transport"
         )
 
-    def test_bridge_sessions_may_use_the_permission_request_hook(self):
+    def test_cli_transport_without_approval_is_accepted(self):
         document = fixture("bridge-sessions.json")
         document["bridge_sessions"]["transport"] = "cli"
-        document["bridge_sessions"]["permission_mode"] = "acceptEdits"
-        document["bridge_sessions"]["approval"] = {
-            "enabled": True,
-            "transport": "permission-request-hook",
-            "hook_timeout_seconds": 600,
-            "timeout_seconds": 300,
-            "on_timeout": "deny",
-        }
+        document["bridge_sessions"]["approval"] = {"enabled": False}
         self.assertEqual(MODULE.validate_document(document), [])
 
     def test_hook_timeout_on_can_use_tool_is_rejected(self):
@@ -229,6 +260,56 @@ class ApprovalTransportTests(BridgeConfigTestCase):
         document["bridge_sessions"]["approval"]["hook_timeout_seconds"] = 600
         self.assertErrorMentions(
             MODULE.validate_document(document), "applies only to the"
+        )
+
+
+class SandboxTests(BridgeConfigTestCase):
+    def test_enabled_sandbox_must_pin_allow_unsandboxed_commands(self):
+        document = fixture("bridge-sessions.json")
+        del document["bridge_sessions"]["sandbox"]["allow_unsandboxed_commands"]
+        self.assertErrorMentions(
+            MODULE.validate_document(document), "allow_unsandboxed_commands must be false"
+        )
+
+    def test_enabled_sandbox_must_pin_fail_if_unavailable(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["sandbox"]["fail_if_unavailable"] = False
+        self.assertErrorMentions(
+            MODULE.validate_document(document), "fail_if_unavailable must be true"
+        )
+
+    def test_disabled_sandbox_needs_no_pins(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["sandbox"] = {"enabled": False}
+        self.assertEqual(MODULE.validate_document(document), [])
+
+    def test_sandbox_typo_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["sandbox"]["fail_if_unavailble"] = True
+        self.assertErrorMentions(MODULE.validate_document(document), "unknown key")
+
+
+class UnknownKeyTests(BridgeConfigTestCase):
+    def test_unknown_top_level_key_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["runtime"] = {}
+        self.assertErrorMentions(MODULE.validate_document(document), "unknown key 'runtime'")
+
+    def test_unknown_discord_key_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["discord"]["guild"] = "123456789012345678"
+        self.assertErrorMentions(MODULE.validate_document(document), "unknown key 'guild'")
+
+    def test_unknown_bridge_key_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["model"] = "opus"
+        self.assertErrorMentions(MODULE.validate_document(document), "unknown key 'model'")
+
+    def test_unknown_notification_flag_is_rejected(self):
+        document = fixture("terminal-sessions.json")
+        document["terminal_sessions"]["notifications"]["on_everything"] = True
+        self.assertErrorMentions(
+            MODULE.validate_document(document), "unknown key 'on_everything'"
         )
 
 
@@ -308,13 +389,13 @@ class StructureTests(BridgeConfigTestCase):
         document["terminal_sessions"] = terminal["terminal_sessions"]
         self.assertEqual(MODULE.validate_document(document), [])
 
-    def test_version_one_is_rejected(self):
+    def test_old_version_is_rejected(self):
         document = fixture("bridge-sessions.json")
-        document["version"] = 1
+        document["version"] = 2
         self.assertErrorMentions(MODULE.validate_document(document), "version must be")
 
     def test_missing_top_level_keys_are_reported(self):
-        errors = MODULE.validate_document({"version": 2})
+        errors = MODULE.validate_document({"version": 3})
         self.assertErrorMentions(errors, "missing required key 'discord'")
         self.assertErrorMentions(errors, "at least one of bridge_sessions")
 
@@ -333,6 +414,12 @@ export declare type SettingSource = 'user' | 'project' | 'local';
 export declare type CanUseTool = (toolName: string, input: Record<string, unknown>, options: {
     signal: AbortSignal;
     suggestions?: PermissionUpdate[];
+    blockedPath?: string;
+    decisionReason?: string;
+    title?: string;
+    displayName?: string;
+    toolUseID: string;
+    requestId: string;
 }) => Promise<PermissionResult | null>;
 export declare type PermissionResult = {
     behavior: 'allow';
@@ -349,6 +436,12 @@ export declare type PermissionRequestHookInput = BaseHookInput & {
     tool_input: unknown;
     permission_suggestions?: PermissionUpdate[];
 };
+declare const SandboxSettingsSchema: () => z.ZodObject<{
+    enabled: z.ZodOptional<z.ZodBoolean>;
+    failIfUnavailable: z.ZodOptional<z.ZodBoolean>;
+    autoAllowBashIfSandboxed: z.ZodOptional<z.ZodBoolean>;
+    allowUnsandboxedCommands: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>;
 export declare type PermissionRequestHookSpecificOutput = {
     hookEventName: 'PermissionRequest';
     decision: {
@@ -396,6 +489,26 @@ export declare type PermissionRequestHookSpecificOutput = {
         drifted = self.CURRENT_TYPES.replace(" | 'acceptEdits'", "")
         self.assertErrorMentions(
             CONTRACT.check_sdk_types(drifted), "PermissionMode drifted"
+        )
+
+    def test_dropped_tool_use_id_option_is_flagged(self):
+        drifted = self.CURRENT_TYPES.replace("    toolUseID: string;\n", "", 1)
+        self.assertErrorMentions(
+            CONTRACT.check_sdk_types(drifted), "options no longer carry 'toolUseID'"
+        )
+
+    def test_dropped_title_option_is_flagged(self):
+        drifted = self.CURRENT_TYPES.replace("    title?: string;\n", "", 1)
+        self.assertErrorMentions(
+            CONTRACT.check_sdk_types(drifted), "options no longer carry 'title'"
+        )
+
+    def test_dropped_sandbox_key_is_flagged(self):
+        drifted = self.CURRENT_TYPES.replace(
+            "    allowUnsandboxedCommands: z.ZodOptional<z.ZodBoolean>;\n", "", 1
+        )
+        self.assertErrorMentions(
+            CONTRACT.check_sdk_types(drifted), "allowUnsandboxedCommands"
         )
 
     def test_cli_permission_modes_match_documented_set(self):

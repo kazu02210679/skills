@@ -18,6 +18,7 @@ front end. Fix its trust boundary before writing any feature code.
 - The workspace root and the project directories the bridge may open.
 - Whether the user needs real containment. Ask what else lives on the host: SSH keys, cloud
   credentials, other people's repositories.
+- Whether every tool call must be approved, or only some. That choice fixes the permission mode.
 
 Stop and ask when the operator user IDs or the workspace root are unknown. Do not default to "any
 member of the guild" or to the process working directory.
@@ -51,23 +52,30 @@ When the host holds anything the operator should not reach through Discord, say 
 configure real containment: the SDK `sandbox` settings, a container, or a VM. Otherwise state the
 limitation and let the user decide.
 
+`sandbox.enabled` alone is weaker than it reads. `allowUnsandboxedCommands` defaults to true, so a
+command can opt back out, and `failIfUnavailable` defaults to false, so a host that cannot start a
+sandbox runs unsandboxed with a warning. Pin both; the validator requires it.
+
 ## Transport Matrix
 
 Two session origins need different plumbing, and the config keeps them in separate blocks. Read
 [bridge-contract.md](references/bridge-contract.md) for the exact payload shapes.
 
-| Flow | `bridge_sessions` | `terminal_sessions` |
-|---|---|---|
-| Instruct | Agent SDK `query()`, or `claude -p --output-format stream-json` | not applicable |
-| Notify | the SDK message stream | `Stop` and `Notification` hooks, type `http` |
-| Approve | the `canUseTool` callback | the `PermissionRequest` hook, type `http` |
+| Flow | `bridge_sessions`, `agent-sdk` | `bridge_sessions`, `cli` | `terminal_sessions` |
+|---|---|---|---|
+| Instruct | `query()` | `claude -p` | not applicable |
+| Notify | the SDK message stream | stream-json events | `Stop` and `Notification` hooks |
+| Approve | the `canUseTool` callback | **none** | the `PermissionRequest` hook |
 
-`canUseTool` is an Agent SDK callback. It does not exist on the CLI transport, and it never covers a
-session the user started in their own terminal. A CLI-driven bridge session routes approval through
-the same `PermissionRequest` hook that terminal sessions use.
+**An approval flow requires the Agent SDK.** `claude -p` does not fire the `PermissionRequest` hook;
+only `PreToolUse` runs, and it fires on every tool call rather than on ones needing a decision. A
+CLI-driven bridge session therefore has no approval path, and the validator rejects the combination
+instead of letting a bridge advertise a gate that never prompts.
 
-Prefer the Agent SDK (`@anthropic-ai/claude-agent-sdk`) for bridge-owned sessions. It delivers
-streaming, session resumption, and approval through one in-process API.
+The permission mode narrows this further. Only `default` sends every non-preapproved tool call to
+Discord; `acceptEdits`, `auto`, and `plan` approve some silently and must declare
+`approval.coverage: "partial"`; `dontAsk` and `bypassPermissions` never prompt at all. Tell the user
+which tools they will actually be asked about.
 
 ## Workflow
 
@@ -85,6 +93,10 @@ streaming, session resumption, and approval through one in-process API.
    On drift, read the shipped declarations and update
    [bridge-contract.md](references/bridge-contract.md) and the validator together. Do not code
    against the reference file when the checker disagrees with it.
+
+   The `canUseTool` example is maintained as a compiled file,
+   [can-use-tool-sample.mts](references/can-use-tool-sample.mts). Change it there and copy it into
+   the reference, never the reverse, so a broken example fails `tsc` instead of shipping.
 3. Create the Discord application and invite the bot. Follow
    [discord-app-setup.md](references/discord-app-setup.md). Prefer slash commands, which need no
    privileged intent, over reading raw message content.
@@ -104,9 +116,10 @@ streaming, session resumption, and approval through one in-process API.
    - Notify: post turn completion and idle or input-needed events to the configured channel. Treat
      `last_assistant_message` as optional, and report a session with in-flight `background_tasks`
      as still working rather than finished.
-   - Approve: mint an approval ID in the bridge, because the permission event carries no tool use
-     ID. Render the prompt, ask for a decision with buttons, return the decision to the waiting
-     session, and deny on timeout.
+   - Approve: correlate with `toolUseID` on the SDK path; the hook payload has no tool use ID, so
+     mint one in the bridge there. Either way the Discord button carries an unguessable nonce, not
+     the correlation key. Render the prompt, ask for a decision with buttons, return the decision to
+     the waiting session, and deny on timeout.
 7. Wire hooks only when the user wants terminal sessions covered. Add the `http` hook entries from
    the reference to the project's `.claude/settings.json`, or to `~/.claude/settings.json` for
    every project. Keep the shared secret in `allowedEnvVars`, not inline.
@@ -147,8 +160,10 @@ streaming, session resumption, and approval through one in-process API.
 - Bot cannot read messages: the Message Content intent is off, or the flow needs slash commands.
 - Session resume fails: the recorded `session_id` was written from the wrong stream event, or the
   session was started from a different directory. Session lookup is scoped to the project directory.
-- Approval never fires: a loaded settings source or an `allowedTools` rule already granted the tool,
-  or the permission mode grants it outright. Check `setting_sources` first.
+- Approval never fires: the session is CLI-driven, which has no approval path at all; or the
+  permission mode approves the tool without prompting; or a loaded settings source or an
+  `allowed_tools` rule already granted it. Check the transport, then the mode, then
+  `setting_sources`.
 - Approval times out: deny, post that it was denied on timeout, and keep the thread usable. A failed
   or timed-out HTTP hook is a non-blocking error in Claude Code, so the bridge must send an explicit
   deny before the hook timeout rather than rely on silence.

@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "discord": {
     "guild_id": "123456789012345678",
     "command_channel_ids": ["223456789012345678"],
@@ -15,14 +15,15 @@
     "projects": {
       "skills": "/home/me/src/skills"
     },
-    "permission_mode": "acceptEdits",
+    "permission_mode": "default",
     "setting_sources": ["project"],
     "allowed_tools": ["Read", "Grep", "Glob"],
     "disallowed_tools": [],
     "max_concurrent_sessions": 2,
     "sandbox": {
       "enabled": true,
-      "fail_if_unavailable": true
+      "fail_if_unavailable": true,
+      "allow_unsandboxed_commands": false
     },
     "approval": {
       "enabled": true,

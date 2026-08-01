@@ -52,6 +52,21 @@ jobs:
               bash evals/codex-orchestration/run_all.sh
             '
 
+  discord-bot-typecheck:
+    # Runs on every pull request against a pinned SDK, so a broken example in
+    # references/ cannot merge. Upstream releases cannot turn this red; the
+    # scheduled job below is what tracks drift.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+        working-directory: evals/claude-code-discord-bot/typecheck
+      - run: npm run typecheck
+        working-directory: evals/claude-code-discord-bot/typecheck
+
   discord-bot-sdk-contract:
     # Upstream drift, not a property of the pull request. Runs on the weekly
     # schedule and on demand so an SDK release cannot silently make

@@ -12,13 +12,13 @@
 
 bridgeが起こしたsessionと、自分でterminalから起こしたsessionでは配線が違います。configもこの単位で分かれています。
 
-| flow | `bridge_sessions` | `terminal_sessions` |
-|---|---|---|
-| 指示 | Agent SDK `query()` / `claude -p` | 対象外 |
-| 通知 | SDKのmessage stream | `Stop` / `Notification` hook (`http`) |
-| 承認 | `canUseTool` callback | `PermissionRequest` hook (`http`) |
+| flow | `bridge_sessions` (agent-sdk) | `bridge_sessions` (cli) | `terminal_sessions` |
+|---|---|---|---|
+| 指示 | `query()` | `claude -p` | 対象外 |
+| 通知 | SDKのmessage stream | stream-json events | `Stop` / `Notification` hook |
+| 承認 | `canUseTool` callback | **なし** | `PermissionRequest` hook |
 
-`canUseTool` はAgent SDKのcallbackです。CLI transportには存在せず、terminal起点のsessionも当然カバーしません。Discordのthread 1本がClaude Code session 1本に対応し、`session_id`を保存して次のturnで`resume`に渡します。
+**`claude -p` では `PermissionRequest` hook が発火しません**（実測: `PreToolUse` は毎回発火、`PermissionRequest` は0回）。したがって承認flowはAgent SDK必須で、validatorはCLI transportでの承認を拒否します。Discordのthread 1本がClaude Code session 1本に対応し、`session_id`を保存して次のturnで`resume`に渡します。
 
 ## 信頼境界
 
@@ -30,7 +30,9 @@ bridgeが起こしたsessionと、自分でterminalから起こしたsessionで�
 - hook endpointはloopbackにbindし、shared secretを要求する
 - 承認はfail closed。Claude Codeは無応答・遅延・失敗を「拒否」とは扱わないので、bridge側が明示的にdenyを返す
 
-`bypassPermissions`はpermission promptそのものを消すため、承認flowとは併用できません。validatorが弾きます。
+`bypassPermissions` と `dontAsk` はpermission promptに到達しないため承認flowと併用できません。`acceptEdits` / `auto` / `plan` は一部だけ素通りするので `approval.coverage: "partial"` の明示が要ります。validatorが弾きます。
+
+`sandbox.enabled` だけでは不十分です。`allowUnsandboxedCommands` の既定は true（コマンド側がsandboxを抜けられる）、`failIfUnavailable` の既定は false（sandboxが起動できなければ警告のみで非sandbox実行）。両方の固定をvalidatorが要求します。
 
 **`workspace_root` はsandboxではありません。** 起動可能なproject pathを制限するinput validationであって、Claude Codeは作業ディレクトリ外を読めますし、Bashは絶対pathに届きます。実際の隔離が要るなら SDK の `sandbox` 設定・コンテナ・VMを使ってください。
 
@@ -38,6 +40,7 @@ bridgeが起こしたsessionと、自分でterminalから起こしたsessionで�
 
 - `references/bridge-contract.md`: 設定schema、thread↔session対応、hookのpayloadと応答形式
 - `references/discord-app-setup.md`: Discord Developer Portalの手順、intent・権限、platform上限
+- `references/can-use-tool-sample.mts`: CIで型検査される `canUseTool` の実サンプル
 - `scripts/check_sdk_contract.py`: 文書化した契約と実際のSDK・CLIの差分検出
 - `scripts/validate_bridge_config.py`: `discord-bridge.json`の信頼境界検証
 

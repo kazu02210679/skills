@@ -33,7 +33,10 @@ EXPECTED_SDK_PERMISSION_MODES = {
     "dontAsk",
     "auto",
 }
-EXPECTED_CLI_PERMISSION_MODES = {
+# What `claude --help` enumerates. The CLI additionally accepts "default",
+# verified by running it, so this set is a drift detector for the help text
+# only -- never the accepted-value set the validator uses.
+EXPECTED_CLI_HELP_CHOICES = {
     "acceptEdits",
     "auto",
     "bypassPermissions",
@@ -42,6 +45,22 @@ EXPECTED_CLI_PERMISSION_MODES = {
     "plan",
 }
 EXPECTED_SETTING_SOURCES = {"user", "project", "local"}
+# Fields the documented canUseTool example reads off the options argument.
+EXPECTED_CAN_USE_TOOL_OPTIONS = {
+    "signal",
+    "suggestions",
+    "title",
+    "displayName",
+    "toolUseID",
+}
+# Sandbox keys the config maps onto, including the two whose defaults the
+# reference pins.
+EXPECTED_SANDBOX_KEYS = {
+    "enabled",
+    "failIfUnavailable",
+    "autoAllowBashIfSandboxed",
+    "allowUnsandboxedCommands",
+}
 EXPECTED_PERMISSION_REQUEST_FIELDS = {"tool_name", "tool_input", "permission_suggestions"}
 FORBIDDEN_PERMISSION_REQUEST_FIELDS = {
     "tool_use_id",
@@ -54,10 +73,10 @@ def _union_members(declaration: str) -> set[str]:
     return set(re.findall(r"'([^']+)'", declaration))
 
 
-def _find_type(text: str, name: str) -> str | None:
-    """Return a type declaration body, honoring braces so unions stay intact."""
+def _find_declaration(text: str, name: str) -> str | None:
+    """Return a declaration body, honoring braces so unions stay intact."""
 
-    match = re.search(rf"declare type {re.escape(name)}\s*=", text)
+    match = re.search(rf"declare {re.escape(name)}\s*[:=]", text)
     if match is None:
         return None
     depth = 0
@@ -71,6 +90,10 @@ def _find_type(text: str, name: str) -> str | None:
         elif character == ";" and depth == 0:
             return text[start:index]
     return None
+
+
+def _find_type(text: str, name: str) -> str | None:
+    return _find_declaration(text, f"type {name}")
 
 
 def check_sdk_types(text: str) -> list[str]:
@@ -113,6 +136,12 @@ def check_sdk_types(text: str) -> list[str]:
             errors.append(
                 "CanUseTool no longer takes input as its second positional argument"
             )
+        for field in sorted(EXPECTED_CAN_USE_TOOL_OPTIONS):
+            if not re.search(rf"\b{re.escape(field)}\??:", can_use_tool):
+                errors.append(
+                    f"CanUseTool options no longer carry '{field}'; the "
+                    "documented example reads it"
+                )
 
     permission_result = _find_type(text, "PermissionResult")
     if permission_result is None:
@@ -161,11 +190,19 @@ def check_sdk_types(text: str) -> list[str]:
                 "documented updatedPermissions guidance may be stale"
             )
 
+    sandbox = _find_declaration(text, "const SandboxSettingsSchema")
+    if sandbox is None:
+        errors.append("SandboxSettingsSchema declaration not found")
+    else:
+        for key in sorted(EXPECTED_SANDBOX_KEYS):
+            if not re.search(rf"\b{re.escape(key)}:", sandbox):
+                errors.append(f"SandboxSettings no longer declares '{key}'")
+
     return errors
 
 
 def check_cli_permission_modes(help_text: str) -> list[str]:
-    """Return drift between documented and actual --permission-mode choices."""
+    """Return drift in the --permission-mode choices `claude --help` prints."""
 
     match = re.search(
         r"--permission-mode <mode>(.*?)(?:\n\s*--\w)", help_text, re.DOTALL
@@ -175,10 +212,10 @@ def check_cli_permission_modes(help_text: str) -> list[str]:
     choices = _union_members(match.group(1).replace('"', "'"))
     if not choices:
         return ["--permission-mode lists no choices in CLI help output"]
-    if choices != EXPECTED_CLI_PERMISSION_MODES:
+    if choices != EXPECTED_CLI_HELP_CHOICES:
         return [
             "CLI --permission-mode drifted: documented "
-            f"{sorted(EXPECTED_CLI_PERMISSION_MODES)}, actual {sorted(choices)}"
+            f"{sorted(EXPECTED_CLI_HELP_CHOICES)}, actual {sorted(choices)}"
         ]
     return []
 

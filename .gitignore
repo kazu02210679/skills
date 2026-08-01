@@ -9,3 +9,6 @@
 # Python のバイトコードキャッシュ
 __pycache__/
 *.py[cod]
+
+# Node の依存(claude-code-discord-bot の型検査ハーネス用、CI で都度インストール)
+node_modules/

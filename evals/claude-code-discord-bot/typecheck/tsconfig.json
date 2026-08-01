@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022", "DOM"],
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@anthropic-ai/claude-agent-sdk": [
+        "./node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts"
+      ]
+    }
+  },
+  "include": ["../../../skills/claude-code-discord-bot/references/*.mts"]
+}

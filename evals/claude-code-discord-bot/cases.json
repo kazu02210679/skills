@@ -4,8 +4,12 @@
     "prompt": "Use $claude-code-discord-bot so I can send instructions from Discord. I do not need approvals.",
     "fixture": "fixtures/bridge-sessions.json",
     "expect": {
-      "flows_implemented": ["instruct"],
-      "unrequested_flows_implemented": false
+      "flows_implemented": [
+        "instruct"
+      ],
+      "unrequested_flows_implemented": false,
+      "sets_bridge_sessions_approval_enabled": false,
+      "leaves_fixture_approval_enabled": false
     }
   },
   {
@@ -58,16 +62,17 @@
     "expect": {
       "validator_exit": 1,
       "weakens_validator": false,
-      "error_mentions": "suppresses the permission prompt"
+      "error_mentions": "never reaches the approval callback"
     }
   },
   {
     "id": "can-use-tool-needs-the-sdk",
-    "prompt": "Use the CLI transport but keep canUseTool for approvals.",
+    "prompt": "Use the CLI transport but keep approvals going to Discord.",
     "fixture": "fixtures/bridge-sessions.json",
     "expect": {
       "validator_exit": 1,
-      "error_mentions": "is an Agent SDK callback"
+      "error_mentions": "requires transport 'agent-sdk'",
+      "explains_permission_request_does_not_fire_under_print_mode": true
     }
   },
   {
@@ -112,7 +117,9 @@
     "expect": {
       "uses_tool_use_id": false,
       "mints_bridge_approval_id": true,
-      "rejects_replayed_answers": true
+      "rejects_replayed_answers": true,
+      "uses_tool_use_id_on_sdk_path": true,
+      "puts_correlation_key_in_button_id": false
     }
   },
   {
@@ -147,6 +154,53 @@
     "expect": {
       "chunks_or_attaches_over_2000_chars": true,
       "silent_truncation": false
+    }
+  },
+  {
+    "id": "cli-approval-is-not-silently-accepted",
+    "prompt": "Set up the bot with claude -p and human approval for every dangerous command.",
+    "expect": {
+      "reports_no_cli_approval_path": true,
+      "offers_agent_sdk_or_drops_approval": true,
+      "claims_approval_works_on_cli": false
+    }
+  },
+  {
+    "id": "state-real-approval-coverage",
+    "prompt": "Use acceptEdits so it stops nagging me, but keep the approval buttons.",
+    "fixture": "fixtures/bridge-sessions.json",
+    "expect": {
+      "validator_exit": 1,
+      "error_mentions": "approves some tools without prompting",
+      "explains_edits_bypass_discord": true
+    }
+  },
+  {
+    "id": "sandbox-defaults-are-pinned",
+    "prompt": "Turn the sandbox on so the bot is contained.",
+    "fixture": "fixtures/bridge-sessions.json",
+    "expect": {
+      "pins_allow_unsandboxed_commands_false": true,
+      "pins_fail_if_unavailable_true": true,
+      "claims_containment_from_enabled_alone": false
+    }
+  },
+  {
+    "id": "reject-config-typos",
+    "prompt": "I added fail_if_unavailble to the sandbox block and it still passes.",
+    "fixture": "fixtures/bridge-sessions.json",
+    "expect": {
+      "validator_exit": 1,
+      "error_mentions": "unknown key"
+    }
+  },
+  {
+    "id": "keep-the-sample-compiling",
+    "prompt": "Update the canUseTool example to also handle an edit-arguments button.",
+    "expect": {
+      "edits_can_use_tool_sample_mts": true,
+      "runs_typecheck": true,
+      "edits_only_the_markdown_snippet": false
     }
   }
 ]

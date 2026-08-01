@@ -14,7 +14,7 @@ from typing import Any
 
 REQUIRED_TOP_LEVEL = ("version", "discord")
 SESSION_BLOCKS = ("bridge_sessions", "terminal_sessions")
-SUPPORTED_VERSIONS = {2}
+SUPPORTED_VERSIONS = {3}
 SNOWFLAKE = re.compile(r"^[0-9]{17,20}$")
 ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -29,28 +29,80 @@ SDK_PERMISSION_MODES = {
     "dontAsk",
     "auto",
 }
-# From `claude --help`: --permission-mode choices. The CLI has no "default".
-CLI_PERMISSION_MODES = {
-    "acceptEdits",
-    "auto",
-    "bypassPermissions",
-    "manual",
-    "dontAsk",
-    "plan",
-}
+# `claude --help` lists a subset of what the CLI accepts: "default" is absent
+# from the choices but runs fine. Verified by invoking the CLI, not by parsing
+# help text.
+CLI_PERMISSION_MODES = SDK_PERMISSION_MODES | {"manual"}
+
 # From @anthropic-ai/claude-agent-sdk: SettingSource.
 SETTING_SOURCES = {"user", "project", "local"}
 
-# canUseTool is an Agent SDK callback; the CLI transport cannot serve it.
-APPROVAL_TRANSPORT_BY_ORIGIN = {
-    "bridge_sessions": {"can-use-tool", "permission-request-hook"},
-    "terminal_sessions": {"permission-request-hook"},
-}
-SDK_ONLY_APPROVAL_TRANSPORTS = {"can-use-tool"}
+# Only the Agent SDK has an interactive approval callback. `claude -p` does not
+# fire the PermissionRequest hook; PreToolUse is the only hook that runs.
+BRIDGE_APPROVAL_TRANSPORTS = {"can-use-tool"}
+TERMINAL_APPROVAL_TRANSPORTS = {"permission-request-hook"}
+
+# Modes that never reach the approval callback for a non-preapproved tool.
+APPROVAL_INCOMPATIBLE_MODES = {"bypassPermissions", "dontAsk"}
+# Modes that reach it for some tools only.
+APPROVAL_PARTIAL_MODES = {"acceptEdits", "auto", "plan"}
+APPROVAL_COVERAGE = {"all-prompts", "partial"}
 
 MAX_HOOK_TIMEOUT_SECONDS = 600
 NOTIFICATION_FLAGS = ("on_completion", "on_idle_prompt", "on_permission_request")
 SECRET_BEARING_KEYS = ("token", "secret", "password", "api_key", "apikey")
+
+DISCORD_KEYS = {
+    "guild_id",
+    "command_channel_ids",
+    "notification_channel_id",
+    "operator_user_ids",
+    "approver_user_ids",
+    "token_env",
+}
+BRIDGE_KEYS = {
+    "enabled",
+    "transport",
+    "workspace_root",
+    "projects",
+    "permission_mode",
+    "setting_sources",
+    "allowed_tools",
+    "disallowed_tools",
+    "max_concurrent_sessions",
+    "sandbox",
+    "approval",
+}
+TERMINAL_KEYS = {
+    "enabled",
+    "listen_host",
+    "listen_port",
+    "shared_secret_env",
+    "notifications",
+    "approval",
+}
+SANDBOX_KEYS = {
+    "enabled",
+    "fail_if_unavailable",
+    "allow_unsandboxed_commands",
+    "auto_allow_bash_if_sandboxed",
+}
+APPROVAL_KEYS = {
+    "enabled",
+    "transport",
+    "coverage",
+    "timeout_seconds",
+    "on_timeout",
+    "hook_timeout_seconds",
+}
+
+
+def _unknown_keys(
+    document: dict[str, Any], allowed: set[str], location: str, errors: list[str]
+) -> None:
+    for key in document:
+        if key not in allowed:
+            errors.append(f"{location} has unknown key '{key}'")
 
 
 def _mapping(document: dict[str, Any], key: str, errors: list[str]) -> dict[str, Any]:
@@ -67,11 +119,7 @@ def _snowflake(value: Any, location: str, errors: list[str]) -> None:
 
 
 def _snowflake_list(
-    value: Any,
-    location: str,
-    errors: list[str],
-    *,
-    require_nonempty: bool,
+    value: Any, location: str, errors: list[str], *, require_nonempty: bool
 ) -> None:
     if not isinstance(value, list):
         errors.append(f"{location} must be an array")
@@ -157,6 +205,7 @@ def _reject_inline_secrets(document: Any, errors: list[str], path: str = "") -> 
 
 
 def _validate_discord(discord: dict[str, Any], errors: list[str]) -> None:
+    _unknown_keys(discord, DISCORD_KEYS, "discord", errors)
     _snowflake(discord.get("guild_id"), "discord.guild_id", errors)
     _snowflake_list(
         discord.get("command_channel_ids"),
@@ -179,29 +228,60 @@ def _validate_discord(discord: dict[str, Any], errors: list[str]) -> None:
         )
 
 
+def _validate_sandbox(sandbox: Any, errors: list[str]) -> None:
+    location = "bridge_sessions.sandbox"
+    if not isinstance(sandbox, dict):
+        errors.append(f"{location} must be an object")
+        return
+    _unknown_keys(sandbox, SANDBOX_KEYS, location, errors)
+    for key in SANDBOX_KEYS:
+        if key in sandbox:
+            _bool(sandbox[key], f"{location}.{key}", errors)
+
+    if sandbox.get("enabled") is not True:
+        return
+    if sandbox.get("allow_unsandboxed_commands") is not False:
+        errors.append(
+            f"{location}.allow_unsandboxed_commands must be false when the "
+            "sandbox is enabled; it defaults to true, which lets a command opt "
+            "out of the sandbox and sends the decision back to the permission "
+            "system"
+        )
+    if sandbox.get("fail_if_unavailable") is not True:
+        errors.append(
+            f"{location}.fail_if_unavailable must be true when the sandbox is "
+            "enabled; it defaults to false, which downgrades a missing sandbox "
+            "to a warning and runs unsandboxed"
+        )
+
+
 def _validate_approval(
     approval: dict[str, Any],
     origin: str,
-    runtime_transport: str | None,
+    permission_mode: Any,
     discord: dict[str, Any],
     errors: list[str],
 ) -> bool:
     location = f"{origin}.approval"
-    enabled = _bool(approval.get("enabled"), f"{location}.enabled", errors)
-    if not enabled:
+    _unknown_keys(approval, APPROVAL_KEYS, location, errors)
+    if _bool(approval.get("enabled"), f"{location}.enabled", errors) is not True:
         return False
 
+    allowed = (
+        BRIDGE_APPROVAL_TRANSPORTS
+        if origin == "bridge_sessions"
+        else TERMINAL_APPROVAL_TRANSPORTS
+    )
     transport = approval.get("transport")
-    allowed = APPROVAL_TRANSPORT_BY_ORIGIN[origin]
     if transport not in allowed:
-        errors.append(f"{location}.transport must be one of {sorted(allowed)}")
+        detail = ""
+        if origin == "bridge_sessions" and transport == "permission-request-hook":
+            detail = (
+                "; `claude -p` does not fire the PermissionRequest hook, so a "
+                "CLI-driven bridge session has no approval path"
+            )
+        errors.append(f"{location}.transport must be one of {sorted(allowed)}{detail}")
         transport = None
-    elif transport in SDK_ONLY_APPROVAL_TRANSPORTS and runtime_transport != "agent-sdk":
-        errors.append(
-            f"{location}.transport '{transport}' is an Agent SDK callback and "
-            f"requires {origin}.transport 'agent-sdk', not "
-            f"'{runtime_transport}'"
-        )
 
     _snowflake_list(
         discord.get("approver_user_ids"),
@@ -213,8 +293,8 @@ def _validate_approval(
     if approval.get("on_timeout") != "deny":
         errors.append(
             f"{location}.on_timeout must be 'deny'; a missing, late, or failed "
-            "answer is not treated as a denial by Claude Code, so the bridge has "
-            "to send one"
+            "answer is not treated as a denial by Claude Code, so the bridge "
+            "has to send one"
         )
 
     timeout = _positive_int(
@@ -245,14 +325,40 @@ def _validate_approval(
             "'permission-request-hook' transport"
         )
 
+    coverage = approval.get("coverage")
+    if coverage is not None and coverage not in APPROVAL_COVERAGE:
+        errors.append(f"{location}.coverage must be one of {sorted(APPROVAL_COVERAGE)}")
+        coverage = None
+
+    if origin == "bridge_sessions":
+        if permission_mode in APPROVAL_INCOMPATIBLE_MODES:
+            errors.append(
+                f"bridge_sessions.permission_mode '{permission_mode}' never "
+                f"reaches the approval callback: a tool that is not already "
+                "allowed is decided without a prompt. Choose 'default' or "
+                f"disable {location}"
+            )
+        elif permission_mode in APPROVAL_PARTIAL_MODES and coverage != "partial":
+            errors.append(
+                f"bridge_sessions.permission_mode '{permission_mode}' approves "
+                "some tools without prompting, so Discord does not see every "
+                f"tool call. Set {location}.coverage to 'partial' to accept "
+                "that, or use 'default'"
+            )
+        elif permission_mode == "default" and coverage == "partial":
+            errors.append(
+                f"{location}.coverage 'partial' contradicts permission_mode "
+                "'default', which prompts for everything not pre-approved"
+            )
+
     return True
 
 
 def _validate_bridge_sessions(
-    block: dict[str, Any],
-    discord: dict[str, Any],
-    errors: list[str],
+    block: dict[str, Any], discord: dict[str, Any], errors: list[str]
 ) -> None:
+    _unknown_keys(block, BRIDGE_KEYS, "bridge_sessions", errors)
+
     transport = block.get("transport")
     if transport not in RUNTIME_TRANSPORTS:
         errors.append(
@@ -294,10 +400,11 @@ def _validate_bridge_sessions(
     )
     if permission_mode not in allowed_modes:
         errors.append(
-            f"bridge_sessions.permission_mode '{permission_mode}' is not accepted "
-            f"by the {transport or 'selected'} transport; use one of "
+            f"bridge_sessions.permission_mode '{permission_mode}' is not "
+            f"accepted by the {transport or 'selected'} transport; use one of "
             f"{sorted(allowed_modes)}"
         )
+        permission_mode = None
 
     setting_sources = block.get("setting_sources")
     if setting_sources is None:
@@ -327,37 +434,32 @@ def _validate_bridge_sessions(
             errors,
         )
 
-    sandbox = block.get("sandbox")
-    if sandbox is not None:
-        if not isinstance(sandbox, dict):
-            errors.append("bridge_sessions.sandbox must be an object")
-        else:
-            for key in ("enabled", "fail_if_unavailable"):
-                if key in sandbox:
-                    _bool(sandbox[key], f"bridge_sessions.sandbox.{key}", errors)
+    if "sandbox" in block:
+        _validate_sandbox(block["sandbox"], errors)
 
-    approval = _mapping(block, "approval", errors) if "approval" in block else {}
-    approval_enabled = (
-        _validate_approval(approval, "bridge_sessions", transport, discord, errors)
-        if approval
-        else False
-    )
-
-    if permission_mode == "bypassPermissions" and approval_enabled:
-        errors.append(
-            "bridge_sessions.permission_mode 'bypassPermissions' suppresses the "
-            "permission prompt that canUseTool depends on; choose another mode or "
-            "disable bridge_sessions.approval"
+    if "approval" in block:
+        approval = _mapping(block, "approval", errors)
+        approval_enabled = (
+            _validate_approval(
+                approval, "bridge_sessions", permission_mode, discord, errors
+            )
+            if approval
+            else False
         )
+        if approval_enabled and transport != "agent-sdk":
+            errors.append(
+                "bridge_sessions.approval requires transport 'agent-sdk'. The "
+                "CLI transport has no approval path: `claude -p` does not fire "
+                "the PermissionRequest hook"
+            )
 
 
 def _validate_terminal_sessions(
-    block: dict[str, Any],
-    discord: dict[str, Any],
-    errors: list[str],
+    block: dict[str, Any], discord: dict[str, Any], errors: list[str]
 ) -> None:
-    host = block.get("listen_host")
-    if host not in LOOPBACK_HOSTS:
+    _unknown_keys(block, TERMINAL_KEYS, "terminal_sessions", errors)
+
+    if block.get("listen_host") not in LOOPBACK_HOSTS:
         errors.append(
             "terminal_sessions.listen_host must be loopback "
             f"({sorted(LOOPBACK_HOSTS)}); binding elsewhere exposes the hook "
@@ -378,6 +480,10 @@ def _validate_terminal_sessions(
     elif not isinstance(notifications, dict):
         errors.append("terminal_sessions.notifications must be an object")
         notifications = {}
+    else:
+        _unknown_keys(
+            notifications, set(NOTIFICATION_FLAGS), "terminal_sessions.notifications", errors
+        )
     for flag in NOTIFICATION_FLAGS:
         if flag in notifications:
             _bool(notifications[flag], f"terminal_sessions.notifications.{flag}", errors)
@@ -391,7 +497,11 @@ def _validate_terminal_sessions(
 
     if "approval" in block:
         _validate_approval(
-            _mapping(block, "approval", errors), "terminal_sessions", None, discord, errors
+            _mapping(block, "approval", errors),
+            "terminal_sessions",
+            None,
+            discord,
+            errors,
         )
 
 
@@ -402,6 +512,9 @@ def validate_document(document: Any) -> list[str]:
     if not isinstance(document, dict):
         return ["configuration must be a JSON object"]
 
+    _unknown_keys(
+        document, set(REQUIRED_TOP_LEVEL) | set(SESSION_BLOCKS), "configuration", errors
+    )
     for key in REQUIRED_TOP_LEVEL:
         if key not in document:
             errors.append(f"missing required key '{key}'")
@@ -458,7 +571,8 @@ def main(argv: list[str] | None = None) -> int:
     enabled = [
         name
         for name in SESSION_BLOCKS
-        if isinstance(document.get(name), dict) and document[name].get("enabled") is True
+        if isinstance(document.get(name), dict)
+        and document[name].get("enabled") is True
     ]
     print(
         "Bridge config is valid: "
