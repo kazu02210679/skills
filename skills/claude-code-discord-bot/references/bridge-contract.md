@@ -18,16 +18,20 @@ them apart.
 | Notify | the SDK message stream | stream-json events | `Stop` and `Notification` hooks |
 | Approve | the `canUseTool` callback | **none** | the `PermissionRequest` hook |
 
-**`claude -p` has no approval path.** The `PermissionRequest` hook does not fire in print mode. This
-was measured, not inferred: with a `PermissionRequest` and a `PreToolUse` hook both registered
-through `--settings`, a `Bash` call under `permission_mode` `default` and again under `manual`, with
-a clean `HOME`, fired `PreToolUse` every time and `PermissionRequest` never.
+**The `PermissionRequest` hook does not fire under `claude -p`.** Measured, not inferred: with a
+`PermissionRequest` and a `PreToolUse` hook both registered through `--settings`, a `Bash` call under
+`permission_mode` `default` and again under `manual`, with a clean `HOME`, fired `PreToolUse` every
+time and `PermissionRequest` never.
 
-So an approval flow requires `bridge_sessions.transport: "agent-sdk"`. The validator rejects
-approval on the CLI transport rather than letting a bridge report a human-in-the-loop channel that
-silently never prompts. `PreToolUse` fires on every tool call, not only on ones needing a decision,
-so it is not a drop-in substitute; a bridge that wants CLI approval has to define that transport
-deliberately and accept the volume.
+**This Skill's CLI transport therefore implements no approval path**, and the validator rejects
+approval on it rather than letting a bridge report a human-in-the-loop channel that silently never
+prompts. That is a scope decision, not a claim that Claude Code offers no route at all: a
+`PreToolUse` hook can return `permissionDecision: "defer"` (`HookPermissionDecision` is
+`allow | deny | ask | defer`), which an external UI could use to collect an answer. Building that
+means a separate transport, because `PreToolUse` fires on every tool call rather than only on ones
+needing a decision, so Discord would see the full volume.
+
+`--permission-prompt-tool` is not an option here: it does not exist in Claude Code 2.1.220.
 
 ## Config schema
 
@@ -133,6 +137,11 @@ usual choice. `[]` is full isolation; the managed-settings policy tier is still 
 `SandboxSettings` is what `Options.sandbox` takes, and it carries `enabled`, `failIfUnavailable`,
 `autoAllowBashIfSandboxed`, `allowUnsandboxedCommands`, `network`, `filesystem`, and `credentials`.
 The config uses snake_case names and the bridge converts them.
+
+The published SDK reference omits `failIfUnavailable` from `SandboxSettings`, which has led a review
+to conclude it is settings-only. The shipped declarations accept it on `Options.sandbox`, and
+[sandbox-conversion-sample.mts](sandbox-conversion-sample.mts) compiles the whole conversion in CI
+so the question is settled by the type checker rather than re-argued from prose.
 
 Two defaults make `enabled: true` alone weaker than it reads, so the validator requires both to be
 pinned whenever the sandbox is on:

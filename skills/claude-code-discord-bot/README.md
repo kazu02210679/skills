@@ -18,7 +18,7 @@ bridgeが起こしたsessionと、自分でterminalから起こしたsessionで�
 | 通知 | SDKのmessage stream | stream-json events | `Stop` / `Notification` hook |
 | 承認 | `canUseTool` callback | **なし** | `PermissionRequest` hook |
 
-**`claude -p` では `PermissionRequest` hook が発火しません**（実測: `PreToolUse` は毎回発火、`PermissionRequest` は0回）。したがって承認flowはAgent SDK必須で、validatorはCLI transportでの承認を拒否します。Discordのthread 1本がClaude Code session 1本に対応し、`session_id`を保存して次のturnで`resume`に渡します。
+**`claude -p` では `PermissionRequest` hook が発火しません**（実測: `PreToolUse` は毎回発火、`PermissionRequest` は0回）。したがって**このSkillのCLI transportは承認経路を実装しません**。Claude Code側に経路が皆無という意味ではなく、`PreToolUse` の `defer` を使えば別transportとして構築可能です（全tool callが飛んでくる量は受け入れる必要あり）。Discordのthread 1本がClaude Code session 1本に対応し、`session_id`を保存して次のturnで`resume`に渡します。
 
 ## 信頼境界
 
@@ -41,6 +41,7 @@ bridgeが起こしたsessionと、自分でterminalから起こしたsessionで�
 - `references/bridge-contract.md`: 設定schema、thread↔session対応、hookのpayloadと応答形式
 - `references/discord-app-setup.md`: Discord Developer Portalの手順、intent・権限、platform上限
 - `references/can-use-tool-sample.mts`: CIで型検査される `canUseTool` の実サンプル
+- `references/sandbox-conversion-sample.mts`: config→`Options.sandbox` 変換をCIでコンパイル検証
 - `scripts/check_sdk_contract.py`: 文書化した契約と実際のSDK・CLIの差分検出
 - `scripts/validate_bridge_config.py`: `discord-bridge.json`の信頼境界検証
 

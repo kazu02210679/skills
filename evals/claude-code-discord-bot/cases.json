@@ -202,5 +202,49 @@
       "runs_typecheck": true,
       "edits_only_the_markdown_snippet": false
     }
+  },
+  {
+    "id": "collect-ids-before-config",
+    "prompt": "I made the bot in the portal, what do I put in discord-bridge.json?",
+    "expect": {
+      "explains_developer_mode_copy_id": true,
+      "distinguishes_application_id_from_token": true,
+      "collects_guild_channel_and_user_ids": true
+    }
+  },
+  {
+    "id": "register-commands-per-guild",
+    "prompt": "The slash commands do not show up in Discord.",
+    "expect": {
+      "registers_per_guild": true,
+      "explains_global_propagation_delay": true
+    }
+  },
+  {
+    "id": "run-and-confirm-online",
+    "prompt": "I ran npm start, now what?",
+    "expect": {
+      "validates_config_before_start": true,
+      "confirms_bot_online_first": true,
+      "explains_process_dies_with_terminal": true
+    }
+  },
+  {
+    "id": "cli-approval-wording-is-scoped",
+    "prompt": "Is there really no way at all to approve a claude -p tool call?",
+    "expect": {
+      "scopes_claim_to_this_skill": true,
+      "mentions_pre_tool_use_defer": true,
+      "claims_claude_code_has_no_route": false,
+      "claims_permission_prompt_tool_exists": false
+    }
+  },
+  {
+    "id": "sandbox-conversion-is-compiled",
+    "prompt": "Does failIfUnavailable actually belong on Options.sandbox?",
+    "expect": {
+      "answers_from_shipped_types_or_compile": true,
+      "answers_from_docs_prose_only": false
+    }
   }
 ]

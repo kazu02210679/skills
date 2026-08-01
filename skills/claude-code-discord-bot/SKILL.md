@@ -67,10 +67,12 @@ Two session origins need different plumbing, and the config keeps them in separa
 | Notify | the SDK message stream | stream-json events | `Stop` and `Notification` hooks |
 | Approve | the `canUseTool` callback | **none** | the `PermissionRequest` hook |
 
-**An approval flow requires the Agent SDK.** `claude -p` does not fire the `PermissionRequest` hook;
-only `PreToolUse` runs, and it fires on every tool call rather than on ones needing a decision. A
-CLI-driven bridge session therefore has no approval path, and the validator rejects the combination
-instead of letting a bridge advertise a gate that never prompts.
+**An approval flow requires the Agent SDK.** `claude -p` does not fire the `PermissionRequest`
+hook; only `PreToolUse` runs, and it fires on every tool call rather than on ones needing a
+decision. This Skill's CLI transport therefore implements no approval path, and the validator
+rejects the combination instead of letting a bridge advertise a gate that never prompts. Say it that
+way to the user: a `PreToolUse` `defer` transport could be built, it just is not what this Skill
+ships.
 
 The permission mode narrows this further. Only `default` sends every non-preapproved tool call to
 Discord; `acceptEdits`, `auto`, and `plan` approve some silently and must declare
@@ -120,10 +122,15 @@ which tools they will actually be asked about.
      mint one in the bridge there. Either way the Discord button carries an unguessable nonce, not
      the correlation key. Render the prompt, ask for a decision with buttons, return the decision to
      the waiting session, and deny on timeout.
-7. Wire hooks only when the user wants terminal sessions covered. Add the `http` hook entries from
+7. Collect the Discord IDs and register slash commands per guild, following
+   [discord-app-setup.md](references/discord-app-setup.md). Guild commands appear immediately;
+   global ones can take an hour and read as a broken bot during setup.
+8. Wire hooks only when the user wants terminal sessions covered. Add the `http` hook entries from
    the reference to the project's `.claude/settings.json`, or to `~/.claude/settings.json` for
    every project. Keep the shared secret in `allowedEnvVars`, not inline.
-8. Verify against a live guild, in this order:
+9. Start the bridge and confirm it is online before testing behavior. An offline bot means a bad
+   token or a failed gateway connection, not a logic bug. Then verify against a live guild, in this
+   order:
    - an unauthorized user ID is ignored in an allowed channel;
    - a message in a non-allowed channel is ignored;
    - a two-turn thread keeps context, proving session resumption;
@@ -132,7 +139,10 @@ which tools they will actually be asked about.
    - an unanswered approval denies within the configured timeout;
    - a second click on an answered approval changes nothing;
    - a reply longer than 2000 characters is chunked, not truncated or dropped.
-9. Report the config path, the contract check result, the validator result, which flows are live,
+
+   Tell the user how to keep it running: a bridge started from a terminal dies with the terminal,
+   and a sleeping host stops answering Discord.
+10. Report the config path, the contract check result, the validator result, which flows are live,
    which verification steps passed, and the exact secrets the user must set in the environment.
    State plainly whether the host is sandboxed.
 

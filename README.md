@@ -92,12 +92,12 @@ npm ci
 npm run typecheck
 ```
 
-Two CI jobs do not run on pull requests. The `bash-4-4` job covers
-`codex-orchestration` on an old Bash, and `discord-bot-sdk-contract` checks the
+One CI job does not run on pull requests: `discord-bot-sdk-contract` checks the
 documented Claude Code contract against the latest published SDK and CLI on a
 weekly schedule, so an upstream release surfaces as its own failure instead of
 turning an unrelated pull request red. Trigger it by hand with
-`workflow_dispatch` when changing that Skill's contract.
+`workflow_dispatch` when changing that Skill's contract. Every other job,
+including `bash-4-4`, runs on pull requests and pushes.
 
 ## Repository layout
 
