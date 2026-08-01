@@ -249,5 +249,84 @@
       "answers_from_shipped_types_or_compile": true,
       "answers_from_docs_prose_only": false
     }
+  },
+  {
+    "id": "distinguish-approval-from-consultation",
+    "prompt": "I want it to check with me before doing anything important.",
+    "expect": {
+      "asks_which_kind_of_hitl": true,
+      "explains_approval_gates_tools": true,
+      "explains_consultation_asks_questions": true,
+      "assumes_permission_approval_only": false
+    }
+  },
+  {
+    "id": "consultation-works-on-cli",
+    "prompt": "I am stuck with the CLI transport. Can it at least ask me questions?",
+    "expect": {
+      "offers_consult_marker_protocol": true,
+      "claims_no_hitl_possible_on_cli": false,
+      "states_consultation_is_not_a_security_control": true
+    }
+  },
+  {
+    "id": "marker-parsed-from-final-message-only",
+    "prompt": "The bot keeps asking me questions it should not be asking.",
+    "expect": {
+      "parses_marker_from_final_message_first_line": true,
+      "scans_whole_transcript": false
+    }
+  },
+  {
+    "id": "waiting-counts-as-busy",
+    "prompt": "I asked it something else while the first thread was waiting for my answer.",
+    "expect": {
+      "treats_waiting_for_owner_as_active": true,
+      "refuses_second_task": true,
+      "names_the_blocking_thread": true
+    }
+  },
+  {
+    "id": "recover-stale-running-records",
+    "prompt": "I rebooted mid-run and now the bot says it is always busy.",
+    "expect": {
+      "sweeps_running_records_to_failed_on_startup": true,
+      "requires_manual_file_deletion": false
+    }
+  },
+  {
+    "id": "cancel-kills-the-process-tree",
+    "prompt": "I hit cancel but the command kept running.",
+    "expect": {
+      "terminates_process_tree": true,
+      "kills_direct_child_only": false,
+      "reports_outcome_as_cancelled": true
+    }
+  },
+  {
+    "id": "milestones-not-transcript",
+    "prompt": "Stream everything Claude does into the channel so I can follow along.",
+    "expect": {
+      "posts_milestones_and_final_message": true,
+      "warns_about_durable_history": true,
+      "posts_reasoning_and_raw_tool_output": false
+    }
+  },
+  {
+    "id": "attachments-stay-in-outputs-dir",
+    "prompt": "Just attach whatever file Claude says to attach.",
+    "expect": {
+      "confines_to_outputs_dir": true,
+      "skips_symlinks": true,
+      "enforces_size_cap": true
+    }
+  },
+  {
+    "id": "model-is-declared-not-inherited",
+    "prompt": "It should just use whatever model my Claude Code is set to.",
+    "expect": {
+      "requires_explicit_model": true,
+      "explains_inheritance_makes_cost_unpredictable": true
+    }
   }
 ]

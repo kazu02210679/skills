@@ -12,6 +12,9 @@ front end. Fix its trust boundary before writing any feature code.
 ## Required Inputs
 
 - Which of the three flows the user wants. Do not build an unrequested flow.
+- If they want a human in the loop, which kind: **approval** (may this tool run?) or
+  **consultation** (the agent asks what to do when a decision is the operator's). Most people
+  asking for "check with me first" mean consultation. They are different mechanisms.
 - The host that runs Claude Code, and whether it stays awake.
 - The Discord guild ID, the channel IDs the bridge may listen to, and the user IDs allowed to
   operate and to approve.
@@ -67,7 +70,8 @@ Two session origins need different plumbing, and the config keeps them in separa
 |---|---|---|---|
 | Instruct | `query()` | `claude -p` | not applicable |
 | Notify | the SDK message stream | stream-json events | `Stop` and `Notification` hooks |
-| Approve | the `canUseTool` callback | **none** | the `PermissionRequest` hook |
+| Approve a tool | the `canUseTool` callback | **none** | the `PermissionRequest` hook |
+| Consult the operator | marker protocol | marker protocol | marker protocol |
 
 **An approval flow requires the Agent SDK.** `claude -p` does not fire the `PermissionRequest`
 hook; only `PreToolUse` runs, and it fires on every tool call rather than on ones needing a
@@ -75,6 +79,11 @@ decision. This Skill's CLI transport therefore implements no approval path, and 
 rejects the combination instead of letting a bridge advertise a gate that never prompts. Say it that
 way to the user. A `PreToolUse` `defer` transport, or an MCP permission-prompt transport, could be
 built as separate designs; they are simply not what this Skill ships.
+
+Consultation is the exception to that: it rides on the prompt and the final message, so it works on
+every transport including `claude -p`. It is not a security control — an agent can ignore an
+instruction — so a user who needs a hard stop needs approval, and one who wants to be asked before
+the agent guesses needs consultation. Say which one they are getting.
 
 The permission mode narrows this further. Only `default` sends every non-preapproved tool call to
 Discord; `acceptEdits`, `auto`, and `plan` approve some silently and must declare
@@ -120,17 +129,25 @@ which tools they will actually be asked about.
    - Notify: post turn completion and idle or input-needed events to the configured channel. Treat
      `last_assistant_message` as optional, and report a session with in-flight `background_tasks`
      as still working rather than finished.
+   - Consult: inject the marker instruction into every turn, parse the marker only from the first
+     non-empty line of the final assistant message, move the thread to `waiting_for_owner`, and
+     resume with the operator's reply. Scanning the whole transcript for the marker produces false
+     questions from any file that happens to contain it.
    - Approve: correlate with `toolUseID` on the SDK path; the hook payload has no tool use ID, so
      mint one in the bridge there. Either way the Discord button carries an unguessable nonce, not
      the correlation key. Render the prompt, ask for a decision with buttons, return the decision to
      the waiting session, and deny on timeout.
-7. Collect the Discord IDs and register slash commands per guild, following
+7. Implement the lifecycle in [session-lifecycle.md](references/session-lifecycle.md): persisted
+   thread states, the busy rule where `waiting_for_owner` counts as active, the startup sweep that
+   moves stale `running` records to `failed`, per-thread cancellation that kills the process tree,
+   and a run timeout separate from the approval timeout.
+8. Collect the Discord IDs and register slash commands per guild, following
    [discord-app-setup.md](references/discord-app-setup.md). Guild commands appear immediately;
    global ones can take an hour and read as a broken bot during setup.
-8. Wire hooks only when the user wants terminal sessions covered. Add the `http` hook entries from
+9. Wire hooks only when the user wants terminal sessions covered. Add the `http` hook entries from
    the reference to the project's `.claude/settings.json`, or to `~/.claude/settings.json` for
    every project. Keep the shared secret in `allowedEnvVars`, not inline.
-9. Start the bridge and confirm it is online before testing behavior. An offline bot means a bad
+10. Start the bridge and confirm it is online before testing behavior. An offline bot means a bad
    token or a failed gateway connection, not a logic bug. Then verify against a live guild, in this
    order:
    - an unauthorized user ID is ignored in an allowed channel;
@@ -140,11 +157,14 @@ which tools they will actually be asked about.
    - an approval prompt appears, allow runs the tool, deny blocks it;
    - an unanswered approval denies within the configured timeout;
    - a second click on an answered approval changes nothing;
-   - a reply longer than 2000 characters is chunked, not truncated or dropped.
+   - a reply longer than 2000 characters is chunked, not truncated or dropped;
+   - a second task is refused while a thread sits in `waiting_for_owner`;
+   - cancelling a running turn actually stops the agent's child processes;
+   - killing and restarting the bridge mid-run leaves no thread stuck in `running`.
 
    Tell the user how to keep it running: a bridge started from a terminal dies with the terminal,
    and a sleeping host stops answering Discord.
-10. Report the config path, the contract check result, the validator result, which flows are live,
+11. Report the config path, the contract check result, the validator result, which flows are live,
    which verification steps passed, and the exact secrets the user must set in the environment.
    State plainly whether the host is sandboxed.
 
@@ -156,8 +176,16 @@ which tools they will actually be asked about.
   event the approval flow depends on; the validator rejects the combination.
 - Persist an "always allow" choice by echoing the permission suggestions the event supplied, and
   only when the approver explicitly asked not to be asked again.
+- Post milestones, not a transcript: `received`, `running`, `waiting for owner`, `completed`,
+  `failed`, `cancelled`, plus the final assistant message. Keep reasoning, raw tool output, and
+  diagnostics in a local run directory. Discord history is durable, searchable, and synced to every
+  signed-in client.
 - Do not echo file contents, diffs, or environment values into a channel the user did not designate.
-  Discord history is durable and searchable.
+- Attach only files under the declared output directory, resolved and confirmed inside it, skipping
+  symlinks and reporting anything over the size cap. Otherwise "attach what you made" becomes an
+  arbitrary file-read primitive.
+- Pass `model` and `effort` explicitly on every turn. The bridge's cost and behavior should not
+  change because the user adjusted a local setting for unrelated work.
 - Truncate at a boundary you choose and attach the remainder as a file. Never let the Discord 2000
   character limit silently drop the tail of an answer.
 - Hold a pending approval in the bridge's own state, not in a Discord interaction. Post the prompt,

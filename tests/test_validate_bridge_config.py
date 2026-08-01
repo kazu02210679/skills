@@ -263,6 +263,73 @@ class ApprovalTransportTests(BridgeConfigTestCase):
         )
 
 
+class RuntimeIdentityTests(BridgeConfigTestCase):
+    """Model and effort are declared, not inherited from the host."""
+
+    def test_missing_model_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        del document["bridge_sessions"]["model"]
+        self.assertErrorMentions(MODULE.validate_document(document), "model must be")
+
+    def test_unknown_effort_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["effort"] = "ultra"
+        self.assertErrorMentions(MODULE.validate_document(document), "effort must be one of")
+
+    def test_effort_is_optional(self):
+        document = fixture("bridge-sessions.json")
+        del document["bridge_sessions"]["effort"]
+        self.assertEqual(MODULE.validate_document(document), [])
+
+    def test_zero_run_timeout_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["run_timeout_seconds"] = 0
+        self.assertErrorMentions(
+            MODULE.validate_document(document), "run_timeout_seconds"
+        )
+
+
+class ConsultTests(BridgeConfigTestCase):
+    def test_marker_with_whitespace_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["consult"]["marker"] = "INPUT REQUIRED"
+        self.assertErrorMentions(MODULE.validate_document(document), "consult.marker")
+
+    def test_short_marker_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["consult"]["marker"] = "ASK"
+        self.assertErrorMentions(MODULE.validate_document(document), "consult.marker")
+
+    def test_disabled_consult_needs_no_marker(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["consult"] = {"enabled": False}
+        self.assertEqual(MODULE.validate_document(document), [])
+
+    def test_consult_typo_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["consult"]["marekr"] = "X"
+        self.assertErrorMentions(MODULE.validate_document(document), "unknown key")
+
+
+class OutputsTests(BridgeConfigTestCase):
+    def test_absolute_output_dir_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["outputs"]["dir"] = "/tmp/outputs"
+        self.assertErrorMentions(MODULE.validate_document(document), "relative path")
+
+    def test_escaping_output_dir_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        document["bridge_sessions"]["outputs"]["dir"] = "../elsewhere"
+        self.assertErrorMentions(MODULE.validate_document(document), "relative path")
+
+    def test_missing_size_cap_is_rejected(self):
+        document = fixture("bridge-sessions.json")
+        del document["bridge_sessions"]["outputs"]["max_attachment_bytes"]
+        self.assertErrorMentions(
+            MODULE.validate_document(document), "max_attachment_bytes"
+        )
+
+
 class SandboxTests(BridgeConfigTestCase):
     def test_enabled_sandbox_must_pin_allow_unsandboxed_commands(self):
         document = fixture("bridge-sessions.json")
@@ -302,8 +369,10 @@ class UnknownKeyTests(BridgeConfigTestCase):
 
     def test_unknown_bridge_key_is_rejected(self):
         document = fixture("bridge-sessions.json")
-        document["bridge_sessions"]["model"] = "opus"
-        self.assertErrorMentions(MODULE.validate_document(document), "unknown key 'model'")
+        document["bridge_sessions"]["temperature"] = 0.7
+        self.assertErrorMentions(
+            MODULE.validate_document(document), "unknown key 'temperature'"
+        )
 
     def test_unknown_notification_flag_is_rejected(self):
         document = fixture("terminal-sessions.json")
@@ -391,11 +460,11 @@ class StructureTests(BridgeConfigTestCase):
 
     def test_old_version_is_rejected(self):
         document = fixture("bridge-sessions.json")
-        document["version"] = 2
+        document["version"] = 3
         self.assertErrorMentions(MODULE.validate_document(document), "version must be")
 
     def test_missing_top_level_keys_are_reported(self):
-        errors = MODULE.validate_document({"version": 3})
+        errors = MODULE.validate_document({"version": 4})
         self.assertErrorMentions(errors, "missing required key 'discord'")
         self.assertErrorMentions(errors, "at least one of bridge_sessions")
 

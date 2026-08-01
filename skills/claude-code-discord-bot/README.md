@@ -7,6 +7,7 @@
 - Claude Codeを Discord bot 化したい、スマホから操作したい
 - 長時間走らせているClaude Codeの完了・入力待ちをDiscordで受け取りたい
 - Claude Codeが危険なtoolを使う前に、人間の承認をDiscord経由で挟みたい
+- Claude Codeが判断に迷ったとき、勝手に決めずDiscordで質問してほしい
 
 ## 2つのsession originを分ける
 
@@ -19,6 +20,20 @@ bridgeが起こしたsessionと、自分でterminalから起こしたsessionで�
 | 承認 | `canUseTool` callback | **なし** | `PermissionRequest` hook |
 
 **`claude -p` では `PermissionRequest` hook が発火しません**（実測: `PreToolUse` は毎回発火、`PermissionRequest` は0回）。したがって**このSkillのCLI transportは承認経路を実装しません**。Claude Code側に経路が皆無という意味ではありません。`PreToolUse` の `defer` を使う設計や、MCP の permission-prompt transport は別設計として構築可能です（前者は全tool callが飛んでくる量を受け入れる必要あり）。Discordのthread 1本がClaude Code session 1本に対応し、`session_id`を保存して次のturnで`resume`に渡します。
+
+## 2種類の human-in-the-loop
+
+混同されがちですが別物です。要件を聞くときにどちらか確認します。
+
+| | approval（承認） | consultation（相談） |
+|---|---|---|
+| 問い | このtoolを実行してよいか | ここはどうすべきか |
+| 発生源 | permission system | agent自身 |
+| 機構 | `canUseTool` / `PermissionRequest` hook | 最終メッセージ中の予約marker |
+| 止まる範囲 | tool call 1件 | turn全体 |
+| transport | Agent SDK / hook | 何でも（`claude -p` を含む） |
+
+「実行前に確認してほしい」という要望の多くは consultation です。consultation は instruction-following に依存するのでセキュリティ境界ではありません。確実に止めたいなら approval が必要です。
 
 ## 信頼境界
 
@@ -39,6 +54,7 @@ bridgeが起こしたsessionと、自分でterminalから起こしたsessionで�
 ## 実装資材
 
 - `references/bridge-contract.md`: 設定schema、thread↔session対応、hookのpayloadと応答形式
+- `references/session-lifecycle.md`: thread state、busy判定、crash recovery、cancel、通知範囲、添付
 - `references/discord-app-setup.md`: Discord Developer Portalの手順、intent・権限、platform上限
 - `references/can-use-tool-sample.mts`: CIで型検査される `canUseTool` の実サンプル
 - `references/sandbox-conversion-sample.mts`: config→`Options.sandbox` 変換をCIでコンパイル検証

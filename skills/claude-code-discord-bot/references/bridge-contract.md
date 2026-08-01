@@ -16,7 +16,8 @@ them apart.
 |---|---|---|---|
 | Instruct | `query()` | `claude -p` | not applicable |
 | Notify | the SDK message stream | stream-json events | `Stop` and `Notification` hooks |
-| Approve | the `canUseTool` callback | **none** | the `PermissionRequest` hook |
+| Approve a tool | the `canUseTool` callback | **none** | the `PermissionRequest` hook |
+| Consult the operator | marker protocol | marker protocol | marker protocol |
 
 **The `PermissionRequest` hook does not fire under `claude -p`.** Measured, not inferred: with a
 `PermissionRequest` and a `PreToolUse` hook both registered through `--settings`, a `Bash` call under
@@ -41,6 +42,49 @@ Either would be a separate transport with its own contract. Build one deliberate
 wants CLI approval; do not imply the current CLI transport already gates anything. Do not conclude
 a CLI flag is absent because `claude --help` omits it — the help output is not the complete flag
 list, as `--permission-mode default` already showed.
+
+## Two kinds of human-in-the-loop
+
+"Human in the loop" covers two different mechanisms, and a bridge that offers one should not claim
+the other.
+
+| | Approval | Consultation |
+|---|---|---|
+| Question asked | may this tool run? | what should I do here? |
+| Raised by | the permission system | the agent itself |
+| Mechanism | `canUseTool` or the `PermissionRequest` hook | a reserved marker in the final message |
+| Blocks | one tool call | the whole turn |
+| Transport | Agent SDK, or hooks for terminal sessions | any, including `claude -p` |
+| Config | `approval` | `consult` |
+
+Approval is a guardrail: it catches a dangerous action the operator did not anticipate. Consultation
+is collaboration: it stops the agent from inventing a decision that was the operator's to make.
+
+Most operators asking for "a bot that checks with me" want consultation. Ask which one they mean,
+and say plainly that the CLI transport can do consultation but not approval.
+
+### Consultation contract
+
+Inject a fixed instruction into every turn, initial and resumed:
+
+1. when essential information or an operator decision is missing, do not invent it and do not take
+   an external action;
+2. reply with the reserved marker on the first line, then one concise question, and end the turn;
+3. otherwise answer normally.
+
+Parse the marker **only from the final assistant message**, and only when it is the first non-empty
+line. Scanning the whole transcript means any mention of the marker — in a file the agent read, in a
+quoted example, in this very document — triggers a false question. Choose a marker unlikely to
+appear in the operator's own material, and treat a marker with no question after it as a generic
+"please confirm" rather than an empty post.
+
+On detection: persist the session ID, move the thread to `waiting_for_owner`, and post the question.
+The operator's next authorized reply in that thread becomes the next turn's prompt, resumed against
+the stored session ID.
+
+Consultation depends on instruction-following, not on a runtime gate. It is not a security control:
+an agent can ignore the instruction, and an operator who needs a hard stop needs `approval`. Say so
+rather than letting consultation be mistaken for a permission boundary.
 
 ## Config schema
 
@@ -67,7 +111,18 @@ and rejects unknown keys so a typo such as `fail_if_unavailble` cannot pass sile
     "setting_sources": ["project"],
     "allowed_tools": ["Read", "Grep", "Glob"],
     "disallowed_tools": [],
-    "max_concurrent_sessions": 2,
+    "max_concurrent_sessions": 1,
+    "model": "claude-opus-5",
+    "effort": "high",
+    "run_timeout_seconds": 600,
+    "consult": {
+      "enabled": true,
+      "marker": "DISCORD_INPUT_REQUIRED"
+    },
+    "outputs": {
+      "dir": "workspace/outputs",
+      "max_attachment_bytes": 8388608
+    },
     "sandbox": {
       "enabled": true,
       "fail_if_unavailable": true,
@@ -102,6 +157,13 @@ and rejects unknown keys so a typo such as `fail_if_unavailble` cannot pass sile
 ```
 
 Either block may be `{"enabled": false}`. At least one must be enabled.
+
+`model` and `effort` are passed on every turn rather than inherited from the host's Claude Code
+configuration. `effort` is one of `low`, `medium`, `high`, `xhigh`, `max`. `run_timeout_seconds`
+bounds a single turn and is unrelated to the approval timeout.
+
+See [session-lifecycle.md](session-lifecycle.md) for the thread state model, the busy rule, crash
+recovery, cancellation, and what may be posted to Discord.
 
 ### Permission modes
 

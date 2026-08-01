@@ -14,7 +14,7 @@ from typing import Any
 
 REQUIRED_TOP_LEVEL = ("version", "discord")
 SESSION_BLOCKS = ("bridge_sessions", "terminal_sessions")
-SUPPORTED_VERSIONS = {3}
+SUPPORTED_VERSIONS = {4}
 SNOWFLAKE = re.compile(r"^[0-9]{17,20}$")
 ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -36,6 +36,12 @@ CLI_PERMISSION_MODES = SDK_PERMISSION_MODES | {"manual"}
 
 # From @anthropic-ai/claude-agent-sdk: SettingSource.
 SETTING_SOURCES = {"user", "project", "local"}
+
+# From @anthropic-ai/claude-agent-sdk: EffortLevel.
+EFFORT_LEVELS = {"low", "medium", "high", "xhigh", "max"}
+
+# A consultation marker is matched against a whole line of the final message.
+MARKER = re.compile(r"^[A-Z][A-Z0-9_]{3,}$")
 
 # Only the Agent SDK has an interactive approval callback. `claude -p` does not
 # fire the PermissionRequest hook; PreToolUse is the only hook that runs.
@@ -70,9 +76,16 @@ BRIDGE_KEYS = {
     "allowed_tools",
     "disallowed_tools",
     "max_concurrent_sessions",
+    "model",
+    "effort",
+    "run_timeout_seconds",
+    "consult",
+    "outputs",
     "sandbox",
     "approval",
 }
+CONSULT_KEYS = {"enabled", "marker"}
+OUTPUTS_KEYS = {"dir", "max_attachment_bytes"}
 TERMINAL_KEYS = {
     "enabled",
     "listen_host",
@@ -256,6 +269,42 @@ def _validate_sandbox(sandbox: Any, errors: list[str]) -> None:
         )
 
 
+def _validate_consult(consult: Any, errors: list[str]) -> None:
+    location = "bridge_sessions.consult"
+    if not isinstance(consult, dict):
+        errors.append(f"{location} must be an object")
+        return
+    _unknown_keys(consult, CONSULT_KEYS, location, errors)
+    if _bool(consult.get("enabled"), f"{location}.enabled", errors) is not True:
+        return
+    marker = consult.get("marker")
+    if not isinstance(marker, str) or not MARKER.fullmatch(marker):
+        errors.append(
+            f"{location}.marker must be an UPPER_SNAKE_CASE token of at least 4 "
+            "characters and no whitespace; it is matched against a whole line of "
+            "the final assistant message"
+        )
+
+
+def _validate_outputs(outputs: Any, errors: list[str]) -> None:
+    location = "bridge_sessions.outputs"
+    if not isinstance(outputs, dict):
+        errors.append(f"{location} must be an object")
+        return
+    _unknown_keys(outputs, OUTPUTS_KEYS, location, errors)
+    directory = outputs.get("dir")
+    if not isinstance(directory, str) or not directory.strip():
+        errors.append(f"{location}.dir must be a non-empty string")
+    elif _is_absolute(directory) or _normalize(directory).startswith(".."):
+        errors.append(
+            f"{location}.dir must be a relative path inside the project; only "
+            "files under it are attached to Discord"
+        )
+    _positive_int(
+        outputs.get("max_attachment_bytes"), f"{location}.max_attachment_bytes", errors
+    )
+
+
 def _validate_approval(
     approval: dict[str, Any],
     origin: str,
@@ -434,6 +483,32 @@ def _validate_bridge_sessions(
             "bridge_sessions.max_concurrent_sessions",
             errors,
         )
+
+    model = block.get("model")
+    if not isinstance(model, str) or not model.strip():
+        errors.append(
+            "bridge_sessions.model must be a non-empty string; pass it on every "
+            "turn instead of inheriting whatever the host's Claude Code is set to"
+        )
+
+    effort = block.get("effort")
+    if effort is not None and effort not in EFFORT_LEVELS:
+        errors.append(
+            f"bridge_sessions.effort must be one of {sorted(EFFORT_LEVELS)}"
+        )
+
+    if "run_timeout_seconds" in block:
+        _positive_int(
+            block.get("run_timeout_seconds"),
+            "bridge_sessions.run_timeout_seconds",
+            errors,
+        )
+
+    if "consult" in block:
+        _validate_consult(block["consult"], errors)
+
+    if "outputs" in block:
+        _validate_outputs(block["outputs"], errors)
 
     if "sandbox" in block:
         _validate_sandbox(block["sandbox"], errors)

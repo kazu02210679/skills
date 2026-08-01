@@ -1,11 +1,17 @@
 {
-  "version": 3,
+  "version": 4,
   "discord": {
     "guild_id": "123456789012345678",
-    "command_channel_ids": ["223456789012345678"],
+    "command_channel_ids": [
+      "223456789012345678"
+    ],
     "notification_channel_id": "323456789012345678",
-    "operator_user_ids": ["423456789012345678"],
-    "approver_user_ids": ["423456789012345678"],
+    "operator_user_ids": [
+      "423456789012345678"
+    ],
+    "approver_user_ids": [
+      "423456789012345678"
+    ],
     "token_env": "DISCORD_BOT_TOKEN"
   },
   "bridge_sessions": {
@@ -16,10 +22,27 @@
       "skills": "/home/me/src/skills"
     },
     "permission_mode": "default",
-    "setting_sources": ["project"],
-    "allowed_tools": ["Read", "Grep", "Glob"],
+    "setting_sources": [
+      "project"
+    ],
+    "allowed_tools": [
+      "Read",
+      "Grep",
+      "Glob"
+    ],
     "disallowed_tools": [],
-    "max_concurrent_sessions": 2,
+    "max_concurrent_sessions": 1,
+    "model": "claude-opus-5",
+    "effort": "high",
+    "run_timeout_seconds": 600,
+    "consult": {
+      "enabled": true,
+      "marker": "DISCORD_INPUT_REQUIRED"
+    },
+    "outputs": {
+      "dir": "workspace/outputs",
+      "max_attachment_bytes": 8388608
+    },
     "sandbox": {
       "enabled": true,
       "fail_if_unavailable": true,
