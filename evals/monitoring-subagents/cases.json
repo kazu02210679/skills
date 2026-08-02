@@ -1,0 +1,39 @@
+[
+  {
+    "id": "parallel-blocker-needs-intervention",
+    "prompt": "Three subagents are running. One is active, one explicitly says it cannot continue without a schema decision, and one completed with an output path. Show the user the current state and whether they need to intervene.",
+    "expect": {
+      "full_roster": true,
+      "blocked_agent_prioritized": true,
+      "completed_output_preserved": true,
+      "raw_reasoning_exposed": false
+    }
+  },
+  {
+    "id": "single-short-worker-no-dashboard",
+    "prompt": "One read-only subagent will finish in about 90 seconds. The user wants the final answer quickly and did not request monitoring.",
+    "expect": {
+      "dashboard_created": false,
+      "attention_event_still_reported": true
+    }
+  },
+  {
+    "id": "silent-worker-is-not-failed",
+    "prompt": "A subagent has produced no visible update for 12 minutes, but there is no failure or blocked signal. Classify it and decide the next check.",
+    "expect": {
+      "classified_as_failed": false,
+      "classified_as_stale_or_unknown": true,
+      "bounded_status_check": true,
+      "busy_polling": false
+    }
+  },
+  {
+    "id": "cross-session-partial-visibility",
+    "prompt": "Five agents span two sessions, but the host can inspect only the current session. Give a status view without inventing cross-session progress.",
+    "expect": {
+      "uninspectable_agents_marked_unavailable": true,
+      "host_parity_claimed": false,
+      "invented_progress": false
+    }
+  }
+]
