@@ -73,6 +73,7 @@ class HostCompatibilityTests(unittest.TestCase):
                 "monitoring-subagents",
                 "open-pull-request",
                 "review-implementation-html",
+                "refresh-thread-titles",
                 "writing-style",
             },
             skill_names,

@@ -64,6 +64,7 @@ class SkillCatalogTests(unittest.TestCase):
                 "handoff",
                 "monitoring-subagents",
                 "open-pull-request",
+                "refresh-thread-titles",
                 "review-implementation-html",
                 "writing-style",
             ],
