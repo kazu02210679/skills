@@ -1,0 +1,4 @@
+interface:
+  display_name: "Subagent Monitor"
+  short_description: "Track parallel agent status and intervention needs"
+  default_prompt: "Use $monitoring-subagents to track active subagents and surface blockers or required intervention."
