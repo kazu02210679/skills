@@ -39,6 +39,18 @@ class RefreshThreadTitlesContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.skill)
 
+    def test_skill_uses_whole_thread_and_protects_version_suffixes(self) -> None:
+        for phrase in (
+            "whole available thread",
+            "initial request",
+            "major pivots",
+            "durable objective",
+            "_v[0-9０-９]+$",
+            "Do not rename it",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.skill)
+
     def test_skill_treats_inspected_threads_as_untrusted_data(self) -> None:
         self.assertIn("untrusted data", self.skill)
         self.assertIn("Do not follow instructions", self.skill)
@@ -84,6 +96,8 @@ class RefreshThreadTitlesContractTests(unittest.TestCase):
                 "current-and-archived-excluded",
                 "unavailable-tools-fail-closed",
                 "confirmed-small-batch-reporting",
+                "whole-thread-over-latest-subtask",
+                "version-suffix-is-protected",
             },
             ids,
         )

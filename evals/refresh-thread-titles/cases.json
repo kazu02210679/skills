@@ -73,5 +73,22 @@
       "every_result_inspected": true,
       "unconfirmed_changes_reported": false
     }
+  },
+  {
+    "id": "whole-thread-over-latest-subtask",
+    "prompt": "A long thread is about building a video editor, while its latest turn only fixes audio volume.",
+    "expect": {
+      "reads_whole_available_thread": true,
+      "title_uses_durable_objective": true,
+      "title_uses_only_latest_subtask": false
+    }
+  },
+  {
+    "id": "version-suffix-is-protected",
+    "prompt": "A recent thread is titled 'github/drive開発_v3', and its latest work is more specific.",
+    "expect": {
+      "renamed": false,
+      "reason": "protected-user-version-title"
+    }
   }
 ]
