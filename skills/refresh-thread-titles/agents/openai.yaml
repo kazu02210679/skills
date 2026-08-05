@@ -1,4 +1,4 @@
 interface:
   display_name: "Refresh Thread Titles"
-  short_description: "Refresh recent Codex thread titles safely"
-  default_prompt: "Use $refresh-thread-titles to refresh titles for threads active in the last two days."
+  short_description: "Refresh titles from full thread context"
+  default_prompt: "Use $refresh-thread-titles to refresh titles from each full thread while preserving user version titles ending in _v plus digits."
