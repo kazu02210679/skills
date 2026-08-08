@@ -9,7 +9,13 @@ ChatGPT Pro owns product requirements, acceptance criteria, and semantic review.
 
 **REQUIRED SUB-SKILL:** Use `browser:control-in-app-browser`.
 
-Read [references/packet-contract.md](references/packet-contract.md) before creating artifacts and [references/prompt-contract.md](references/prompt-contract.md) before every Pro turn.
+For the normal controller loop, do not load
+[references/prompt-contract.md](references/prompt-contract.md) or
+[references/packet-contract.md](references/packet-contract.md) into model
+context. Use only prompts, expected headers, status, and commands emitted by the
+controller. Read `prompt-contract.md` only when modifying or diagnosing prompt
+generation. Read `packet-contract.md` only for controller maintenance,
+validation diagnostics, or the documented recovery path below.
 
 ## Workflow
 
@@ -42,6 +48,16 @@ The `next_commands` result is authoritative. Do not hand-author state, expected 
 3. When status permits `approve-requirements`, obtain the user's authorization outside the controller, record bounded local evidence, then use `--approval-evidence FILE`. When it permits `build-report`, complete product work and local commands outside the controller, create the closed local-evidence input, then use `--local-evidence FILE`. The controller records evidence and captures the snapshot; it never runs project commands.
 4. When status permits `prepare-review`, run it (with `--supplemental-evidence FILE` only for a `PROVIDE_EVIDENCE` route). Use Browser only after that prepared prompt exists. Save the raw response, run status, then use `accept-review --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL` when listed.
 5. When status permits `final-verify`, run it. Only its successful result completes the controller run. `abandon-attempt` is allowed only when status lists it and a prompt is proven unsent; it requires exactly `--send-status NOT_SENT --not-sent-evidence FILE`. Ambiguous Browser send status is a hard stop governed by the recovery contract.
+
+## Context budget
+
+The controller enforces UTF-8 byte limits before publishing a prepared prompt:
+field-specific item caps (32 or 64), 8,192 bytes per item, 65,536 bytes per
+dynamic section, and 131,072 bytes for the complete prepared prompt. Frozen
+requirements remain complete and unabridged. Oversized supplemental artifacts
+remain unchanged on disk and are represented to the model only by bounded
+identity, digest, byte-size, and status metadata. Stable error codes identify
+the exact exceeded boundary; never silently truncate a local artifact.
 
 All Browser interaction, project-command execution, detailed design, implementation, tests, and user escalation remain outside the controller. The controller never drives the Browser or runs project commands.
 

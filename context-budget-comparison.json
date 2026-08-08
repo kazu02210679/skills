@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "48be21a85d788cd63a56db218175770e92d6f1d1",
+  "measurement": "ceil(normalized_utf8_bytes/4)",
+  "baseline": {
+    "repository": {"utf8_bytes": 93335, "approx_tokens": 23334},
+    "gpt-pro-codex-loop": {"utf8_bytes": 16961, "approx_tokens": 4241},
+    "review-implementation-html": {"utf8_bytes": 11746, "approx_tokens": 2937}
+  },
+  "current": {
+    "repository": {"utf8_bytes": 85448, "approx_tokens": 21362},
+    "gpt-pro-codex-loop": {"utf8_bytes": 7912, "approx_tokens": 1978},
+    "review-implementation-html": {"utf8_bytes": 12908, "approx_tokens": 3227}
+  },
+  "delta": {
+    "repository": {"utf8_bytes": -7887, "approx_tokens": -1972},
+    "gpt-pro-codex-loop": {"utf8_bytes": -9049, "approx_tokens": -2263},
+    "review-implementation-html": {"utf8_bytes": 1162, "approx_tokens": 290}
+  }
+}

@@ -686,6 +686,21 @@ def _validate_requirements(packet, previous=None, *, require_initial: bool):
     _require_nonempty_string(current, "objective", errors)
 
     requirements = _require_list(current, "requirements", errors)
+    bounded_list_fields = (
+        "requirements",
+        "in_scope",
+        "out_of_scope",
+        "constraints",
+        "acceptance_criteria",
+        "design_direction",
+        "risk_items",
+        "verification_strategy",
+        "open_questions",
+    )
+    for field in bounded_list_fields:
+        value = current.get(field)
+        if isinstance(value, list) and len(value) > 64:
+            errors.append(f"{field}: must contain at most 64 items")
     _stable_ids(requirements, "requirements", ("id", "statement"), errors)
     for field in ("in_scope", "out_of_scope", "constraints", "design_direction", "verification_strategy"):
         _require_list(current, field, errors)

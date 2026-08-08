@@ -132,6 +132,10 @@ def write_fixture_repository(root: Path, *, invalid: bool = False) -> None:
             f"hidden:{name}\n",
             encoding="utf-8",
         )
+        cache = skill / "__pycache__"
+        cache.mkdir()
+        (cache / "fixture.pyc").write_bytes(b"generated-cache")
+        (skill / "fixture.pyo").write_bytes(b"generated-cache")
 
     for source_name, copyright_line in (
         ("handoff-gist", "Copyright (c) 2026 Handoff Fixture"),
@@ -204,6 +208,173 @@ class InstallerSafetyTests(unittest.TestCase):
             stderr=subprocess.PIPE,
             check=False,
         )
+
+    @staticmethod
+    def selection_args(installer: Installer, *names: str) -> tuple[str, ...]:
+        if installer.name == "bash":
+            return tuple(part for name in names for part in ("--skill", name))
+        return ("-Skill", ",".join(names))
+
+    @staticmethod
+    def list_args(installer: Installer) -> tuple[str, ...]:
+        return ("--list",) if installer.name == "bash" else ("-List",)
+
+    @staticmethod
+    def all_args(installer: Installer) -> tuple[str, ...]:
+        return ("--all",) if installer.name == "bash" else ("-All",)
+
+    def test_list_mode_is_sorted_and_non_mutating(self) -> None:
+        for installer in INSTALLERS:
+            with self.subTest(installer=installer.name):
+                with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_directory:
+                    root = Path(temporary_directory)
+                    repository = root / "repository"
+                    project = root / "project"
+                    repository.mkdir()
+                    project.mkdir()
+                    write_fixture_repository(repository)
+
+                    result = self.run_installer(
+                        installer,
+                        repository,
+                        project,
+                        extra=self.list_args(installer),
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    listed = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                    self.assertEqual(["alpha-skill", "beta-skill"], listed)
+                    self.assertFalse((project / ".agents").exists())
+
+    def test_selective_install_is_exact_deduplicated_and_excludes_caches(self) -> None:
+        for installer in INSTALLERS:
+            with self.subTest(installer=installer.name):
+                with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_directory:
+                    root = Path(temporary_directory)
+                    repository = root / "repository"
+                    project = root / "project"
+                    repository.mkdir()
+                    project.mkdir()
+                    write_fixture_repository(repository)
+                    unselected = project / ".agents" / "skills" / "beta-skill"
+                    unselected.mkdir(parents=True)
+                    (unselected / "user-owned.txt").write_text("unchanged\n", encoding="utf-8")
+
+                    result = self.run_installer(
+                        installer,
+                        repository,
+                        project,
+                        extra=self.selection_args(installer, "alpha-skill", "alpha-skill"),
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    destination = project / ".agents" / "skills"
+                    self.assertTrue((destination / "alpha-skill" / "SKILL.md").is_file())
+                    self.assertTrue((destination / "beta-skill").exists())
+                    self.assertEqual(
+                        "unchanged\n",
+                        (unselected / "user-owned.txt").read_text(encoding="utf-8"),
+                    )
+                    self.assertFalse((destination / "alpha-skill" / "__pycache__").exists())
+                    self.assertFalse((destination / "alpha-skill" / "fixture.pyo").exists())
+
+    def test_incremental_selective_install_reuses_identical_notices(self) -> None:
+        for installer in INSTALLERS:
+            with self.subTest(installer=installer.name):
+                with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_directory:
+                    root = Path(temporary_directory)
+                    repository = root / "repository"
+                    project = root / "project"
+                    repository.mkdir()
+                    project.mkdir()
+                    write_fixture_repository(repository)
+
+                    first = self.run_installer(
+                        installer,
+                        repository,
+                        project,
+                        extra=self.selection_args(installer, "alpha-skill"),
+                    )
+                    second = self.run_installer(
+                        installer,
+                        repository,
+                        project,
+                        extra=self.selection_args(installer, "beta-skill"),
+                    )
+
+                    self.assertEqual(0, first.returncode, first.stderr)
+                    self.assertEqual(0, second.returncode, second.stderr)
+                    destination = project / ".agents" / "skills"
+                    self.assertTrue((destination / "alpha-skill" / "SKILL.md").is_file())
+                    self.assertTrue((destination / "beta-skill" / "SKILL.md").is_file())
+
+    def test_explicit_all_matches_no_selection(self) -> None:
+        for installer in INSTALLERS:
+            with self.subTest(installer=installer.name):
+                with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_directory:
+                    root = Path(temporary_directory)
+                    repository = root / "repository"
+                    default_project = root / "default"
+                    explicit_project = root / "explicit"
+                    repository.mkdir()
+                    default_project.mkdir()
+                    explicit_project.mkdir()
+                    write_fixture_repository(repository)
+
+                    default = self.run_installer(installer, repository, default_project)
+                    explicit = self.run_installer(
+                        installer,
+                        repository,
+                        explicit_project,
+                        extra=self.all_args(installer),
+                    )
+
+                    self.assertEqual(0, default.returncode, default.stderr)
+                    self.assertEqual(0, explicit.returncode, explicit.stderr)
+                    for name in ("alpha-skill", "beta-skill"):
+                        self.assertEqual(
+                            (default_project / ".agents" / "skills" / name / "SKILL.md").read_bytes(),
+                            (explicit_project / ".agents" / "skills" / name / "SKILL.md").read_bytes(),
+                        )
+
+    def test_selection_is_validated_before_any_mutation(self) -> None:
+        for installer in INSTALLERS:
+            with self.subTest(installer=installer.name):
+                with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_directory:
+                    root = Path(temporary_directory)
+                    repository = root / "repository"
+                    project = root / "project"
+                    repository.mkdir()
+                    project.mkdir()
+                    write_fixture_repository(repository)
+
+                    result = self.run_installer(
+                        installer,
+                        repository,
+                        project,
+                        extra=self.selection_args(installer, "alpha-skill", "missing-skill"),
+                    )
+
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn("missing-skill", result.stdout + result.stderr)
+                    self.assertFalse((project / ".agents").exists())
+
+    def test_explicit_all_and_selective_modes_are_mutually_exclusive(self) -> None:
+        for installer in INSTALLERS:
+            with self.subTest(installer=installer.name):
+                with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_directory:
+                    root = Path(temporary_directory)
+                    repository = root / "repository"
+                    project = root / "project"
+                    repository.mkdir()
+                    project.mkdir()
+                    write_fixture_repository(repository)
+                    extra = self.all_args(installer) + self.selection_args(installer, "alpha-skill")
+
+                    result = self.run_installer(installer, repository, project, extra=extra)
+
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertFalse((project / ".agents").exists())
 
     def test_notices_are_preserved_by_both_installers(self) -> None:
         for installer in INSTALLERS:

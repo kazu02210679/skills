@@ -11,6 +11,7 @@ This repository is the canonical source for reusable agent skills.
 - Preserve factual accuracy, safety constraints, and attribution when improving a skill.
 - Install `requirements-validation.txt`, then run `python scripts/validate-skills.py` and the focused tests after changing Skill or installer files.
 - For behavior changes, add or update a focused evaluation before accepting an optimization.
+- Run `python scripts/context_budget_report.py --repo . --manifest context-budget-manifest.json --baseline context-budget-baseline.json --max-growth-bytes 0` after model-visible Skill changes; update the tracked baseline only for an intentional, reviewed budget change.
 - Apply the host semantics and slash-command mappings in `docs/host-compatibility.md`; do not claim full Codex/Claude runtime parity.
 
 This repository contains only the maintained catalog under `skills/`. Do not vendor external

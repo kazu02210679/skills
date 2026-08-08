@@ -5,11 +5,15 @@ agent="both"
 scope="user"
 project_root="$PWD"
 replace_existing=0
+list_only=0
+explicit_all=0
+requested_skills=()
 
 usage() {
   cat >&2 <<'EOF'
 Usage: install-skills.sh [--agent codex|claude|both] [--scope user|project]
-                         [--project-root PATH] [--force|--replace]
+                         [--project-root PATH] [--skill NAME ...|--all|--list]
+                         [--force|--replace]
 
 Existing managed Skill or notice directories are conflicts. Use --force (or
 --replace) to replace complete managed directories transactionally.
@@ -47,6 +51,19 @@ while [[ $# -gt 0 ]]; do
       replace_existing=1
       shift
       ;;
+    --skill)
+      require_value "$1" "$#"
+      requested_skills+=("$2")
+      shift 2
+      ;;
+    --all)
+      explicit_all=1
+      shift
+      ;;
+    --list)
+      list_only=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -65,6 +82,14 @@ if [[ "$agent" != "codex" && "$agent" != "claude" && "$agent" != "both" ]]; then
 fi
 if [[ "$scope" != "user" && "$scope" != "project" ]]; then
   echo "--scope must be user or project" >&2
+  exit 2
+fi
+if [[ "$explicit_all" -eq 1 && "${#requested_skills[@]}" -gt 0 ]]; then
+  echo "--all and --skill are mutually exclusive" >&2
+  exit 2
+fi
+if [[ "$list_only" -eq 1 && ("$explicit_all" -eq 1 || "${#requested_skills[@]}" -gt 0) ]]; then
+  echo "--list cannot be combined with --all or --skill" >&2
   exit 2
 fi
 
@@ -92,6 +117,34 @@ done
 if [[ "${#skill_names[@]}" -eq 0 ]]; then
   echo "No Skill directories found in $source_root" >&2
   exit 1
+fi
+
+if [[ "$list_only" -eq 1 ]]; then
+  printf '%s\n' "${skill_names[@]}"
+  exit 0
+fi
+
+if [[ "${#requested_skills[@]}" -gt 0 ]]; then
+  selected_skills=()
+  for requested in "${requested_skills[@]}"; do
+    found=0
+    for available in "${skill_names[@]}"; do
+      if [[ "$requested" == "$available" ]]; then
+        found=1
+        break
+      fi
+    done
+    if [[ "$found" -ne 1 ]]; then
+      echo "Unknown Skill: $requested" >&2
+      exit 2
+    fi
+    duplicate=0
+    for selected in "${selected_skills[@]:-}"; do
+      if [[ "$requested" == "$selected" ]]; then duplicate=1; break; fi
+    done
+    if [[ "$duplicate" -eq 0 ]]; then selected_skills+=("$requested"); fi
+  done
+  skill_names=("${selected_skills[@]}")
 fi
 
 for source_name in handoff-gist; do
@@ -131,6 +184,9 @@ target_names=("${skill_names[@]}" ".third-party-notices")
 for destination_root in "${destinations[@]}"; do
   for target_name in "${target_names[@]}"; do
     target="$destination_root/$target_name"
+    if [[ "$target_name" == ".third-party-notices" ]]; then
+      continue
+    fi
     if [[ -e "$target" || -L "$target" ]]; then
       if [[ "$replace_existing" -ne 1 ]]; then
         echo "Installation conflict: $target already exists. Re-run with --force to replace managed directories." >&2
@@ -157,7 +213,7 @@ trap cleanup_transactions EXIT
 compare_trees() {
   local source="$1"
   local staged="$2"
-  if ! diff -qr -- "$source" "$staged" >/dev/null; then
+  if ! diff -qr --exclude='__pycache__' --exclude='*.pyc' --exclude='*.pyo' -- "$source" "$staged" >/dev/null; then
     echo "Staged copy verification failed: $source" >&2
     return 1
   fi
@@ -176,6 +232,8 @@ for destination_root in "${destinations[@]}"; do
 
   for skill_name in "${skill_names[@]}"; do
     cp -a -- "$source_root/$skill_name" "$stage/$skill_name"
+    find "$stage/$skill_name" -type d -name '__pycache__' -prune -exec rm -rf -- {} +
+    find "$stage/$skill_name" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
     compare_trees "$source_root/$skill_name" "$stage/$skill_name"
   done
 
@@ -202,6 +260,21 @@ for destination_root in "${destinations[@]}"; do
       exit 1
     }
 
+done
+
+for index in "${!destinations[@]}"; do
+  destination_root="${destinations[$index]}"
+  stage="${stages[$index]}"
+  notice_target="$destination_root/.third-party-notices"
+  if [[ -e "$notice_target" || -L "$notice_target" ]]; then
+    if [[ "$replace_existing" -ne 1 ]] && {
+      [[ ! -d "$notice_target" ]] || [[ -L "$notice_target" ]] ||
+      ! diff -qr -- "$stage/.third-party-notices" "$notice_target" >/dev/null
+    }; then
+      echo "Installation conflict: $notice_target differs from the retained notices. Re-run with --force to replace it." >&2
+      exit 3
+    fi
+  fi
 done
 
 rollback() {
@@ -243,6 +316,13 @@ for index in "${!destinations[@]}"; do
   mkdir -p "$destination_root"
 
   for target_name in "${target_names[@]}"; do
+    if [[ "$target_name" == ".third-party-notices" ]] &&
+       [[ "$replace_existing" -ne 1 ]] &&
+       [[ -d "$destination_root/$target_name" ]] &&
+       [[ ! -L "$destination_root/$target_name" ]] &&
+       diff -qr -- "$stage/$target_name" "$destination_root/$target_name" >/dev/null; then
+      continue
+    fi
     touch "$transaction/touched/$target_name"
     if [[ -e "$destination_root/$target_name" || -L "$destination_root/$target_name" ]]; then
       backup_attempt_count=$((backup_attempt_count + 1))

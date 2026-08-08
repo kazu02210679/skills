@@ -45,10 +45,28 @@ redacted value. If the diff is empty, stop without creating a report.
 Inspect only files needed to understand the changed behavior, contracts, tests,
 and runtime evidence. Do not use unrelated repository data to expand the scope.
 
-## 3. Run two isolated review passes
+## 3. Choose the review topology and run two ordered passes
 
-Keep the passes separate. Use isolated read-only subagents when available;
-otherwise finish and record the first pass before reading the plan.
+Run `scripts/select_review_mode.py` with the changed-file count, added/deleted
+line counts, changed paths, and the collector's category-only `risk_signals`.
+Set `force_isolated` only when an explicit user or safety policy requires it.
+Use the selector's deterministic decision:
+
+- `serial_same_session` is the default. Finish and record plan-blind review in
+  the current session, then read the plan and run plan-aware review. This avoids
+  paying for duplicate isolated context on ordinary changes.
+- `isolated` is required at 20 or more changed files, 1,000 or more total
+  added/deleted lines, when changed paths or diff lines report a high-risk category,
+  covering auth, credentials, sandbox/permissions, command execution,
+  destructive data changes, release/signing trust, or reviewer/safety policy.
+  Untracked content that is not represented in the collected Git diff also
+  fails closed to isolated review.
+
+The topology never changes the order: plan-blind must finish before plan-aware.
+Keep the pass outputs separate in both modes. Follow the lifecycle modeled by
+`orchestrate_review` in the selector script: ordinary review reuses one session,
+while isolated review creates distinct sessions; neither path injects plan
+content before the blind pass records completion.
 
 ### Pass A — plan-blind
 
