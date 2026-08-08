@@ -5,35 +5,32 @@ description: Use when the user explicitly requests combined GPT Pro Codex Loop a
 
 # GPT Pro + Sol Advisor composition
 
-Use only for explicit combined mode; both dependencies remain standalone.
+Use only for explicit combined mode. GPT Pro alone and Sol Advisor alone remain
+standalone.
 
 **REQUIRED SUB-SKILL:** Use `gpt-pro-codex-loop` as the outer protocol.
 
 **ADVISORY DEPENDENCY:** Use the configured Sol Advisor role. Do not invoke
 `sol-advisor:orchestration` in combined mode; its authority conflicts.
 
-## Mode and preflight
+## Preflight
 
-- GPT Pro alone and Sol Advisor alone remain standalone.
-- Combine only on an explicit request for both; clarify ambiguity.
+Combine only on an explicit request for both; clarify ambiguity.
 
 Before GPT Pro `inspect-init` or `init`:
 
-1. Call `get_setup_status`. If missing, old, or corrupt, run
-   `sol-advisor:setup` alone and stop before Pro.
-2. If setup installed or updated an adapter, require a fresh Codex task.
-3. Derive the current canonical workspace from trusted Codex runtime context,
-   then call `get_preferences`. Require exactly one profile.
-   preferences.client must equal `codex`; canonical `preferences.workspace` must equal the current
-   canonical workspace; and `profileKey` must equal
-   `codex:<scope>:<workspace>`, where scope is `project` or `user`. Require
-   model, effort, and permission profile.
-4. Its combined role set must contain only observable `sol_advisor_advisor`;
-   role-discovery data must be a well-formed role list.
-   Any identity, interface, preference, or role failure stops before Pro.
-   Do not silently downgrade or fabricate a consultation.
-
-Reconfigure a mismatched profile; adapter changes require a fresh task.
+1. Call `get_setup_status`. Missing, old, or corrupt setup runs
+   `sol-advisor:setup` alone, then stops before Pro.
+2. Adapter installation or update requires a fresh Codex task.
+3. Derive the current canonical workspace from trusted runtime context, then
+   call `get_preferences`; success returns the upstream-validated active object.
+   `preferences.client` must equal `codex`; `preferences.workspace` must equal
+   the current canonical workspace; and `profileKey` must equal
+   `codex:<scope>:<workspace>` for scope `project` or `user`. Require the saved
+   advisor model and effort; preferences have no permission profile.
+4. Require a well-formed role list and only observable `sol_advisor_advisor` in
+   the combined role set. Any identity, interface, preference, or role failure
+   stops before Pro. Do not silently downgrade or fabricate a consultation.
 
 ## Authority
 
@@ -53,18 +50,20 @@ Consult only at a Codex-owned commitment boundary with one precise question,
 material uncertainty/risk, decision value, and no equivalent prior advice.
 
 Send only relevant frozen constraints, verified evidence, alternatives, risks,
-and the question; exclude transcripts, unrelated material, and secrets.
+and the question. Exclude transcripts, unrelated material, and secrets.
 
-After spawning, but before using or dispositioning advice, obtain trusted
-runtime observations of the actual role, model, reasoning effort, sandbox, and
-permission profile. Role, model,
-effort, and permission must match the bound profile; sandbox must be
-`read-only`. Missing, malformed, ambiguous, or contrary evidence invalidates
-the consultation: discard its body before any downstream use and stop without
-retry, fallback, Pro continuation, or downgrade. A promise is not attestation.
+After spawning, require explicit invocation success and trusted observations of
+actual role, model, effort, sandbox, and permission profile before disposition.
+Role, model, and effort must match the bound profile; sandbox must equal
+`read-only`. Permission must be non-empty, recorded exactly, and treated as
+opaque audit evidence—never compared, classified, or allowlisted. Invocation
+failure or missing, malformed, ambiguous, or contrary evidence discards the
+body and stops without retry, fallback, Pro continuation, or downgrade. A
+promise is not attestation.
 
-Record mode, question, role, calls, advice, Codex disposition and rationale,
-stop condition, and next step. Use `accept`, `reject`, or `partially accept`.
+Record mode, question, role, calls, exact trusted observations, advice,
+disposition, rationale, stop condition, and next step. Use `accept`, `reject`,
+or `partially accept`.
 
 ## Return to GPT Pro
 

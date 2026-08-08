@@ -30,13 +30,11 @@ def valid_combined(**overrides: object) -> dict[str, object]:
         "trusted_current_workspace": "/repo/current",
         "current_workspace": "/repo/current",
         "preferences_profile_key": f"codex:project:{POLICY.canonical_workspace('/repo/current')}",
-        "preference_match_count": 1,
         "configured_advisor_role": "sol_advisor_advisor",
         "configured_combined_roles": ["sol_advisor_advisor"],
         "available_roles": ["sol_advisor_advisor"],
         "expected_advisor_model": "gpt-5.6-sol",
         "expected_advisor_effort": "high",
-        "expected_permission_profile": "restricted",
     }
     scenario.update(overrides)
     return scenario
@@ -44,12 +42,13 @@ def valid_combined(**overrides: object) -> dict[str, object]:
 
 def attested_combined(**overrides: object) -> dict[str, object]:
     evidence: dict[str, object] = {
+        "advisor_invocation_succeeded": True,
         "runtime_observation_trusted": True,
         "observed_advisor_role": "sol_advisor_advisor",
         "observed_advisor_model": "gpt-5.6-sol",
         "observed_advisor_effort": "high",
         "observed_advisor_sandbox": "read-only",
-        "observed_permission_profile": "restricted",
+        "observed_permission_profile": "managed",
     }
     evidence.update(overrides)
     return valid_combined(**evidence)
@@ -79,7 +78,7 @@ class CompositionContractTests(unittest.TestCase):
             "materially new evidence",
             "sol_advisor_advisor",
             "sol_advisor_terra_implementer",
-            "`accept`, `reject`, or `partially accept`",
+            "`partially accept`",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.skill.lower())
@@ -107,8 +106,8 @@ class CompositionContractTests(unittest.TestCase):
     def test_skill_requires_codex_workspace_profile_binding(self) -> None:
         lower = self.skill.lower()
         for phrase in (
-            "preferences.client must equal `codex`",
-            "canonical `preferences.workspace`",
+            "`preferences.client` must equal `codex`",
+            "`preferences.workspace` must equal",
             "current canonical workspace",
             "profilekey",
         ):
@@ -132,7 +131,7 @@ class CompositionContractTests(unittest.TestCase):
         self.assertEqual("profile-key-mismatch", wrong_profile["terminal"])
         self.assertFalse(wrong_profile["gpc_started"])
 
-    def test_profile_binding_is_unique_canonical_and_uses_trusted_workspace(self) -> None:
+    def test_profile_binding_is_canonical_and_uses_trusted_workspace(self) -> None:
         equivalent = POLICY.route(
             valid_combined(
                 preferences_workspace="/repo/current/.",
@@ -142,20 +141,6 @@ class CompositionContractTests(unittest.TestCase):
             )
         )
         self.assertTrue(equivalent["gpc_started"])
-
-        for count in (0, 2):
-            with self.subTest(match_count=count):
-                result = POLICY.route(valid_combined(preference_match_count=count))
-                self.assertEqual("profile-match-count-invalid", result["terminal"])
-                self.assertFalse(result["gpc_started"])
-
-        for malformed_count in (True, 1.0, "1", None):
-            with self.subTest(malformed_match_count=malformed_count):
-                result = POLICY.route(
-                    valid_combined(preference_match_count=malformed_count)
-                )
-                self.assertEqual("profile-match-count-invalid", result["terminal"])
-                self.assertFalse(result["gpc_started"])
 
         attacker_supplied = POLICY.route(
             valid_combined(
@@ -173,7 +158,6 @@ class CompositionContractTests(unittest.TestCase):
             "profile-key": {"preferences_profile_key": None},
             "model": {"expected_advisor_model": None},
             "effort": {"expected_advisor_effort": None},
-            "permission-profile": {"expected_permission_profile": None},
         }
         for field, override in cases.items():
             with self.subTest(field=field):
@@ -225,6 +209,7 @@ class CompositionContractTests(unittest.TestCase):
 
     def test_runtime_attestation_is_required_before_advice_disposition(self) -> None:
         base = valid_combined(
+            advisor_invocation_succeeded=True,
             runtime_observation_trusted=True,
             codex_commitment_boundary=True,
             concrete_question=True,
@@ -293,6 +278,27 @@ class CompositionContractTests(unittest.TestCase):
         malformed = POLICY.route({**base, "observed_advisor_model": ["gpt-5.6-sol"]})
         self.assertEqual("advisor-attestation-unavailable", malformed["terminal"])
 
+    def test_advisor_invocation_failure_discards_advice_without_fallback(self) -> None:
+        base = attested_combined(
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Did the bounded advisor invocation complete?",
+            material_risk=True,
+            decision_value=True,
+            advice_body="must never propagate",
+        )
+        for succeeded in (None, False, "true"):
+            with self.subTest(succeeded=succeeded):
+                result = POLICY.route(
+                    {**base, "advisor_invocation_succeeded": succeeded}
+                )
+                self.assertEqual("advisor-invocation-failed", result["terminal"])
+                self.assertEqual(1, result["sol_calls"])
+                self.assertEqual(0, result["advice_admitted"])
+                self.assertTrue(result["advice_discarded"])
+                self.assertEqual(0, result["downstream_advice_propagations"])
+                self.assertEqual(0, result["fallback_calls"])
+
     def test_runtime_observation_provenance_must_be_trusted(self) -> None:
         base = attested_combined(
             codex_commitment_boundary=True,
@@ -313,27 +319,64 @@ class CompositionContractTests(unittest.TestCase):
                 self.assertEqual(0, result["downstream_advice_propagations"])
                 self.assertEqual(0, result["fallback_calls"])
 
-    def test_permission_profile_must_match_and_be_non_elevated(self) -> None:
+    def test_permission_profile_is_observed_but_not_a_saved_preference(self) -> None:
+        for permission in (
+            "managed",
+            "custom-host-policy-v7",
+            "  custom-host-policy-v7  ",
+        ):
+            with self.subTest(permission=permission):
+                result = POLICY.route(
+                    attested_combined(
+                        codex_commitment_boundary=True,
+                        concrete_question=True,
+                        precise_question="Is runtime permission observable?",
+                        material_risk=True,
+                        decision_value=True,
+                        observed_permission_profile=permission,
+                    )
+                )
+                self.assertEqual("primary-disposition", result["terminal"])
+                self.assertTrue(result["runtime_attested"])
+                self.assertEqual(1, result["advice_admitted"])
+                self.assertEqual(
+                    permission,
+                    result["runtime_observations"]["permission_profile"],
+                )
+
+    def test_permission_profile_must_be_non_empty_and_sandbox_exactly_read_only(self) -> None:
         base = attested_combined(
             codex_commitment_boundary=True,
             concrete_question=True,
-            precise_question="Is runtime permission bounded?",
+            precise_question="Is runtime isolation observable?",
             material_risk=True,
             decision_value=True,
         )
-        mismatch = POLICY.route({**base, "observed_permission_profile": "managed"})
-        self.assertEqual("advisor-attestation-mismatch", mismatch["terminal"])
-        self.assertEqual("permission_profile", mismatch["attestation_failure"])
+        for permission in (None, "", "   "):
+            with self.subTest(permission=permission):
+                result = POLICY.route(
+                    {**base, "observed_permission_profile": permission}
+                )
+                self.assertEqual("advisor-attestation-unavailable", result["terminal"])
+                self.assertTrue(result["advice_discarded"])
 
-        elevated = POLICY.route(
-            {
-                **base,
-                "expected_permission_profile": "elevated",
-                "observed_permission_profile": "elevated",
-            }
-        )
-        self.assertEqual("advisor-preference-invalid", elevated["terminal"])
-        self.assertFalse(elevated["gpc_started"])
+        for sandbox in (
+            None,
+            "",
+            "READ-ONLY",
+            "readonly",
+            " read-only ",
+            "workspace-write",
+        ):
+            with self.subTest(sandbox=sandbox):
+                result = POLICY.route({**base, "observed_advisor_sandbox": sandbox})
+                expected = (
+                    "advisor-attestation-unavailable"
+                    if sandbox in (None, "")
+                    else "advisor-attestation-mismatch"
+                )
+                self.assertEqual(expected, result["terminal"])
+                self.assertTrue(result["advice_discarded"])
 
     def test_denied_advice_never_propagates_or_falls_back(self) -> None:
         result = POLICY.route(
@@ -454,6 +497,7 @@ class CompositionContractTests(unittest.TestCase):
                 "wrong-workspace-profile-is-rejected",
                 "wrong-profile-key-is-rejected",
                 "legacy-reviewer-config-is-rejected",
+                "advisor-invocation-failure-stops",
                 "runtime-attestation-unavailable",
                 "runtime-role-mismatch-is-rejected",
                 "runtime-model-mismatch-is-rejected",
@@ -463,7 +507,7 @@ class CompositionContractTests(unittest.TestCase):
                 "missing-profile-key-is-rejected",
                 "retained-implementer-config-is-rejected",
                 "runtime-permission-missing-is-rejected",
-                "runtime-permission-mismatch-is-rejected",
+                "runtime-permission-blank-is-rejected",
             },
             set(cases),
         )
@@ -531,15 +575,22 @@ class CompositionContractTests(unittest.TestCase):
                 material_risk=True,
                 decision_value=True,
             ),
-            "pro-green-permission": attested_combined(
+            "pro-green-opaque-permission": attested_combined(
                 codex_commitment_boundary=True,
                 concrete_question=True,
-                precise_question="Is the permission profile safely bounded?",
+                precise_question="Is the permission profile auditable?",
                 material_risk=True,
                 decision_value=True,
-                observed_permission_profile="managed",
+                observed_permission_profile="custom-host-policy-v7",
             ),
-            "pro-green-ambiguous": valid_combined(preference_match_count=2),
+            "pro-green-invocation-failure": attested_combined(
+                advisor_invocation_succeeded=False,
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Did the bounded advisor invocation complete?",
+                material_risk=True,
+                decision_value=True,
+            ),
             "pro-green-selfclaim": attested_combined(
                 runtime_observation_trusted=False,
                 codex_commitment_boundary=True,

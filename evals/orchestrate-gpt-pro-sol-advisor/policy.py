@@ -15,7 +15,6 @@ RUNTIME_FIELDS = {
     "sandbox": "observed_advisor_sandbox",
     "permission_profile": "observed_permission_profile",
 }
-SAFE_PERMISSION_PROFILES = {"read-only", "restricted"}
 PROFILE_SCOPES = {"project", "user"}
 
 
@@ -43,12 +42,40 @@ def _failure(terminal: str, dependency: str) -> dict[str, Any]:
     }
 
 
-def _runtime_attestation(scenario: dict[str, Any], advisor_role: str) -> dict[str, Any] | None:
+def _advisor_invocation_failure(scenario: dict[str, Any]) -> dict[str, Any] | None:
+    if scenario.get("advisor_invocation_succeeded") is True:
+        return None
+    return {
+        "selected_mode": "combined-unavailable",
+        "dependency": "advisor-invocation",
+        "gpc_started": True,
+        "sol_calls": scenario.get("prior_sol_calls", 1),
+        "advice_accepted": False,
+        "advice_admitted": 0,
+        "advice_discarded": True,
+        "downstream_advice_propagations": 0,
+        "fallback_calls": 0,
+        "compatibility_fallback": False,
+        "silent_downgrade": False,
+        "terminal": "advisor-invocation-failed",
+    }
+
+
+def _runtime_observations(scenario: dict[str, Any]) -> dict[str, str]:
     observed: dict[str, str] = {}
     for name, key in RUNTIME_FIELDS.items():
         value = scenario.get(key)
-        observed[name] = value.strip() if isinstance(value, str) else ""
-    if any(not value for value in observed.values()):
+        observed[name] = value if isinstance(value, str) else ""
+    return observed
+
+
+def _runtime_attestation(scenario: dict[str, Any], advisor_role: str) -> dict[str, Any] | None:
+    observed = _runtime_observations(scenario)
+    audit = {
+        "runtime_observations": observed,
+        "runtime_observation_trusted": scenario.get("runtime_observation_trusted") is True,
+    }
+    if any(not value.strip() for value in observed.values()):
         return {
             "selected_mode": "combined-unavailable",
             "dependency": "advisor-runtime-attestation",
@@ -61,6 +88,7 @@ def _runtime_attestation(scenario: dict[str, Any], advisor_role: str) -> dict[st
             "fallback_calls": 0,
             "compatibility_fallback": False,
             "silent_downgrade": False,
+            **audit,
             "terminal": "advisor-attestation-unavailable",
         }
     if scenario.get("runtime_observation_trusted") is not True:
@@ -76,6 +104,7 @@ def _runtime_attestation(scenario: dict[str, Any], advisor_role: str) -> dict[st
             "fallback_calls": 0,
             "compatibility_fallback": False,
             "silent_downgrade": False,
+            **audit,
             "terminal": "advisor-attestation-untrusted",
         }
     expected = {
@@ -83,7 +112,6 @@ def _runtime_attestation(scenario: dict[str, Any], advisor_role: str) -> dict[st
         "model": str(scenario["expected_advisor_model"]),
         "effort": str(scenario["expected_advisor_effort"]),
         "sandbox": "read-only",
-        "permission_profile": str(scenario["expected_permission_profile"]),
     }
     for field, expected_value in expected.items():
         if observed[field] != expected_value:
@@ -99,6 +127,7 @@ def _runtime_attestation(scenario: dict[str, Any], advisor_role: str) -> dict[st
                 "fallback_calls": 0,
                 "compatibility_fallback": False,
                 "silent_downgrade": False,
+                **audit,
                 "attestation_failure": field,
                 "terminal": "advisor-attestation-mismatch",
             }
@@ -131,9 +160,6 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
     client = client_value.strip() if isinstance(client_value, str) else ""
     if client != "codex":
         return _failure("profile-client-mismatch", "sol-profile")
-    match_count = scenario.get("preference_match_count")
-    if type(match_count) is not int or match_count != 1:
-        return _failure("profile-match-count-invalid", "sol-profile")
     workspace = canonical_workspace(scenario.get("preferences_workspace"))
     current_workspace = canonical_workspace(scenario.get("trusted_current_workspace"))
     if not workspace or not current_workspace or workspace != current_workspace:
@@ -148,14 +174,11 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
         return _failure("profile-key-mismatch", "sol-profile")
     expected_model = scenario.get("expected_advisor_model")
     expected_effort = scenario.get("expected_advisor_effort")
-    expected_permission = scenario.get("expected_permission_profile")
     if (
         not isinstance(expected_model, str)
         or not expected_model.strip()
         or not isinstance(expected_effort, str)
         or not expected_effort.strip()
-        or not isinstance(expected_permission, str)
-        or expected_permission.strip() not in SAFE_PERMISSION_PROFILES
     ):
         return _failure("advisor-preference-invalid", "sol-preferences")
 
@@ -188,15 +211,19 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
     if scenario.get("mandatory_final_sol_review"):
         return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
+        if failure := _advisor_invocation_failure(scenario):
+            return failure
         if failure := _runtime_attestation(scenario, advisor_role):
             return failure
         disposition = evaluate_advice(scenario["sol_response"])
-        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 1), "advice_admitted": 1, "advice_discarded": False, "downstream_advice_propagations": 0, "fallback_calls": 0, **disposition, **preserved, "terminal": "outer-protocol"}
+        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 1), "advice_admitted": 1, "advice_discarded": False, "downstream_advice_propagations": 0, "fallback_calls": 0, "runtime_observations": _runtime_observations(scenario), "runtime_observation_trusted": True, **disposition, **preserved, "terminal": "outer-protocol"}
     if scenario.get("recursive") or scenario.get("duplicate") or scenario.get("advisor_reentry"):
+        if failure := _advisor_invocation_failure(scenario):
+            return failure
         if failure := _runtime_attestation(scenario, advisor_role):
             return failure
         disposition = evaluate_advice(scenario.get("sol_response", {"requests_outer_restart": True}))
-        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 0), "advice_admitted": 1, "advice_discarded": False, "downstream_advice_propagations": 0, "fallback_calls": 0, **disposition, **preserved, "recursion": False, "sol_to_sol": False, "terminal": "outer-protocol"}
+        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 0), "advice_admitted": 1, "advice_discarded": False, "downstream_advice_propagations": 0, "fallback_calls": 0, "runtime_observations": _runtime_observations(scenario), "runtime_observation_trusted": True, **disposition, **preserved, "recursion": False, "sol_to_sol": False, "terminal": "outer-protocol"}
     if scenario.get("follow_up") and not scenario.get("materially_new"):
         terminal = "fix-verify-return-to-pro" if scenario.get("pro_correction") else "use-existing-disposition"
         return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": terminal}
@@ -210,6 +237,8 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
         gate = gate and bool(scenario.get("stop_condition", "").strip())
     if not gate:
         return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
+    if failure := _advisor_invocation_failure(scenario):
+        return failure
     if failure := _runtime_attestation(scenario, advisor_role):
         return failure
     return {
@@ -219,6 +248,8 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
         "maximum_lanes": 1,
         "requires_stop_condition": bool(scenario.get("follow_up")),
         "runtime_attested": True,
+        "runtime_observations": _runtime_observations(scenario),
+        "runtime_observation_trusted": True,
         "advice_admitted": 1,
         "advice_discarded": False,
         "downstream_advice_propagations": 0,
