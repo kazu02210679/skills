@@ -1785,6 +1785,25 @@ def _forbidden_evidence_schema_field_names(value: object) -> list[str]:
     return errors
 
 
+def _model_bound_report_items(evidence: Mapping[str, object]) -> list[str]:
+    """Flatten report items for diagnostics only; field-specific caps remain authoritative."""
+    items: list[str] = [str(evidence["intent_summary"])]
+    if "changed_file_intents" in evidence:
+        items.extend(str(value) for value in evidence["changed_file_intents"].values())  # type: ignore[union-attr]
+    else:
+        items.extend(
+            str(item.get("intent", ""))
+            for item in evidence["changed_files"]  # type: ignore[union-attr]
+            if isinstance(item, dict)
+        )
+    for entries in evidence["acceptance_evidence"].values():  # type: ignore[union-attr]
+        items.extend(entries)
+    items.extend(_canonical_prompt_json(command) for command in evidence["test_commands"])  # type: ignore[union-attr]
+    for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
+        items.extend(evidence[field])  # type: ignore[arg-type]
+    return items
+
+
 def _load_local_evidence(
     path: Path, requirements: Mapping[str, object]
 ) -> dict[str, object]:
