@@ -2,15 +2,107 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 
-LANES = {
-    "implementation": "sol_advisor_terra_implementer",
-    "investigation": "sol_advisor_terra_implementer",
-    "review": "sol_advisor_sol_reviewer",
-    "risk": "sol_advisor_sol_reviewer",
+SETUP_FAILURES = {"missing", "schema-old", "corrupt"}
+CODEX_ADVISOR_ROLE = "sol_advisor_advisor"
+RUNTIME_FIELDS = {
+    "role": "observed_advisor_role",
+    "model": "observed_advisor_model",
+    "effort": "observed_advisor_effort",
+    "sandbox": "observed_advisor_sandbox",
+    "permission_profile": "observed_permission_profile",
 }
+SAFE_PERMISSION_PROFILES = {"read-only", "restricted"}
+PROFILE_SCOPES = {"project", "user"}
+
+
+def canonical_workspace(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    return os.path.normcase(os.path.realpath(os.path.abspath(os.path.normpath(value.strip()))))
+
+
+def _failure(terminal: str, dependency: str) -> dict[str, Any]:
+    return {
+        "selected_mode": "combined-unavailable",
+        "dependency": dependency,
+        "gpc_started": False,
+        "sol_calls": 0,
+        "fabricated_consultation": False,
+        "silent_downgrade": False,
+        "compatibility_fallback": False,
+        "advice_admitted": 0,
+        "advice_accepted": False,
+        "advice_discarded": True,
+        "downstream_advice_propagations": 0,
+        "fallback_calls": 0,
+        "terminal": terminal,
+    }
+
+
+def _runtime_attestation(scenario: dict[str, Any], advisor_role: str) -> dict[str, Any] | None:
+    observed: dict[str, str] = {}
+    for name, key in RUNTIME_FIELDS.items():
+        value = scenario.get(key)
+        observed[name] = value.strip() if isinstance(value, str) else ""
+    if any(not value for value in observed.values()):
+        return {
+            "selected_mode": "combined-unavailable",
+            "dependency": "advisor-runtime-attestation",
+            "gpc_started": True,
+            "sol_calls": scenario.get("prior_sol_calls", 1),
+            "advice_accepted": False,
+            "advice_admitted": 0,
+            "advice_discarded": True,
+            "downstream_advice_propagations": 0,
+            "fallback_calls": 0,
+            "compatibility_fallback": False,
+            "silent_downgrade": False,
+            "terminal": "advisor-attestation-unavailable",
+        }
+    if scenario.get("runtime_observation_trusted") is not True:
+        return {
+            "selected_mode": "combined-unavailable",
+            "dependency": "advisor-runtime-attestation",
+            "gpc_started": True,
+            "sol_calls": scenario.get("prior_sol_calls", 1),
+            "advice_accepted": False,
+            "advice_admitted": 0,
+            "advice_discarded": True,
+            "downstream_advice_propagations": 0,
+            "fallback_calls": 0,
+            "compatibility_fallback": False,
+            "silent_downgrade": False,
+            "terminal": "advisor-attestation-untrusted",
+        }
+    expected = {
+        "role": advisor_role,
+        "model": str(scenario["expected_advisor_model"]),
+        "effort": str(scenario["expected_advisor_effort"]),
+        "sandbox": "read-only",
+        "permission_profile": str(scenario["expected_permission_profile"]),
+    }
+    for field, expected_value in expected.items():
+        if observed[field] != expected_value:
+            return {
+                "selected_mode": "combined-unavailable",
+                "dependency": "advisor-runtime-attestation",
+                "gpc_started": True,
+                "sol_calls": scenario.get("prior_sol_calls", 1),
+                "advice_accepted": False,
+                "advice_admitted": 0,
+                "advice_discarded": True,
+                "downstream_advice_propagations": 0,
+                "fallback_calls": 0,
+                "compatibility_fallback": False,
+                "silent_downgrade": False,
+                "attestation_failure": field,
+                "terminal": "advisor-attestation-mismatch",
+            }
+    return None
 
 
 def route(scenario: dict[str, Any]) -> dict[str, Any]:
@@ -22,22 +114,92 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
     if intent != "combined":
         return {"selected_mode": "unselected", "composition_active": False, "sol_calls": 0, "terminal": "clarify"}
 
+    if scenario.get("requested_dependency") == "sol-advisor:orchestration":
+        return _failure("forbidden-nested-orchestration", "nested-orchestration")
+
+    setup_status = scenario.get("setup_status", "unavailable")
+    if setup_status in SETUP_FAILURES:
+        return _failure("setup-required-before-gpc", "sol-setup")
+    if setup_status != "ready":
+        return _failure("setup-status-unavailable", "sol-setup-status")
+    if scenario.get("setup_changed_this_task"):
+        return _failure("fresh-task-required", "native-role-discovery")
+    if not scenario.get("preferences_loaded"):
+        return _failure("preferences-unavailable", "sol-preferences")
+
+    client_value = scenario.get("preferences_client")
+    client = client_value.strip() if isinstance(client_value, str) else ""
+    if client != "codex":
+        return _failure("profile-client-mismatch", "sol-profile")
+    match_count = scenario.get("preference_match_count")
+    if type(match_count) is not int or match_count != 1:
+        return _failure("profile-match-count-invalid", "sol-profile")
+    workspace = canonical_workspace(scenario.get("preferences_workspace"))
+    current_workspace = canonical_workspace(scenario.get("trusted_current_workspace"))
+    if not workspace or not current_workspace or workspace != current_workspace:
+        return _failure("profile-workspace-mismatch", "sol-profile")
+    scope_value = scenario.get("preferences_scope")
+    scope = scope_value.strip() if isinstance(scope_value, str) else ""
+    if scope not in PROFILE_SCOPES:
+        return _failure("profile-scope-invalid", "sol-profile")
+    expected_profile_key = f"codex:{scope}:{current_workspace}"
+    profile_key = scenario.get("preferences_profile_key")
+    if not isinstance(profile_key, str) or profile_key != expected_profile_key:
+        return _failure("profile-key-mismatch", "sol-profile")
+    expected_model = scenario.get("expected_advisor_model")
+    expected_effort = scenario.get("expected_advisor_effort")
+    expected_permission = scenario.get("expected_permission_profile")
+    if (
+        not isinstance(expected_model, str)
+        or not expected_model.strip()
+        or not isinstance(expected_effort, str)
+        or not expected_effort.strip()
+        or not isinstance(expected_permission, str)
+        or expected_permission.strip() not in SAFE_PERMISSION_PROFILES
+    ):
+        return _failure("advisor-preference-invalid", "sol-preferences")
+
+    advisor_role = str(scenario.get("configured_advisor_role", "")).strip()
+    if advisor_role != CODEX_ADVISOR_ROLE:
+        return _failure("configured-advisor-invalid", "configured-advisor")
+    if scenario.get("configured_combined_roles") != [CODEX_ADVISOR_ROLE]:
+        return _failure("configured-role-set-invalid", "configured-advisor")
+    available_roles = scenario.get("available_roles")
+    if (
+        not isinstance(available_roles, list)
+        or any(not isinstance(role, str) or not role.strip() for role in available_roles)
+    ):
+        return _failure("available-roles-invalid", "configured-advisor")
+    if advisor_role not in available_roles:
+        return _failure("configured-advisor-unavailable", "configured-advisor")
+
+    requested_role = scenario.get("requested_role")
+    if requested_role and requested_role != advisor_role:
+        return _failure("non-advisor-role-rejected", "advisory-role")
+
     preserved = {
+        "gpc_started": True,
         "frozen_requirements": True,
         "user_approval_authority": "user-and-outer-protocol",
         "repository_owner": "codex",
         "local_verification_retained": True,
         "pro_review_retained": True,
     }
+    if scenario.get("mandatory_final_sol_review"):
+        return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
+        if failure := _runtime_attestation(scenario, advisor_role):
+            return failure
         disposition = evaluate_advice(scenario["sol_response"])
-        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 1), **disposition, **preserved, "terminal": "outer-protocol"}
+        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 1), "advice_admitted": 1, "advice_discarded": False, "downstream_advice_propagations": 0, "fallback_calls": 0, **disposition, **preserved, "terminal": "outer-protocol"}
     if scenario.get("recursive") or scenario.get("duplicate") or scenario.get("advisor_reentry"):
+        if failure := _runtime_attestation(scenario, advisor_role):
+            return failure
         disposition = evaluate_advice(scenario.get("sol_response", {"requests_outer_restart": True}))
-        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 0), **disposition, "recursion": False, "sol_to_sol": False, "terminal": "outer-protocol"}
+        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 0), "advice_admitted": 1, "advice_discarded": False, "downstream_advice_propagations": 0, "fallback_calls": 0, **disposition, **preserved, "recursion": False, "sol_to_sol": False, "terminal": "outer-protocol"}
     if scenario.get("follow_up") and not scenario.get("materially_new"):
         terminal = "fix-verify-return-to-pro" if scenario.get("pro_correction") else "use-existing-disposition"
-        return {"selected_mode": "combined", "sol_calls": 0, "terminal": terminal}
+        return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": terminal}
 
     gate = all(
         scenario.get(key, False)
@@ -47,14 +209,24 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
     if scenario.get("follow_up"):
         gate = gate and bool(scenario.get("stop_condition", "").strip())
     if not gate:
-        return {"selected_mode": "combined", "sol_calls": 0, "terminal": "local-verify-then-pro"}
-    if not scenario.get("plugin_available", True):
-        return {"selected_mode": "combined-unavailable", "dependency": "plugin", "sol_calls": 0, "fabricated_consultation": False, "silent_downgrade": False, "terminal": "dependency-failure"}
-
-    lane = LANES[scenario["question_kind"]]
-    if lane not in scenario.get("available_lanes", list(LANES.values())):
-        return {"selected_mode": "combined-unavailable", "dependency": "lane", "sol_calls": 0, "fabricated_consultation": False, "silent_downgrade": False, "terminal": "dependency-failure"}
-    return {"selected_mode": "combined", "selected_lane": lane, "sol_calls": 1, "maximum_lanes": 1, "requires_stop_condition": bool(scenario.get("follow_up")), "terminal": "primary-disposition"}
+        return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
+    if failure := _runtime_attestation(scenario, advisor_role):
+        return failure
+    return {
+        "selected_mode": "combined",
+        "selected_lane": advisor_role,
+        "sol_calls": 1,
+        "maximum_lanes": 1,
+        "requires_stop_condition": bool(scenario.get("follow_up")),
+        "runtime_attested": True,
+        "advice_admitted": 1,
+        "advice_discarded": False,
+        "downstream_advice_propagations": 0,
+        "fallback_calls": 0,
+        "advice_eligible_for_disposition": True,
+        **preserved,
+        "terminal": "primary-disposition",
+    }
 
 
 def bounded_packet(context: dict[str, Any]) -> dict[str, Any]:

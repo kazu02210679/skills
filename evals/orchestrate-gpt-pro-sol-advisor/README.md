@@ -1,24 +1,24 @@
 # Composition skill behavioral evaluation
 
-The RED baseline used five fresh-context authority-boundary samples before the
-composition skill existed. Four of five made Sol review recur after every
-correction or Pro-requested change, effectively turning advice into a mandatory
-pre-Pro gate. The focused cases and contract test preserve that failure as the
-regression target.
+The second RED baseline used five fresh-context samples against the previous
+composition skill. Four safely rejected wrong profiles, contrary runtime
+metadata, or retained roles. One accepted useful advice when runtime role,
+model, effort, sandbox, and permission-profile evidence was unobservable. The
+normalized observations are retained in `pressure-results.json`.
 
-After the skill was implemented, five fresh-context samples ran the same
-high-risk authority-boundary scenario while reading the new `SKILL.md`. All
-five suppressed automatic Sol recurrence and allowed another consultation
-only for materially new evidence or a materially changed question. This is a
-baseline improvement from 1/5 to 5/5 correct recurrence decisions.
-The normalized observations are retained in `pressure-results.json`.
+The final five fresh-context samples exercised a valid control, isolated
+permission mismatch, ambiguous duplicate profiles, advice-body attestation
+claims with no runtime evidence, and equivalent canonical workspace spellings.
+All five routed correctly. Invalid advice was discarded before downstream use;
+valid low-risk work skipped Sol without making it a gate.
 
-`policy.py` is a deterministic evaluation harness, not a runtime dependency of
-the Skill. Each case supplies a scenario to the harness and asserts the
-observed mode, lane, call count, preserved authority, and terminal state.
+`policy.py` is a deterministic evaluation harness, not a runtime dependency.
+Its cases verify pre-GPC setup ordering, canonical workspace/profile binding,
+the exact Codex advisor, trusted runtime identity/isolation attestation, authority,
+bounded recurrence, and fail-closed dependency handling.
 
 Run:
 
 ```powershell
-python -m unittest evals.orchestrate-gpt-pro-sol-advisor.test_contract
+python -m unittest evals/orchestrate-gpt-pro-sol-advisor/test_contract.py
 ```

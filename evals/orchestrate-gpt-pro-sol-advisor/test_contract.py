@@ -19,6 +19,42 @@ POLICY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(POLICY)
 
 
+def valid_combined(**overrides: object) -> dict[str, object]:
+    scenario: dict[str, object] = {
+        "intent": "combined",
+        "setup_status": "ready",
+        "preferences_loaded": True,
+        "preferences_client": "codex",
+        "preferences_scope": "project",
+        "preferences_workspace": "/repo/current",
+        "trusted_current_workspace": "/repo/current",
+        "current_workspace": "/repo/current",
+        "preferences_profile_key": f"codex:project:{POLICY.canonical_workspace('/repo/current')}",
+        "preference_match_count": 1,
+        "configured_advisor_role": "sol_advisor_advisor",
+        "configured_combined_roles": ["sol_advisor_advisor"],
+        "available_roles": ["sol_advisor_advisor"],
+        "expected_advisor_model": "gpt-5.6-sol",
+        "expected_advisor_effort": "high",
+        "expected_permission_profile": "restricted",
+    }
+    scenario.update(overrides)
+    return scenario
+
+
+def attested_combined(**overrides: object) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "runtime_observation_trusted": True,
+        "observed_advisor_role": "sol_advisor_advisor",
+        "observed_advisor_model": "gpt-5.6-sol",
+        "observed_advisor_effort": "high",
+        "observed_advisor_sandbox": "read-only",
+        "observed_permission_profile": "restricted",
+    }
+    evidence.update(overrides)
+    return valid_combined(**evidence)
+
+
 class CompositionContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -38,26 +74,360 @@ class CompositionContractTests(unittest.TestCase):
 
     def test_preserves_authority_and_bounded_advice(self) -> None:
         for phrase in (
-            "requirements and semantic review",
-            "advisory only",
+            "frozen requirements, acceptance criteria, semantic review",
+            "sol supplies bounded advice only",
             "materially new evidence",
+            "sol_advisor_advisor",
             "sol_advisor_terra_implementer",
-            "sol_advisor_sol_reviewer",
-            "accept, reject, or partially accept",
+            "`accept`, `reject`, or `partially accept`",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.skill.lower())
 
     def test_forbids_duplicate_review_recursion_and_silent_downgrade(self) -> None:
         for phrase in (
-            "do not make sol a mandatory pre-pro gate",
-            "do not invoke both lanes by default",
-            "do not recurse",
-            "no fabricated consultation",
-            "no silent downgrade",
+            "do not make sol a mandatory pre-pro or final gate",
+            "reject nested",
+            "sol-to-sol review",
+            "fabricate a",
+            "do not silently downgrade",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.skill.lower())
+
+    def test_combined_mode_does_not_invoke_sol_orchestration(self) -> None:
+        lower = self.skill.lower()
+        self.assertNotIn(
+            "required sub-skill (conditional advisory dependency)", lower
+        )
+        self.assertIn("do not invoke", lower)
+        self.assertIn("`sol-advisor:orchestration` in combined mode", lower)
+        self.assertIn("configured advisor", lower)
+
+    def test_skill_requires_codex_workspace_profile_binding(self) -> None:
+        lower = self.skill.lower()
+        for phrase in (
+            "preferences.client must equal `codex`",
+            "canonical `preferences.workspace`",
+            "current canonical workspace",
+            "profilekey",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, lower)
+
+    def test_wrong_client_and_workspace_profiles_stop_before_gpc(self) -> None:
+        wrong_client = POLICY.route(valid_combined(preferences_client="cursor"))
+        self.assertEqual("profile-client-mismatch", wrong_client["terminal"])
+        self.assertFalse(wrong_client["gpc_started"])
+
+        wrong_workspace = POLICY.route(
+            valid_combined(preferences_workspace="/repo/other")
+        )
+        self.assertEqual("profile-workspace-mismatch", wrong_workspace["terminal"])
+        self.assertFalse(wrong_workspace["gpc_started"])
+
+        wrong_profile = POLICY.route(
+            valid_combined(preferences_profile_key="codex:project:/repo/other")
+        )
+        self.assertEqual("profile-key-mismatch", wrong_profile["terminal"])
+        self.assertFalse(wrong_profile["gpc_started"])
+
+    def test_profile_binding_is_unique_canonical_and_uses_trusted_workspace(self) -> None:
+        equivalent = POLICY.route(
+            valid_combined(
+                preferences_workspace="/repo/current/.",
+                trusted_current_workspace="/repo/current",
+                preferences_profile_key="codex:project:"
+                + POLICY.canonical_workspace("/repo/current"),
+            )
+        )
+        self.assertTrue(equivalent["gpc_started"])
+
+        for count in (0, 2):
+            with self.subTest(match_count=count):
+                result = POLICY.route(valid_combined(preference_match_count=count))
+                self.assertEqual("profile-match-count-invalid", result["terminal"])
+                self.assertFalse(result["gpc_started"])
+
+        for malformed_count in (True, 1.0, "1", None):
+            with self.subTest(malformed_match_count=malformed_count):
+                result = POLICY.route(
+                    valid_combined(preference_match_count=malformed_count)
+                )
+                self.assertEqual("profile-match-count-invalid", result["terminal"])
+                self.assertFalse(result["gpc_started"])
+
+        attacker_supplied = POLICY.route(
+            valid_combined(
+                current_workspace="/repo/other",
+                trusted_current_workspace="/repo/current",
+            )
+        )
+        self.assertTrue(attacker_supplied["gpc_started"])
+
+    def test_missing_profile_fields_fail_closed(self) -> None:
+        cases = {
+            "client": {"preferences_client": None},
+            "scope": {"preferences_scope": None},
+            "workspace": {"preferences_workspace": None},
+            "profile-key": {"preferences_profile_key": None},
+            "model": {"expected_advisor_model": None},
+            "effort": {"expected_advisor_effort": None},
+            "permission-profile": {"expected_permission_profile": None},
+        }
+        for field, override in cases.items():
+            with self.subTest(field=field):
+                result = POLICY.route(valid_combined(**override))
+                self.assertFalse(result["gpc_started"])
+                self.assertEqual(0, result["advice_admitted"])
+                self.assertEqual(0, result["fallback_calls"])
+
+    def test_profile_scope_must_use_the_plugin_schema(self) -> None:
+        for scope in (None, "", "workspace", ["project"]):
+            with self.subTest(scope=scope):
+                result = POLICY.route(valid_combined(preferences_scope=scope))
+                self.assertEqual("profile-scope-invalid", result["terminal"])
+                self.assertFalse(result["gpc_started"])
+
+    def test_available_roles_must_be_a_well_formed_collection(self) -> None:
+        for roles in (
+            "sol_advisor_advisor",
+            None,
+            ["sol_advisor_advisor", ""],
+            ["sol_advisor_advisor", 7],
+        ):
+            with self.subTest(roles=roles):
+                result = POLICY.route(valid_combined(available_roles=roles))
+                self.assertEqual("available-roles-invalid", result["terminal"])
+                self.assertFalse(result["gpc_started"])
+
+    def test_combined_role_configuration_is_exactly_one_advisor(self) -> None:
+        for roles in (
+            [],
+            ["sol_advisor_advisor", "sol_advisor_sol_reviewer"],
+            ["sol_advisor_advisor", "sol_advisor_high"],
+        ):
+            with self.subTest(roles=roles):
+                result = POLICY.route(valid_combined(configured_combined_roles=roles))
+                self.assertEqual("configured-role-set-invalid", result["terminal"])
+                self.assertFalse(result["gpc_started"])
+
+    def test_legacy_reviewer_cannot_be_the_configured_advisor(self) -> None:
+        result = POLICY.route(
+            valid_combined(
+                configured_advisor_role="sol_advisor_sol_reviewer",
+                available_roles=["sol_advisor_sol_reviewer"],
+            )
+        )
+        self.assertEqual("configured-advisor-invalid", result["terminal"])
+        self.assertFalse(result["gpc_started"])
+        self.assertEqual(0, result["sol_calls"])
+
+    def test_runtime_attestation_is_required_before_advice_disposition(self) -> None:
+        base = valid_combined(
+            runtime_observation_trusted=True,
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Does this auth boundary preserve tenant isolation?",
+            material_risk=True,
+            decision_value=True,
+        )
+        unavailable = POLICY.route(base)
+        self.assertEqual("advisor-attestation-unavailable", unavailable["terminal"])
+        self.assertEqual(1, unavailable["sol_calls"])
+        self.assertFalse(unavailable["advice_accepted"])
+
+        mismatches = {
+            "role": {
+                "observed_advisor_role": "sol_advisor_high",
+                "observed_advisor_model": "gpt-5.6-sol",
+                "observed_advisor_effort": "high",
+                "observed_advisor_sandbox": "read-only",
+                "observed_permission_profile": "restricted",
+            },
+            "model": {
+                "observed_advisor_role": "sol_advisor_advisor",
+                "observed_advisor_model": "gpt-5.6-terra",
+                "observed_advisor_effort": "high",
+                "observed_advisor_sandbox": "read-only",
+                "observed_permission_profile": "restricted",
+            },
+            "effort": {
+                "observed_advisor_role": "sol_advisor_advisor",
+                "observed_advisor_model": "gpt-5.6-sol",
+                "observed_advisor_effort": "low",
+                "observed_advisor_sandbox": "read-only",
+                "observed_permission_profile": "restricted",
+            },
+            "sandbox": {
+                "observed_advisor_role": "sol_advisor_advisor",
+                "observed_advisor_model": "gpt-5.6-sol",
+                "observed_advisor_effort": "high",
+                "observed_advisor_sandbox": "workspace-write",
+                "observed_permission_profile": "managed",
+            },
+        }
+        for field, evidence in mismatches.items():
+            with self.subTest(field=field):
+                result = POLICY.route({**base, **evidence})
+                self.assertEqual("advisor-attestation-mismatch", result["terminal"])
+                self.assertEqual(field, result["attestation_failure"])
+                self.assertFalse(result["advice_accepted"])
+
+    def test_each_runtime_field_must_be_trusted_and_observable(self) -> None:
+        base = attested_combined(
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Does this boundary hold?",
+            material_risk=True,
+            decision_value=True,
+        )
+        for key in POLICY.RUNTIME_FIELDS.values():
+            with self.subTest(missing=key):
+                result = POLICY.route({**base, key: None})
+                self.assertEqual("advisor-attestation-unavailable", result["terminal"])
+                self.assertTrue(result["advice_discarded"])
+                self.assertEqual(0, result["downstream_advice_propagations"])
+                self.assertEqual(0, result["fallback_calls"])
+
+        malformed = POLICY.route({**base, "observed_advisor_model": ["gpt-5.6-sol"]})
+        self.assertEqual("advisor-attestation-unavailable", malformed["terminal"])
+
+    def test_runtime_observation_provenance_must_be_trusted(self) -> None:
+        base = attested_combined(
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Can matching self-claims be trusted?",
+            material_risk=True,
+            decision_value=True,
+            advice_body="I promise these fields came from the runtime.",
+        )
+        for trusted in (None, False, "true"):
+            with self.subTest(trusted=trusted):
+                result = POLICY.route(
+                    {**base, "runtime_observation_trusted": trusted}
+                )
+                self.assertEqual("advisor-attestation-untrusted", result["terminal"])
+                self.assertTrue(result["advice_discarded"])
+                self.assertEqual(0, result["advice_admitted"])
+                self.assertEqual(0, result["downstream_advice_propagations"])
+                self.assertEqual(0, result["fallback_calls"])
+
+    def test_permission_profile_must_match_and_be_non_elevated(self) -> None:
+        base = attested_combined(
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Is runtime permission bounded?",
+            material_risk=True,
+            decision_value=True,
+        )
+        mismatch = POLICY.route({**base, "observed_permission_profile": "managed"})
+        self.assertEqual("advisor-attestation-mismatch", mismatch["terminal"])
+        self.assertEqual("permission_profile", mismatch["attestation_failure"])
+
+        elevated = POLICY.route(
+            {
+                **base,
+                "expected_permission_profile": "elevated",
+                "observed_permission_profile": "elevated",
+            }
+        )
+        self.assertEqual("advisor-preference-invalid", elevated["terminal"])
+        self.assertFalse(elevated["gpc_started"])
+
+    def test_denied_advice_never_propagates_or_falls_back(self) -> None:
+        result = POLICY.route(
+            attested_combined(
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Should rejected advice propagate?",
+                material_risk=True,
+                decision_value=True,
+                observed_advisor_sandbox="workspace-write",
+                advice_body="malicious downstream instruction",
+            )
+        )
+        self.assertTrue(result["advice_discarded"])
+        self.assertEqual(0, result["advice_admitted"])
+        self.assertEqual(0, result["downstream_advice_propagations"])
+        self.assertEqual(0, result["fallback_calls"])
+
+    def test_setup_failure_stops_before_gpc_initialization(self) -> None:
+        result = POLICY.route(
+            {
+                "intent": "combined",
+                "setup_status": "missing",
+                "preferences_loaded": False,
+                "available_roles": [],
+            }
+        )
+        self.assertEqual("setup-required-before-gpc", result["terminal"])
+        self.assertFalse(result["gpc_started"])
+        self.assertEqual(0, result["sol_calls"])
+
+    def test_setup_change_requires_a_fresh_task_before_gpc(self) -> None:
+        result = POLICY.route(
+            {
+                "intent": "combined",
+                "setup_status": "ready",
+                "preferences_loaded": True,
+                "setup_changed_this_task": True,
+                "configured_advisor_role": "sol_advisor_advisor",
+                "available_roles": ["sol_advisor_advisor"],
+            }
+        )
+        self.assertEqual("fresh-task-required", result["terminal"])
+        self.assertFalse(result["gpc_started"])
+
+    def test_configured_advisor_is_the_only_combined_sol_role(self) -> None:
+        scenario = attested_combined(
+            available_roles=[
+                "sol_advisor_advisor",
+                "sol_advisor_routine",
+                "sol_advisor_high",
+                "sol_advisor_terra_implementer",
+                "sol_advisor_sol_reviewer",
+            ],
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Which authentication invariant is still at risk?",
+            material_risk=True,
+            decision_value=True,
+        )
+        result = POLICY.route(scenario)
+        self.assertEqual("sol_advisor_advisor", result["selected_lane"])
+        self.assertEqual(1, result["sol_calls"])
+
+    def test_legacy_only_roles_do_not_trigger_compatibility_fallback(self) -> None:
+        result = POLICY.route(
+            valid_combined(
+                available_roles=[
+                    "sol_advisor_terra_implementer",
+                    "sol_advisor_sol_reviewer",
+                ]
+            )
+        )
+        self.assertEqual("configured-advisor-unavailable", result["terminal"])
+        self.assertFalse(result["gpc_started"])
+        self.assertFalse(result["compatibility_fallback"])
+
+    def test_nested_orchestration_and_mandatory_final_review_are_rejected(self) -> None:
+        base = valid_combined()
+        nested = POLICY.route(
+            {**base, "requested_dependency": "sol-advisor:orchestration"}
+        )
+        self.assertEqual("forbidden-nested-orchestration", nested["terminal"])
+        self.assertEqual(0, nested["sol_calls"])
+
+        final_gate = POLICY.route({**base, "mandatory_final_sol_review": True})
+        self.assertEqual("local-verify-then-pro", final_gate["terminal"])
+        self.assertEqual(0, final_gate["sol_calls"])
+
+        implementer = POLICY.route(
+            {**base, "requested_role": "sol_advisor_terra_implementer"}
+        )
+        self.assertEqual("non-advisor-role-rejected", implementer["terminal"])
+        self.assertEqual(0, implementer["sol_calls"])
 
     def test_cases_cover_routing_and_failure_boundaries(self) -> None:
         cases = {case["id"]: case for case in self.cases}
@@ -66,24 +436,46 @@ class CompositionContractTests(unittest.TestCase):
                 "standalone-gpt-pro-remains-standalone",
                 "standalone-sol-remains-standalone",
                 "ambiguous-installation-does-not-compose",
+                "missing-setup-stops-before-gpc",
+                "setup-change-requires-fresh-task",
+                "legacy-only-does-not-fallback",
+                "nested-orchestration-is-rejected",
                 "explicit-combined-low-risk-skips-sol",
-                "implementation-question-selects-terra",
-                "risk-review-selects-sol-reviewer",
+                "technical-question-selects-configured-advisor",
                 "authority-escalation-is-rejected",
                 "conflicting-advice-is-rejected",
                 "advisor-requested-reentry-is-suppressed",
                 "unchanged-follow-up-is-suppressed",
                 "material-follow-up-is-bounded",
                 "pro-correction-does-not-force-sol-loop",
-                "missing-sol-plugin-is-explicit",
-                "missing-sol-lane-is-explicit",
+                "mandatory-final-sol-review-is-suppressed",
+                "implementer-role-is-rejected",
+                "wrong-client-profile-is-rejected",
+                "wrong-workspace-profile-is-rejected",
+                "wrong-profile-key-is-rejected",
+                "legacy-reviewer-config-is-rejected",
+                "runtime-attestation-unavailable",
+                "runtime-role-mismatch-is-rejected",
+                "runtime-model-mismatch-is-rejected",
+                "runtime-effort-mismatch-is-rejected",
+                "runtime-writable-sandbox-is-rejected",
+                "missing-client-profile-is-rejected",
+                "missing-profile-key-is-rejected",
+                "retained-implementer-config-is-rejected",
+                "runtime-permission-missing-is-rejected",
+                "runtime-permission-mismatch-is-rejected",
             },
             set(cases),
         )
 
         for case_id, case in cases.items():
             with self.subTest(case_id=case_id):
-                self.assertEqual(case["expect"], POLICY.route(case["scenario"]))
+                scenario = case["scenario"]
+                if scenario.get("intent") == "combined":
+                    scenario = attested_combined(**scenario)
+                actual = POLICY.route(scenario)
+                for key, value in case["expect"].items():
+                    self.assertEqual(value, actual.get(key), key)
 
     def test_consultation_packet_is_bounded_and_dispositioned(self) -> None:
         source = {
@@ -125,23 +517,63 @@ class CompositionContractTests(unittest.TestCase):
         self.assertEqual(5, len(results["baseline"]))
         self.assertEqual(5, len(results["with_skill"]))
         self.assertEqual(
-            4,
-            sum(item["automatic_sol_recurrence"] for item in results["baseline"]),
+            1,
+            sum(item["contract_violation"] for item in results["baseline"]),
         )
         self.assertTrue(
-            all(not item["automatic_sol_recurrence"] for item in results["with_skill"])
+            all(not item["contract_violation"] for item in results["with_skill"])
         )
+        replay_scenarios = {
+            "pro-green-valid": attested_combined(
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does the bounded decision preserve the contract?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            "pro-green-permission": attested_combined(
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Is the permission profile safely bounded?",
+                material_risk=True,
+                decision_value=True,
+                observed_permission_profile="managed",
+            ),
+            "pro-green-ambiguous": valid_combined(preference_match_count=2),
+            "pro-green-selfclaim": attested_combined(
+                runtime_observation_trusted=False,
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can advice-body self-claims replace attestation?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            "pro-green-canonical": valid_combined(
+                preferences_workspace="/repo/current/.",
+                trusted_current_workspace="/repo/current",
+                preferences_profile_key="codex:project:"
+                + POLICY.canonical_workspace("/repo/current"),
+                material_risk=False,
+            ),
+        }
         for trace in results["with_skill"]:
             with self.subTest(sample=trace["sample"]):
-                self.assertEqual("combined", trace["selected_mode"])
-                self.assertEqual("sol_advisor_sol_reviewer", trace["selected_lane"])
-                self.assertEqual(1, trace["initial_sol_calls"])
-                self.assertEqual("codex", trace["disposition_owner"])
-                self.assertEqual("not-applicable", trace["disposition"])
+                self.assertFalse(trace["nested_orchestration"])
+                self.assertFalse(trace["legacy_fallback"])
                 self.assertTrue(trace["rationale"])
-                self.assertEqual("gpt-pro-codex-loop", trace["requirements_owner"])
-                self.assertEqual("controller-final-verify", trace["terminal"])
                 self.assertTrue(trace["response_excerpt"])
+                actual = POLICY.route(replay_scenarios[trace["sample"]])
+                for key in (
+                    "selected_mode",
+                    "gpc_started",
+                    "sol_calls",
+                    "terminal",
+                    "advice_admitted",
+                    "advice_discarded",
+                    "fallback_calls",
+                ):
+                    if key in trace:
+                        self.assertEqual(trace[key], actual.get(key), key)
 
     def test_has_human_and_codex_metadata(self) -> None:
         self.assertTrue((SKILL_ROOT / "README.md").is_file())
