@@ -26,6 +26,11 @@ import gpc_loop_controller as controller  # noqa: E402
 import gpc_loop as cli  # noqa: E402
 
 
+PRO_MODEL_LABEL = "GPT-5.6 Sol"
+PRO_REASONING_LABEL = "Pro"
+PRO_PLAN_LABEL = "Pro"
+
+
 def write_raw_envelope(
     path: Path,
     expected: dict[str, object],
@@ -146,7 +151,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             "https://chatgpt.com/c/controller-test",
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
 
     def _write_local_evidence(
@@ -253,7 +260,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
 
     def _accept_evidence_request(self) -> dict[str, object]:
@@ -267,7 +276,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         self.assertEqual(result["phase"], "LOCAL_VERIFICATION")
         return result
@@ -387,7 +398,91 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(state["conversation_binding_state"], "CONVERSATION_UNBOUND")
         self.assertIsNone(state["bound_conversation_url"])
         self.assertIsNone(state["visible_model_label"])
+        self.assertEqual(state["model_attestation_schema_version"], 2)
         self.assertEqual(state["approved_existing_paths"], [])
+
+    def test_legacy_unbound_state_upgrades_on_next_normal_transition(self) -> None:
+        self._init_run()
+        state = self._state()
+        for field in (
+            "model_attestation_schema_version",
+            "visible_reasoning_label",
+            "visible_plan_label",
+        ):
+            del state[field]
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+
+        status = controller.status_run(self.repository, "controller-test")
+        self.assertTrue(status["legacy_model_attestation_upgrade_pending"])
+
+        controller.prepare_requirements(self.repository, "controller-test")
+        upgraded = self._state()
+        self.assertEqual(upgraded["model_attestation_schema_version"], 2)
+        self.assertIsNone(upgraded["visible_reasoning_label"])
+        self.assertIsNone(upgraded["visible_plan_label"])
+
+    def test_legacy_bound_state_requires_restart_without_guessing_identity(self) -> None:
+        self._freeze_initial_requirements()
+        state = self._state()
+        for field in (
+            "model_attestation_schema_version",
+            "visible_reasoning_label",
+            "visible_plan_label",
+        ):
+            del state[field]
+        state["visible_model_label"] = "Pro"
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+
+        status = controller.status_run(self.repository, "controller-test")
+        self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+        self.assertTrue(status["recovery_required"])
+        self.assertEqual(status["next_commands"], [])
+        self.assertIn("new task slug", status["recovery_guidance"])
+
+        with self.assertRaisesRegex(
+            controller.ControllerError, "new task slug"
+        ) as raised:
+            controller.prepare_review(self.repository, "controller-test")
+        self.assertEqual(raised.exception.code, "LEGACY_STATE_RESTART_REQUIRED")
+
+    def test_pro_class_requires_current_model_reasoning_and_plan_observation(self) -> None:
+        self._init_run()
+        state = self._state()
+        observed_url = "https://chatgpt.com/c/controller-test"
+
+        self.assertEqual(
+            controller.observed_browser_errors(
+                state,
+                observed_url,
+                "GPT-5.6 Sol",
+                allow_initial_binding=True,
+                observed_reasoning_label="Pro",
+                observed_plan_label="Pro",
+            ),
+            [],
+        )
+        self.assertIn(
+            "observed reasoning level does not satisfy the requested model policy",
+            controller.observed_browser_errors(
+                state,
+                observed_url,
+                "GPT-5.6 Sol",
+                allow_initial_binding=True,
+                observed_reasoning_label="Extra High",
+                observed_plan_label="Pro",
+            ),
+        )
+        self.assertIn(
+            "observed model family does not satisfy the requested model policy",
+            controller.observed_browser_errors(
+                state,
+                observed_url,
+                "GPT-5.5",
+                allow_initial_binding=True,
+                observed_reasoning_label="Pro",
+                observed_plan_label="Pro",
+            ),
+        )
 
     def test_init_refuses_existing_run_and_unapproved_dirty_baseline(self) -> None:
         self._init_run()
@@ -479,6 +574,8 @@ class ControllerCase(unittest.TestCase):
                 "--raw-response",
                 "--observed-conversation-url",
                 "--observed-model-label",
+                "--observed-reasoning-label",
+                "--observed-plan-label",
             ],
             "approve-requirements": ["--approval-evidence"],
             "build-report": ["--local-evidence"],
@@ -487,6 +584,8 @@ class ControllerCase(unittest.TestCase):
                 "--raw-response",
                 "--observed-conversation-url",
                 "--observed-model-label",
+                "--observed-reasoning-label",
+                "--observed-plan-label",
             ],
             "final-verify": [],
             "status": [],
@@ -715,11 +814,11 @@ class ControllerCase(unittest.TestCase):
                 ),
             ),
             ("prepare_requirements", ["prepare-requirements", "--repo", ".", "--task", "run", "--conflict-evidence", str(evidence)], (Path("."), "run", evidence)),
-            ("accept_requirements", ["accept-requirements", "--repo", ".", "--task", "run", "--raw-response", str(response), "--observed-conversation-url", "https://chatgpt.com/c/1", "--observed-model-label", "Pro"], (Path("."), "run", response, "https://chatgpt.com/c/1", "Pro")),
+            ("accept_requirements", ["accept-requirements", "--repo", ".", "--task", "run", "--raw-response", str(response), "--observed-conversation-url", "https://chatgpt.com/c/1", "--observed-model-label", PRO_MODEL_LABEL, "--observed-reasoning-label", PRO_REASONING_LABEL, "--observed-plan-label", PRO_PLAN_LABEL], (Path("."), "run", response, "https://chatgpt.com/c/1", PRO_MODEL_LABEL, PRO_REASONING_LABEL, PRO_PLAN_LABEL)),
             ("approve_requirements", ["approve-requirements", "--repo", ".", "--task", "run", "--approval-evidence", str(evidence)], (Path("."), "run", evidence)),
             ("build_report", ["build-report", "--repo", ".", "--task", "run", "--local-evidence", str(evidence)], (Path("."), "run", evidence)),
             ("prepare_review", ["prepare-review", "--repo", ".", "--task", "run", "--supplemental-evidence", str(evidence)], (Path("."), "run", evidence)),
-            ("accept_review", ["accept-review", "--repo", ".", "--task", "run", "--raw-response", str(response), "--observed-conversation-url", "https://chatgpt.com/c/1", "--observed-model-label", "Pro"], (Path("."), "run", response, "https://chatgpt.com/c/1", "Pro")),
+            ("accept_review", ["accept-review", "--repo", ".", "--task", "run", "--raw-response", str(response), "--observed-conversation-url", "https://chatgpt.com/c/1", "--observed-model-label", PRO_MODEL_LABEL, "--observed-reasoning-label", PRO_REASONING_LABEL, "--observed-plan-label", PRO_PLAN_LABEL], (Path("."), "run", response, "https://chatgpt.com/c/1", PRO_MODEL_LABEL, PRO_REASONING_LABEL, PRO_PLAN_LABEL)),
             ("final_verify", ["final-verify", "--repo", ".", "--task", "run"], (Path("."), "run")),
             ("status_run", ["status", "--repo", ".", "--task", "run"], (Path("."), "run")),
             ("abandon_attempt", ["abandon-attempt", "--repo", ".", "--task", "run", "--send-status", "NOT_SENT", "--not-sent-evidence", str(evidence)], (Path("."), "run", "NOT_SENT", evidence)),
@@ -1450,7 +1549,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             "https://chatgpt.com/c/controller-test",
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         self.assertEqual(result["phase"], "REQUIREMENTS_FROZEN")
         state = self._state()
@@ -1514,7 +1615,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         self.assertEqual(stopped["phase"], "USER_DECISION_REQUIRED")
         evidence = self.repository / "approval.txt"
@@ -1544,7 +1647,9 @@ class ControllerCase(unittest.TestCase):
                     "controller-test",
                     raw,
                     "https://chatgpt.com/c/controller-test",
-                    "Pro",
+                    PRO_MODEL_LABEL,
+                    PRO_REASONING_LABEL,
+                    PRO_PLAN_LABEL,
                 )
         self.assertEqual(paths.state.read_bytes(), before)
         self.assertTrue(Path(self._run_dir() / "expected-attempt-01.json").is_file())
@@ -1572,12 +1677,15 @@ class ControllerCase(unittest.TestCase):
                     "controller-test",
                     raw,
                     "https://chatgpt.com/c/controller-test",
-                    "Pro",
+                    PRO_MODEL_LABEL,
+                    PRO_REASONING_LABEL,
+                    PRO_PLAN_LABEL,
                 )
         with self.assertRaisesRegex(controller.ControllerError, "recovery"):
             controller.accept_requirements(
                 self.repository, "controller-test", raw,
-                "https://chatgpt.com/c/controller-test", "Pro",
+                "https://chatgpt.com/c/controller-test",
+                PRO_MODEL_LABEL, PRO_REASONING_LABEL, PRO_PLAN_LABEL,
             )
         self.assertNotEqual(list(paths.transactions.iterdir()), [])
 
@@ -1601,7 +1709,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         paths = controller.resolve_run(self.repository, "controller-test")
         prior_active = (paths.run / "requirements.json").read_bytes()
@@ -1669,7 +1779,9 @@ class ControllerCase(unittest.TestCase):
                     "controller-test",
                     raw,
                     self._state()["bound_conversation_url"],
-                    "Pro",
+                    PRO_MODEL_LABEL,
+                    PRO_REASONING_LABEL,
+                    PRO_PLAN_LABEL,
                 )
 
         transaction = next(paths.transactions.iterdir())
@@ -1705,7 +1817,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         paths = controller.resolve_run(self.repository, "controller-test")
         approval = self.repository / "approval-cleanup.txt"
@@ -1763,7 +1877,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             "https://chatgpt.com/c/controller-test",
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         self.assertEqual(result["phase"], "USER_DECISION_REQUIRED")
         state = self._state()
@@ -1790,7 +1906,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             "https://chatgpt.com/c/controller-test",
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         self.assertEqual(result["phase"], "BLOCKED")
         self.assertIsNone(self._state()["active_requirements_digest"])
@@ -1813,7 +1931,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         self.assertEqual(result["phase"], "BLOCKED")
         state = self._state()
@@ -1858,7 +1978,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             state["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         requirements_head = self._state()["last_consumed_packet_digest"]
         approval = self.repository / "approval-reset.txt"
@@ -1898,7 +2020,9 @@ class ControllerCase(unittest.TestCase):
                 "controller-test",
                 raw,
                 "https://chatgpt.com/c/controller-test",
-                "Pro",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
             )
         self.assertEqual(self._state_bytes(), before)
         self.assertFalse((self._run_dir().parent / "escape.raw.md").exists())
@@ -1926,7 +2050,9 @@ class ControllerCase(unittest.TestCase):
                         "controller-test",
                         raw,
                         "https://chatgpt.com/c/controller-test",
-                        "Pro",
+                        PRO_MODEL_LABEL,
+                        PRO_REASONING_LABEL,
+                        PRO_PLAN_LABEL,
                     )
 
     def test_tampered_expected_nonce_is_rejected_even_when_shape_is_valid(self) -> None:
@@ -1948,7 +2074,9 @@ class ControllerCase(unittest.TestCase):
                 "controller-test",
                 raw,
                 "https://chatgpt.com/c/controller-test",
-                "Pro",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
             )
         self.assertEqual(self._state_bytes(), before)
 
@@ -2091,7 +2219,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
 
         self.assertEqual(result["phase"], "FINAL_VERIFICATION")
@@ -2110,7 +2240,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
 
         self.assertEqual(result["phase"], "REQUIREMENTS_PENDING")
@@ -2131,7 +2263,9 @@ class ControllerCase(unittest.TestCase):
                 "controller-test",
                 raw,
                 self._state()["bound_conversation_url"],
-                "Pro",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
             )
 
         self.assertEqual(self._state_bytes(), before)
@@ -2158,7 +2292,9 @@ class ControllerCase(unittest.TestCase):
                 "controller-test",
                 raw,
                 self._state()["bound_conversation_url"],
-                "Pro",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
             )
 
         self.assertEqual(self._state_bytes(), before)
@@ -2172,7 +2308,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
 
         self.assertEqual(result["phase"], "FINAL_VERIFICATION")
@@ -2193,7 +2331,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
 
         self.assertEqual(result["phase"], "IMPLEMENTING")
@@ -2218,14 +2358,22 @@ class ControllerCase(unittest.TestCase):
         attempt = self._prepare_valid_review()
         raw = self._write_review_response(attempt, self._valid_pass_review())
         before = self._state_bytes()
-        for url, label in (
-            ("https://chatgpt.com/c/other", "Pro"),
-            (self._state()["bound_conversation_url"], "Standard"),
+        for url, model, reasoning, plan in (
+            ("https://chatgpt.com/c/other", PRO_MODEL_LABEL, PRO_REASONING_LABEL, PRO_PLAN_LABEL),
+            (self._state()["bound_conversation_url"], "GPT-5.5", PRO_REASONING_LABEL, PRO_PLAN_LABEL),
+            (self._state()["bound_conversation_url"], PRO_MODEL_LABEL, "Extra High", PRO_PLAN_LABEL),
+            (self._state()["bound_conversation_url"], PRO_MODEL_LABEL, PRO_REASONING_LABEL, "Plus"),
         ):
-            with self.subTest(url=url, label=label):
+            with self.subTest(url=url, model=model, reasoning=reasoning, plan=plan):
                 with self.assertRaises(controller.ControllerError):
                     controller.accept_review(
-                        self.repository, "controller-test", raw, url, label
+                        self.repository,
+                        "controller-test",
+                        raw,
+                        url,
+                        model,
+                        reasoning,
+                        plan,
                     )
                 self.assertEqual(self._state_bytes(), before)
 
@@ -2285,7 +2433,9 @@ class ControllerCase(unittest.TestCase):
                 "controller-test",
                 raw,
                 self._state()["bound_conversation_url"],
-                "Pro",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
             )
 
         self.assertEqual(self._state_bytes(), before)
@@ -2323,7 +2473,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             first_raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         first_snapshot = self._state()["current_snapshot_digest"]
         self.assertEqual(first_result["phase"], "IMPLEMENTING")
@@ -2338,7 +2490,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             second_raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
 
         with self.assertRaises(controller.ControllerError):
@@ -2347,7 +2501,9 @@ class ControllerCase(unittest.TestCase):
                 "controller-test",
                 first_raw,
                 self._state()["bound_conversation_url"],
-                "Pro",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
             )
         gate_result = controller.final_verify(self.repository, "controller-test")
         gate = controller.load_json(self._run_dir() / "final-gate.json")
@@ -2367,7 +2523,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             first_raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         (self.repository / "example.py").write_text("value = 2\n", encoding="utf-8")
         controller.build_report(
@@ -2385,7 +2543,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             repeated_raw,
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         self.assertEqual(result["phase"], "BLOCKED")
         self.assertEqual(result["review_round"], 2)
@@ -2399,7 +2559,9 @@ class ControllerCase(unittest.TestCase):
                 "controller-test",
                 repeated_raw,
                 self._state()["bound_conversation_url"],
-                "Pro",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
             )
 
     def test_third_changes_review_durably_stops_before_round_four(self) -> None:
@@ -2412,7 +2574,9 @@ class ControllerCase(unittest.TestCase):
             "controller-test",
             self._write_review_response(first_attempt, first_review),
             self._state()["bound_conversation_url"],
-            "Pro",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
         )
         for value, action, category, key, finding_id in (
             (2, "TEST_CHANGE", "TEST_COVERAGE", "second-correction", "F-2"),
@@ -2434,7 +2598,9 @@ class ControllerCase(unittest.TestCase):
                 "controller-test",
                 self._write_review_response(attempt, review),
                 self._state()["bound_conversation_url"],
-                "Pro",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
             )
 
         self.assertEqual(result["phase"], "BLOCKED")
@@ -2491,7 +2657,8 @@ class ControllerCase(unittest.TestCase):
                 with self.assertRaisesRegex(controller.ControllerError, "attempt"):
                     controller.accept_requirements(
                         self.repository, "controller-test", raw,
-                        "https://chatgpt.com/c/controller-test", "Pro",
+                        "https://chatgpt.com/c/controller-test",
+                        PRO_MODEL_LABEL, PRO_REASONING_LABEL, PRO_PLAN_LABEL,
                     )
                 self.assertEqual(paths.state.read_bytes(), self._state_bytes())
                 controller.write_json_atomic(expected_path, expected)

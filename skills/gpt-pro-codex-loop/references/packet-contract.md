@@ -85,10 +85,12 @@ The remaining command-specific inputs are:
 ```text
 prepare-requirements  [--conflict-evidence FILE]
 accept-requirements   --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL
+                      [--observed-reasoning-label LABEL] [--observed-plan-label LABEL]
 approve-requirements  --approval-evidence FILE
 build-report          --local-evidence FILE
 prepare-review        [--supplemental-evidence FILE]
 accept-review         --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL
+                      [--observed-reasoning-label LABEL] [--observed-plan-label LABEL]
 final-verify
 status
 abandon-attempt       --send-status NOT_SENT --not-sent-evidence FILE
@@ -124,6 +126,8 @@ Use `status` before every controller mutation after `init` and follow only its `
 `status` never repairs or removes files. True absence returns `RUN_NOT_FOUND`. A no-state run that matches the versioned controller marker or the documented legacy-minimal allowlist, contains only allowed pre-state files, has no link/reparse-point escape, and has no live lock is reported as `phase: INIT_INCOMPLETE` with `next_commands: ["init --retry-incomplete"]`. Retry must repeat all normal input, model, and approval arguments. It acquires the initialization lock, removes only the reclassified allowlisted scaffolding, and runs a fresh normal initialization. A live lock returns `RUN_LOCKED` without mutation.
 
 Any `state.json` (including malformed state), unexpected or foreign artifact, ambiguous ownership, malformed lock, link/reparse point, or established-run evidence makes retry return `INIT_RECOVERY_REFUSED` without mutation. A no-state ambiguous run is `INIT_RECOVERY_REQUIRED`. An existing transaction on an established run remains a manual recovery boundary: `status` returns `recovery_required: true`, reports exact transaction paths and unreachable artifacts, and returns an empty `next_commands`; normal mutations return `RECOVERY_REQUIRED`. Preserve `state.json`, the complete transaction directory, its manifest/staged files/backups, and all run artifacts byte-for-byte. Do not delete, rename, restore, publish, or otherwise repair them through the normal controller. Escalate to the user before any resolution.
+
+The shared transport `schema_version` remains 1. Model attestation is independently versioned by `model_attestation_schema_version=2`. If all v2 attestation fields are absent and the legacy run is completely conversation-unbound, the controller normalizes them to version 2 in memory and persists them during the next ordinary state transition. Missing, partial, unsupported, or legacy attestation on a bound run returns `LEGACY_STATE_RESTART_REQUIRED`; `status` is read-only, sets `recovery_required: true`, exposes no next command, and directs the user to preserve the run and restart with a new task slug. No model, reasoning, or plan value may be inferred from the old `visible_model_label`.
 
 Re-run the exact read-only status command as needed:
 
@@ -342,7 +346,10 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "bound_conversation_url": "https://chatgpt.com/c/example-conversation",
   "model_policy": "PRO_CLASS",
   "requested_model_label": null,
-  "visible_model_label": "Pro",
+  "visible_model_label": "GPT-5.6 Sol",
+  "visible_reasoning_label": "Pro",
+  "visible_plan_label": "Pro",
+  "model_attestation_schema_version": 2,
   "active_requirements_revision": 1,
   "active_requirements_digest": "sha256:93b668942c44346dda2d59fa8b77b83093f035de6f2f0d6dcdff536ec6232944",
   "approval_sequence": 0,

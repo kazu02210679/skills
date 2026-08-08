@@ -519,7 +519,43 @@ def _load_mutator_state(paths: RunPaths) -> tuple[dict[str, object], str]:
     state = load_json(paths.state)
     digest = sha256_bytes(_canonical_json_bytes(state))
     _require_state_digest(paths, digest)
-    return state, digest
+    normalized, _ = _normalize_model_attestation_state(state)
+    return normalized, digest
+
+
+def _normalize_model_attestation_state(
+    state: dict[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Upgrade only an unbound legacy state; never infer a bound model identity."""
+    version_field = "model_attestation_schema_version"
+    observation_fields = ("visible_reasoning_label", "visible_plan_label")
+    attestation_fields = (version_field, *observation_fields)
+    present = {field for field in attestation_fields if field in state}
+    if present == set(attestation_fields):
+        if state.get(version_field) != validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION:
+            raise ControllerError(
+                "LEGACY_STATE_RESTART_REQUIRED",
+                "Model-attestation state version is unsupported; preserve this run and restart with a new task slug.",
+            )
+        return state, False
+
+    safely_unbound = (
+        not present
+        and state.get("conversation_binding_state") == "CONVERSATION_UNBOUND"
+        and state.get("bound_conversation_url") is None
+        and state.get("visible_model_label") is None
+    )
+    if safely_unbound:
+        normalized = dict(state)
+        normalized[version_field] = validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION
+        for field in observation_fields:
+            normalized[field] = None
+        return normalized, True
+
+    raise ControllerError(
+        "LEGACY_STATE_RESTART_REQUIRED",
+        "Legacy or partial bound model attestation cannot be inferred safely; preserve this run and restart with a new task slug.",
+    )
 
 
 def _normalize_approved_paths(approved_existing_paths: Sequence[str]) -> list[str]:
@@ -560,6 +596,9 @@ def initial_state(
         "model_policy": model_policy,
         "requested_model_label": requested_label,
         "visible_model_label": None,
+        "visible_reasoning_label": None,
+        "visible_plan_label": None,
+        "model_attestation_schema_version": validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION,
         "active_requirements_revision": None,
         "active_requirements_digest": None,
         "approval_sequence": 0,
@@ -2295,6 +2334,8 @@ def observed_browser_errors(
     observed_url: str,
     observed_model_label: str,
     allow_initial_binding: bool,
+    observed_reasoning_label: str | None = None,
+    observed_plan_label: str | None = None,
 ) -> list[str]:
     """Return deterministic identity-policy errors for an observed conversation."""
     errors: list[str] = []
@@ -2304,17 +2345,29 @@ def observed_browser_errors(
         errors.append("model label is missing")
     policy = state.get("model_policy")
     requested = state.get("requested_model_label")
-    required_label = "Pro" if policy == "PRO_CLASS" else requested
-    if not isinstance(required_label, str) or observed_model_label != required_label:
+    if policy == "PRO_CLASS":
+        if observed_model_label != validate_packet.PRO_CLASS_MODEL_LABEL:
+            errors.append("observed model family does not satisfy the requested model policy")
+        if observed_reasoning_label != validate_packet.PRO_CLASS_REASONING_LABEL:
+            errors.append("observed reasoning level does not satisfy the requested model policy")
+        if observed_plan_label not in validate_packet.PRO_CLASS_PLAN_LABELS:
+            errors.append("observed ChatGPT plan does not satisfy the requested model policy")
+    elif not isinstance(requested, str) or observed_model_label != requested:
         errors.append("observed model does not satisfy the requested model policy")
 
     bound_url = state.get("bound_conversation_url")
     bound_label = state.get("visible_model_label")
+    bound_reasoning = state.get("visible_reasoning_label")
+    bound_plan = state.get("visible_plan_label")
     if state.get("conversation_binding_state") == "CONVERSATION_BOUND":
         if observed_url != bound_url:
             errors.append("observed conversation URL does not match the bound conversation")
         if observed_model_label != bound_label:
             errors.append("observed model does not match the bound model")
+        if observed_reasoning_label != bound_reasoning:
+            errors.append("observed reasoning level does not match the bound reasoning level")
+        if observed_plan_label != bound_plan:
+            errors.append("observed ChatGPT plan does not match the bound plan")
     elif allow_initial_binding:
         parsed = urlparse(observed_url) if isinstance(observed_url, str) else None
         if (
@@ -2788,6 +2841,8 @@ def accept_requirements(
     raw_response_path: Path,
     observed_conversation_url: str,
     observed_model_label: str,
+    observed_reasoning_label: str | None = None,
+    observed_plan_label: str | None = None,
 ) -> dict[str, object]:
     """Validate, consume, and route one correlated requirements response."""
     paths = resolve_run(repository, task_slug)
@@ -2803,6 +2858,8 @@ def accept_requirements(
             observed_conversation_url,
             observed_model_label,
             allow_initial_binding=True,
+            observed_reasoning_label=observed_reasoning_label,
+            observed_plan_label=observed_plan_label,
         )
         _raise_validation(
             "BROWSER_IDENTITY_MISMATCH",
@@ -2900,11 +2957,15 @@ def accept_requirements(
                 conversation_binding_state="CONVERSATION_BOUND",
                 bound_conversation_url=observed_conversation_url,
                 visible_model_label=observed_model_label,
+                visible_reasoning_label=observed_reasoning_label,
+                visible_plan_label=observed_plan_label,
             )
             staged_previous.update(
                 conversation_binding_state="CONVERSATION_BOUND",
                 bound_conversation_url=observed_conversation_url,
                 visible_model_label=observed_model_label,
+                visible_reasoning_label=observed_reasoning_label,
+                visible_plan_label=observed_plan_label,
             )
         if target in {"USER_DECISION_REQUIRED", "BLOCKED"}:
             candidate.update(
@@ -3080,6 +3141,8 @@ def accept_review(
     raw_response_path: Path,
     observed_conversation_url: str,
     observed_model_label: str,
+    observed_reasoning_label: str | None = None,
+    observed_plan_label: str | None = None,
 ) -> dict[str, object]:
     """Validate, consume, and deterministically route one review response."""
     paths = resolve_run(repository, task_slug)
@@ -3098,6 +3161,8 @@ def accept_review(
                 observed_conversation_url,
                 observed_model_label,
                 allow_initial_binding=False,
+                observed_reasoning_label=observed_reasoning_label,
+                observed_plan_label=observed_plan_label,
             ),
         )
         attempts = _outstanding_attempts(paths)
@@ -3732,7 +3797,41 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
             "INIT_RECOVERY_REQUIRED",
             "Run state is missing and initialization artifacts are ambiguous; no automatic recovery is allowed.",
         )
-    state = load_json(paths.state)
+    raw_state = load_json(paths.state)
+    try:
+        state, legacy_upgrade_pending = _normalize_model_attestation_state(raw_state)
+    except ControllerError as exc:
+        if exc.code != "LEGACY_STATE_RESTART_REQUIRED":
+            raise
+        return {
+            "phase": "LEGACY_STATE_RESTART_REQUIRED",
+            "active_requirements_revision": raw_state.get("active_requirements_revision"),
+            "review_round": raw_state.get("review_round"),
+            "conversation": {
+                "binding_state": raw_state.get("conversation_binding_state"),
+                "url": raw_state.get("bound_conversation_url"),
+            },
+            "model": {
+                "policy": raw_state.get("model_policy"),
+                "requested_label": raw_state.get("requested_model_label"),
+                "visible_label": raw_state.get("visible_model_label"),
+                "visible_reasoning_label": raw_state.get("visible_reasoning_label"),
+                "visible_plan_label": raw_state.get("visible_plan_label"),
+            },
+            "required_actions": [],
+            "unresolved_finding_ids": raw_state.get("unresolved_finding_ids", []),
+            "blocker_fingerprints": raw_state.get("blocker_fingerprints", []),
+            "stop_origin_category": "LEGACY_MODEL_ATTESTATION",
+            "outstanding_attempts": [],
+            "lock_present": paths.lock.exists(),
+            "orphan_transactions": [],
+            "recovery_required": True,
+            "recovery_transaction_paths": [],
+            "recovery_guidance": exc.message,
+            "unreachable_artifacts": _unreachable_artifacts(paths, raw_state),
+            "legacy_model_attestation_upgrade_pending": False,
+            "next_commands": [],
+        }
     attempts = _outstanding_attempts(paths)
     outstanding = attempts[0] if len(attempts) == 1 else None
     orphan_transaction_paths = _orphan_transaction_paths(paths)
@@ -3751,6 +3850,8 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
             "policy": state.get("model_policy"),
             "requested_label": state.get("requested_model_label"),
             "visible_label": state.get("visible_model_label"),
+            "visible_reasoning_label": state.get("visible_reasoning_label"),
+            "visible_plan_label": state.get("visible_plan_label"),
         },
         "required_actions": state.get("required_actions"),
         "unresolved_finding_ids": state.get("unresolved_finding_ids"),
@@ -3763,5 +3864,6 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
         "recovery_transaction_paths": [str(path) for path in orphan_transaction_paths],
         "recovery_guidance": " ".join(recovery_details),
         "unreachable_artifacts": _unreachable_artifacts(paths, state),
+        "legacy_model_attestation_upgrade_pending": legacy_upgrade_pending,
         "next_commands": [] if recovery_required else next_commands(state, outstanding),
     }

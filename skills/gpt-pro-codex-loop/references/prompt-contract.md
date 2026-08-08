@@ -10,12 +10,14 @@ Render all values except `PROMPT_DIGEST`, hash the exact UTF-8 bytes while that 
 
 ## Model and conversation policy
 
-State records `model_policy`, `requested_model_label`, and `visible_model_label`.
+State records `model_attestation_schema_version`, `model_policy`, `requested_model_label`, `visible_model_label`, `visible_reasoning_label`, and `visible_plan_label`.
 
-- `PRO_CLASS`: visibly select the controlled label exactly `Pro`.
-- `EXACT_LABEL`: the visible label must exactly equal the user-requested label.
+- `PRO_CLASS`: visibly verify the independent UI state `GPT-5.6 Sol` model family + `Pro` reasoning level + a Pro-capable ChatGPT plan (`Pro`, `Business`, or `Enterprise`). `Extra High` / `Very High` / `非常に高い` is not Pro reasoning.
+- `EXACT_LABEL`: the visible model label must exactly equal the user-requested label. Reasoning and plan observations may be recorded but do not redefine that model-label policy.
 
-Never silently downgrade. Start a new conversation, send the first requirements turn while unbound, then bind the persistent `/c/` URL and visible label after the valid response. Verify both before every later send and response.
+Never silently downgrade. Start a new conversation, send the first requirements turn while unbound, then bind the persistent `/c/` URL and the complete visible model state after the valid response. Verify the URL, model family, reasoning level, and plan before every later send and response.
+
+Model-attestation state schema version 2 introduced the independent reasoning and plan observations. A fully unbound legacy state may acquire the null v2 fields on its next normal transition. A bound or partial legacy state must not infer them and requires a new task slug.
 
 ## Shared envelope instruction
 

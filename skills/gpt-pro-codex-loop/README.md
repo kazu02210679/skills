@@ -1,5 +1,11 @@
 # GPT Pro Codex Loop
 
+## GPT-5.6 Sol Pro の確認
+
+`PRO_CLASS` は単一のモデル名 `Pro` を探しません。ChatGPT画面で、契約プランが `Pro`・`Business`・`Enterprise` のいずれか、モデル系統が `GPT-5.6 Sol`、推論レベルが `Pro` であることを別々に確認します。`非常に高い`（`Extra High` / `Very High`）はPro推論ではないため拒否します。
+
+旧controllerのrunは、会話未固定なら次の通常遷移で新しいモデル証明stateへ更新されます。すでに会話固定済み、またはモデル証明が部分的な旧stateは推測移行せず、`LEGACY_STATE_RESTART_REQUIRED` で停止します。旧runを保持したまま、新しいtask slugで再開始してください。
+
 Codex Desktop から、ChatGPT Pro に要件定義と反復的な意味レビューを担当させ、Codex がリポジトリ調査・詳細設計・実装・テスト・ローカル検証を担当する独立 Skill です。`codex-orchestration` には依存しません。
 
 ユーザーが「ChatGPT Pro で要件を定義または固定し、Codex の実装を合格まで反復レビューする」組み合わせを明示的に依頼した場合だけ使います。要件相談だけ、単発レビュー、通常の実装では起動しません。
