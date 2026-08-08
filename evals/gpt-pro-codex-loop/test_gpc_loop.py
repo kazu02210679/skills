@@ -398,7 +398,52 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(state["conversation_binding_state"], "CONVERSATION_UNBOUND")
         self.assertIsNone(state["bound_conversation_url"])
         self.assertIsNone(state["visible_model_label"])
+        self.assertEqual(state["model_attestation_schema_version"], 2)
         self.assertEqual(state["approved_existing_paths"], [])
+
+    def test_legacy_unbound_state_upgrades_on_next_normal_transition(self) -> None:
+        self._init_run()
+        state = self._state()
+        for field in (
+            "model_attestation_schema_version",
+            "visible_reasoning_label",
+            "visible_plan_label",
+        ):
+            del state[field]
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+
+        status = controller.status_run(self.repository, "controller-test")
+        self.assertTrue(status["legacy_model_attestation_upgrade_pending"])
+
+        controller.prepare_requirements(self.repository, "controller-test")
+        upgraded = self._state()
+        self.assertEqual(upgraded["model_attestation_schema_version"], 2)
+        self.assertIsNone(upgraded["visible_reasoning_label"])
+        self.assertIsNone(upgraded["visible_plan_label"])
+
+    def test_legacy_bound_state_requires_restart_without_guessing_identity(self) -> None:
+        self._freeze_initial_requirements()
+        state = self._state()
+        for field in (
+            "model_attestation_schema_version",
+            "visible_reasoning_label",
+            "visible_plan_label",
+        ):
+            del state[field]
+        state["visible_model_label"] = "Pro"
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+
+        status = controller.status_run(self.repository, "controller-test")
+        self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+        self.assertTrue(status["recovery_required"])
+        self.assertEqual(status["next_commands"], [])
+        self.assertIn("new task slug", status["recovery_guidance"])
+
+        with self.assertRaisesRegex(
+            controller.ControllerError, "new task slug"
+        ) as raised:
+            controller.prepare_review(self.repository, "controller-test")
+        self.assertEqual(raised.exception.code, "LEGACY_STATE_RESTART_REQUIRED")
 
     def test_pro_class_requires_current_model_reasoning_and_plan_observation(self) -> None:
         self._init_run()

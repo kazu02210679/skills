@@ -519,7 +519,43 @@ def _load_mutator_state(paths: RunPaths) -> tuple[dict[str, object], str]:
     state = load_json(paths.state)
     digest = sha256_bytes(_canonical_json_bytes(state))
     _require_state_digest(paths, digest)
-    return state, digest
+    normalized, _ = _normalize_model_attestation_state(state)
+    return normalized, digest
+
+
+def _normalize_model_attestation_state(
+    state: dict[str, object],
+) -> tuple[dict[str, object], bool]:
+    """Upgrade only an unbound legacy state; never infer a bound model identity."""
+    version_field = "model_attestation_schema_version"
+    observation_fields = ("visible_reasoning_label", "visible_plan_label")
+    attestation_fields = (version_field, *observation_fields)
+    present = {field for field in attestation_fields if field in state}
+    if present == set(attestation_fields):
+        if state.get(version_field) != validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION:
+            raise ControllerError(
+                "LEGACY_STATE_RESTART_REQUIRED",
+                "Model-attestation state version is unsupported; preserve this run and restart with a new task slug.",
+            )
+        return state, False
+
+    safely_unbound = (
+        not present
+        and state.get("conversation_binding_state") == "CONVERSATION_UNBOUND"
+        and state.get("bound_conversation_url") is None
+        and state.get("visible_model_label") is None
+    )
+    if safely_unbound:
+        normalized = dict(state)
+        normalized[version_field] = validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION
+        for field in observation_fields:
+            normalized[field] = None
+        return normalized, True
+
+    raise ControllerError(
+        "LEGACY_STATE_RESTART_REQUIRED",
+        "Legacy or partial bound model attestation cannot be inferred safely; preserve this run and restart with a new task slug.",
+    )
 
 
 def _normalize_approved_paths(approved_existing_paths: Sequence[str]) -> list[str]:
@@ -562,6 +598,7 @@ def initial_state(
         "visible_model_label": None,
         "visible_reasoning_label": None,
         "visible_plan_label": None,
+        "model_attestation_schema_version": validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION,
         "active_requirements_revision": None,
         "active_requirements_digest": None,
         "approval_sequence": 0,
@@ -3760,7 +3797,41 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
             "INIT_RECOVERY_REQUIRED",
             "Run state is missing and initialization artifacts are ambiguous; no automatic recovery is allowed.",
         )
-    state = load_json(paths.state)
+    raw_state = load_json(paths.state)
+    try:
+        state, legacy_upgrade_pending = _normalize_model_attestation_state(raw_state)
+    except ControllerError as exc:
+        if exc.code != "LEGACY_STATE_RESTART_REQUIRED":
+            raise
+        return {
+            "phase": "LEGACY_STATE_RESTART_REQUIRED",
+            "active_requirements_revision": raw_state.get("active_requirements_revision"),
+            "review_round": raw_state.get("review_round"),
+            "conversation": {
+                "binding_state": raw_state.get("conversation_binding_state"),
+                "url": raw_state.get("bound_conversation_url"),
+            },
+            "model": {
+                "policy": raw_state.get("model_policy"),
+                "requested_label": raw_state.get("requested_model_label"),
+                "visible_label": raw_state.get("visible_model_label"),
+                "visible_reasoning_label": raw_state.get("visible_reasoning_label"),
+                "visible_plan_label": raw_state.get("visible_plan_label"),
+            },
+            "required_actions": [],
+            "unresolved_finding_ids": raw_state.get("unresolved_finding_ids", []),
+            "blocker_fingerprints": raw_state.get("blocker_fingerprints", []),
+            "stop_origin_category": "LEGACY_MODEL_ATTESTATION",
+            "outstanding_attempts": [],
+            "lock_present": paths.lock.exists(),
+            "orphan_transactions": [],
+            "recovery_required": True,
+            "recovery_transaction_paths": [],
+            "recovery_guidance": exc.message,
+            "unreachable_artifacts": _unreachable_artifacts(paths, raw_state),
+            "legacy_model_attestation_upgrade_pending": False,
+            "next_commands": [],
+        }
     attempts = _outstanding_attempts(paths)
     outstanding = attempts[0] if len(attempts) == 1 else None
     orphan_transaction_paths = _orphan_transaction_paths(paths)
@@ -3793,5 +3864,6 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
         "recovery_transaction_paths": [str(path) for path in orphan_transaction_paths],
         "recovery_guidance": " ".join(recovery_details),
         "unreachable_artifacts": _unreachable_artifacts(paths, state),
+        "legacy_model_attestation_upgrade_pending": legacy_upgrade_pending,
         "next_commands": [] if recovery_required else next_commands(state, outstanding),
     }

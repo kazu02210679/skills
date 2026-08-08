@@ -65,6 +65,8 @@ All Browser interaction, project-command execution, detailed design, implementat
 
 `status` is read-only. A genuinely absent task returns `RUN_NOT_FOUND`. If it reports `phase: INIT_INCOMPLETE` and lists `init --retry-incomplete`, the controller has recognized only allowlisted, controller-owned pre-state scaffolding. Re-run init with `--retry-incomplete` and all original request, context, model, and approval arguments. Retry refuses a live lock, an established or malformed state, links/reparse points, unexpected files, or any ambiguous ownership; it never repairs those cases automatically.
 
+Model attestation has its own state schema version. A legacy run that is still completely conversation-unbound is upgraded in memory and persists the new null attestation fields on its next normal controller transition. A legacy or partial state that is already bound cannot be re-attested safely: `status` returns `LEGACY_STATE_RESTART_REQUIRED`, lists no next command, and requires preserving the old run while starting again under a new task slug. Never edit legacy state to invent a model family, reasoning level, or plan.
+
 For every other `recovery_required: true`, `INIT_RECOVERY_REQUIRED`, or `RECOVERY_REQUIRED` result, stop the normal loop. Preserve `state.json`, every transaction directory, and all referenced artifacts byte-for-byte; do not delete, rename, repair, or consume them. Escalate to the user with the reported paths and run only the read-only status command:
 
 ```powershell

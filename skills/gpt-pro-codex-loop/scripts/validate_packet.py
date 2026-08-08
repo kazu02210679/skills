@@ -222,6 +222,7 @@ REQUIRED_STATE_FIELDS = (
     "visible_model_label",
     "visible_reasoning_label",
     "visible_plan_label",
+    "model_attestation_schema_version",
     "active_requirements_revision",
     "active_requirements_digest",
     "approval_sequence",
@@ -263,6 +264,7 @@ OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
 PRO_CLASS_MODEL_LABEL = "GPT-5.6 Sol"
 PRO_CLASS_REASONING_LABEL = "Pro"
 PRO_CLASS_PLAN_LABELS = frozenset({"Pro", "Business", "Enterprise"})
+MODEL_ATTESTATION_SCHEMA_VERSION = 2
 FINAL_GATE_FIELDS = (
     "schema_version",
     "requirements_digest",
@@ -1630,6 +1632,14 @@ def _validate_state_fields(
         path=name,
     )
     _require_schema_version(state, errors, path=name)
+    attestation_version = state.get("model_attestation_schema_version")
+    if (
+        type(attestation_version) is not int
+        or attestation_version != MODEL_ATTESTATION_SCHEMA_VERSION
+    ):
+        errors.append(
+            f"{name}.model_attestation_schema_version: must be integer {MODEL_ATTESTATION_SCHEMA_VERSION}"
+        )
     requirements_decision = state.get("latest_requirements_decision")
     if (
         "latest_requirements_decision" in state

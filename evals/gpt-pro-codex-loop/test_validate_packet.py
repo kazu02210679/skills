@@ -214,6 +214,7 @@ def valid_state(
     visible_model_label: object = "GPT-5.6 Sol",
     visible_reasoning_label: object = "Pro",
     visible_plan_label: object = "Pro",
+    model_attestation_schema_version: object = 2,
     active_requirements_revision: object = _UNSET_STATE_VALUE,
     active_requirements_digest: object = _UNSET_STATE_VALUE,
     approval_sequence: object = 0,
@@ -333,6 +334,7 @@ def valid_state(
         "visible_model_label": visible_model_label,
         "visible_reasoning_label": visible_reasoning_label,
         "visible_plan_label": visible_plan_label,
+        "model_attestation_schema_version": model_attestation_schema_version,
         "active_requirements_revision": active_requirements_revision,
         "active_requirements_digest": active_requirements_digest,
         "approval_sequence": approval_sequence,
@@ -3410,6 +3412,16 @@ class TransitionTests(unittest.TestCase):
         self.assertIn(
             "current.visible_plan_label: must identify a Pro-capable ChatGPT plan",
             validate_transition(previous, wrong_plan),
+        )
+
+        wrong_attestation_version = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            model_attestation_schema_version=1,
+        )
+        self.assertIn(
+            "current.model_attestation_schema_version: must be integer 2",
+            validate_transition(previous, wrong_attestation_version),
         )
 
         exact_previous = valid_state(
