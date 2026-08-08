@@ -85,10 +85,12 @@ The remaining command-specific inputs are:
 ```text
 prepare-requirements  [--conflict-evidence FILE]
 accept-requirements   --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL
+                      [--observed-reasoning-label LABEL] [--observed-plan-label LABEL]
 approve-requirements  --approval-evidence FILE
 build-report          --local-evidence FILE
 prepare-review        [--supplemental-evidence FILE]
 accept-review         --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL
+                      [--observed-reasoning-label LABEL] [--observed-plan-label LABEL]
 final-verify
 status
 abandon-attempt       --send-status NOT_SENT --not-sent-evidence FILE
@@ -342,7 +344,9 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "bound_conversation_url": "https://chatgpt.com/c/example-conversation",
   "model_policy": "PRO_CLASS",
   "requested_model_label": null,
-  "visible_model_label": "Pro",
+  "visible_model_label": "GPT-5.6 Sol",
+  "visible_reasoning_label": "Pro",
+  "visible_plan_label": "Pro",
   "active_requirements_revision": 1,
   "active_requirements_digest": "sha256:93b668942c44346dda2d59fa8b77b83093f035de6f2f0d6dcdff536ec6232944",
   "approval_sequence": 0,

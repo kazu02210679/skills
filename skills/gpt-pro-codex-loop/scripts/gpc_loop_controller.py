@@ -560,6 +560,8 @@ def initial_state(
         "model_policy": model_policy,
         "requested_model_label": requested_label,
         "visible_model_label": None,
+        "visible_reasoning_label": None,
+        "visible_plan_label": None,
         "active_requirements_revision": None,
         "active_requirements_digest": None,
         "approval_sequence": 0,
@@ -2295,6 +2297,8 @@ def observed_browser_errors(
     observed_url: str,
     observed_model_label: str,
     allow_initial_binding: bool,
+    observed_reasoning_label: str | None = None,
+    observed_plan_label: str | None = None,
 ) -> list[str]:
     """Return deterministic identity-policy errors for an observed conversation."""
     errors: list[str] = []
@@ -2304,17 +2308,29 @@ def observed_browser_errors(
         errors.append("model label is missing")
     policy = state.get("model_policy")
     requested = state.get("requested_model_label")
-    required_label = "Pro" if policy == "PRO_CLASS" else requested
-    if not isinstance(required_label, str) or observed_model_label != required_label:
+    if policy == "PRO_CLASS":
+        if observed_model_label != validate_packet.PRO_CLASS_MODEL_LABEL:
+            errors.append("observed model family does not satisfy the requested model policy")
+        if observed_reasoning_label != validate_packet.PRO_CLASS_REASONING_LABEL:
+            errors.append("observed reasoning level does not satisfy the requested model policy")
+        if observed_plan_label not in validate_packet.PRO_CLASS_PLAN_LABELS:
+            errors.append("observed ChatGPT plan does not satisfy the requested model policy")
+    elif not isinstance(requested, str) or observed_model_label != requested:
         errors.append("observed model does not satisfy the requested model policy")
 
     bound_url = state.get("bound_conversation_url")
     bound_label = state.get("visible_model_label")
+    bound_reasoning = state.get("visible_reasoning_label")
+    bound_plan = state.get("visible_plan_label")
     if state.get("conversation_binding_state") == "CONVERSATION_BOUND":
         if observed_url != bound_url:
             errors.append("observed conversation URL does not match the bound conversation")
         if observed_model_label != bound_label:
             errors.append("observed model does not match the bound model")
+        if observed_reasoning_label != bound_reasoning:
+            errors.append("observed reasoning level does not match the bound reasoning level")
+        if observed_plan_label != bound_plan:
+            errors.append("observed ChatGPT plan does not match the bound plan")
     elif allow_initial_binding:
         parsed = urlparse(observed_url) if isinstance(observed_url, str) else None
         if (
@@ -2788,6 +2804,8 @@ def accept_requirements(
     raw_response_path: Path,
     observed_conversation_url: str,
     observed_model_label: str,
+    observed_reasoning_label: str | None = None,
+    observed_plan_label: str | None = None,
 ) -> dict[str, object]:
     """Validate, consume, and route one correlated requirements response."""
     paths = resolve_run(repository, task_slug)
@@ -2803,6 +2821,8 @@ def accept_requirements(
             observed_conversation_url,
             observed_model_label,
             allow_initial_binding=True,
+            observed_reasoning_label=observed_reasoning_label,
+            observed_plan_label=observed_plan_label,
         )
         _raise_validation(
             "BROWSER_IDENTITY_MISMATCH",
@@ -2900,11 +2920,15 @@ def accept_requirements(
                 conversation_binding_state="CONVERSATION_BOUND",
                 bound_conversation_url=observed_conversation_url,
                 visible_model_label=observed_model_label,
+                visible_reasoning_label=observed_reasoning_label,
+                visible_plan_label=observed_plan_label,
             )
             staged_previous.update(
                 conversation_binding_state="CONVERSATION_BOUND",
                 bound_conversation_url=observed_conversation_url,
                 visible_model_label=observed_model_label,
+                visible_reasoning_label=observed_reasoning_label,
+                visible_plan_label=observed_plan_label,
             )
         if target in {"USER_DECISION_REQUIRED", "BLOCKED"}:
             candidate.update(
@@ -3080,6 +3104,8 @@ def accept_review(
     raw_response_path: Path,
     observed_conversation_url: str,
     observed_model_label: str,
+    observed_reasoning_label: str | None = None,
+    observed_plan_label: str | None = None,
 ) -> dict[str, object]:
     """Validate, consume, and deterministically route one review response."""
     paths = resolve_run(repository, task_slug)
@@ -3098,6 +3124,8 @@ def accept_review(
                 observed_conversation_url,
                 observed_model_label,
                 allow_initial_binding=False,
+                observed_reasoning_label=observed_reasoning_label,
+                observed_plan_label=observed_plan_label,
             ),
         )
         attempts = _outstanding_attempts(paths)
@@ -3751,6 +3779,8 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
             "policy": state.get("model_policy"),
             "requested_label": state.get("requested_model_label"),
             "visible_label": state.get("visible_model_label"),
+            "visible_reasoning_label": state.get("visible_reasoning_label"),
+            "visible_plan_label": state.get("visible_plan_label"),
         },
         "required_actions": state.get("required_actions"),
         "unresolved_finding_ids": state.get("unresolved_finding_ids"),

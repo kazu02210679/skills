@@ -220,6 +220,8 @@ REQUIRED_STATE_FIELDS = (
     "model_policy",
     "requested_model_label",
     "visible_model_label",
+    "visible_reasoning_label",
+    "visible_plan_label",
     "active_requirements_revision",
     "active_requirements_digest",
     "approval_sequence",
@@ -258,6 +260,9 @@ REQUIRED_STATE_FIELDS = (
     "approved_existing_paths",
 )
 OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
+PRO_CLASS_MODEL_LABEL = "GPT-5.6 Sol"
+PRO_CLASS_REASONING_LABEL = "Pro"
+PRO_CLASS_PLAN_LABELS = frozenset({"Pro", "Business", "Enterprise"})
 FINAL_GATE_FIELDS = (
     "schema_version",
     "requirements_digest",
@@ -1527,6 +1532,8 @@ def _validate_conversation_binding(
         "model_policy",
         "requested_model_label",
         "visible_model_label",
+        "visible_reasoning_label",
+        "visible_plan_label",
     )
     if any(field not in state for field in fields):
         return False
@@ -1542,7 +1549,12 @@ def _validate_conversation_binding(
         )
         return False
     if binding_state == "CONVERSATION_UNBOUND":
-        for field in ("bound_conversation_url", "visible_model_label"):
+        for field in (
+            "bound_conversation_url",
+            "visible_model_label",
+            "visible_reasoning_label",
+            "visible_plan_label",
+        ):
             if state.get(field) is not None:
                 errors.append(f"{name}.{field}: must be null before conversation binding")
                 complete = False
@@ -1554,6 +1566,8 @@ def _validate_conversation_binding(
     model_policy = state.get("model_policy")
     requested_label = state.get("requested_model_label")
     visible_label = state.get("visible_model_label")
+    visible_reasoning = state.get("visible_reasoning_label")
+    visible_plan = state.get("visible_plan_label")
     if model_policy not in {"PRO_CLASS", "EXACT_LABEL"}:
         errors.append(f"{name}.model_policy: must be PRO_CLASS or EXACT_LABEL")
         complete = False
@@ -1563,14 +1577,22 @@ def _validate_conversation_binding(
                 f"{name}.requested_model_label: must be null for PRO_CLASS"
             )
             complete = False
-        if (
-            binding_state == "CONVERSATION_BOUND"
-            and visible_label != "Pro"
-        ):
-            errors.append(
-                f"{name}.visible_model_label: must equal the controlled Pro-class label Pro"
-            )
-            complete = False
+        if binding_state == "CONVERSATION_BOUND":
+            if visible_label != PRO_CLASS_MODEL_LABEL:
+                errors.append(
+                    f"{name}.visible_model_label: must equal the controlled Pro-class model family {PRO_CLASS_MODEL_LABEL}"
+                )
+                complete = False
+            if visible_reasoning != PRO_CLASS_REASONING_LABEL:
+                errors.append(
+                    f"{name}.visible_reasoning_label: must equal the controlled Pro-class reasoning level {PRO_CLASS_REASONING_LABEL}"
+                )
+                complete = False
+            if visible_plan not in PRO_CLASS_PLAN_LABELS:
+                errors.append(
+                    f"{name}.visible_plan_label: must identify a Pro-capable ChatGPT plan"
+                )
+                complete = False
     elif not _is_nonempty_string(requested_label):
         errors.append(
             f"{name}.requested_model_label: must be a non-empty string for EXACT_LABEL"
@@ -1584,6 +1606,14 @@ def _validate_conversation_binding(
             f"{name}.visible_model_label: must exactly match requested_model_label"
         )
         complete = False
+    if model_policy == "EXACT_LABEL" and binding_state == "CONVERSATION_BOUND":
+        for field, value in (
+            ("visible_reasoning_label", visible_reasoning),
+            ("visible_plan_label", visible_plan),
+        ):
+            if value is not None and not _is_nonempty_string(value):
+                errors.append(f"{name}.{field}: must be null or a non-empty string")
+                complete = False
     return complete
 
 
@@ -3137,6 +3167,8 @@ def validate_transition(
                     for field in (
                         "bound_conversation_url",
                         "visible_model_label",
+                        "visible_reasoning_label",
+                        "visible_plan_label",
                     ):
                         if current_state.get(field) != previous_state.get(field):
                             errors.append(

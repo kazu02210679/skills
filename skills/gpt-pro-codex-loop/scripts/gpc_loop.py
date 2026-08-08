@@ -73,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
     accept_requirements.add_argument("--raw-response", required=True, type=Path)
     accept_requirements.add_argument("--observed-conversation-url", required=True)
     accept_requirements.add_argument("--observed-model-label", required=True)
+    accept_requirements.add_argument("--observed-reasoning-label")
+    accept_requirements.add_argument("--observed-plan-label")
 
     approval = _command_parser(subparsers, "approve-requirements")
     approval.add_argument("--approval-evidence", required=True, type=Path)
@@ -87,6 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
     accept_review.add_argument("--raw-response", required=True, type=Path)
     accept_review.add_argument("--observed-conversation-url", required=True)
     accept_review.add_argument("--observed-model-label", required=True)
+    accept_review.add_argument("--observed-reasoning-label")
+    accept_review.add_argument("--observed-plan-label")
 
     _command_parser(subparsers, "final-verify")
     _command_parser(subparsers, "status")
@@ -123,6 +127,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
             args.raw_response,
             args.observed_conversation_url,
             args.observed_model_label,
+            args.observed_reasoning_label,
+            args.observed_plan_label,
         )
     if args.command == "approve-requirements":
         return controller.approve_requirements(args.repo, args.task, args.approval_evidence)
@@ -137,6 +143,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
             args.raw_response,
             args.observed_conversation_url,
             args.observed_model_label,
+            args.observed_reasoning_label,
+            args.observed_plan_label,
         )
     if args.command == "final-verify":
         return controller.final_verify(args.repo, args.task)

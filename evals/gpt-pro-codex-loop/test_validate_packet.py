@@ -211,7 +211,9 @@ def valid_state(
     bound_conversation_url: object = "https://chatgpt.com/c/test-conversation",
     model_policy: object = "PRO_CLASS",
     requested_model_label: object = None,
-    visible_model_label: object = "Pro",
+    visible_model_label: object = "GPT-5.6 Sol",
+    visible_reasoning_label: object = "Pro",
+    visible_plan_label: object = "Pro",
     active_requirements_revision: object = _UNSET_STATE_VALUE,
     active_requirements_digest: object = _UNSET_STATE_VALUE,
     approval_sequence: object = 0,
@@ -329,6 +331,8 @@ def valid_state(
         "model_policy": model_policy,
         "requested_model_label": requested_model_label,
         "visible_model_label": visible_model_label,
+        "visible_reasoning_label": visible_reasoning_label,
+        "visible_plan_label": visible_plan_label,
         "active_requirements_revision": active_requirements_revision,
         "active_requirements_digest": active_requirements_digest,
         "approval_sequence": approval_sequence,
@@ -3333,6 +3337,8 @@ class TransitionTests(unittest.TestCase):
             conversation_binding_state="CONVERSATION_UNBOUND",
             bound_conversation_url=None,
             visible_model_label=None,
+            visible_reasoning_label=None,
+            visible_plan_label=None,
         )
         bound = valid_state(
             "REQUIREMENTS_PENDING",
@@ -3346,6 +3352,8 @@ class TransitionTests(unittest.TestCase):
         for field, value in (
             ("bound_conversation_url", "https://chatgpt.com/c/other-conversation"),
             ("visible_model_label", "Free"),
+            ("visible_reasoning_label", "Extra High"),
+            ("visible_plan_label", "Plus"),
         ):
             with self.subTest(field=field):
                 mismatched = valid_state("LOCAL_VERIFICATION", 0)
@@ -3354,11 +3362,12 @@ class TransitionTests(unittest.TestCase):
                     valid_state("IMPLEMENTING", 0),
                     mismatched,
                 )
-                expected = (
-                    f"{field}: must match the bound conversation state"
-                    if field == "bound_conversation_url"
-                    else "current.visible_model_label: must equal the controlled Pro-class label Pro"
-                )
+                expected = {
+                    "bound_conversation_url": f"{field}: must match the bound conversation state",
+                    "visible_model_label": "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Sol",
+                    "visible_reasoning_label": "current.visible_reasoning_label: must equal the controlled Pro-class reasoning level Pro",
+                    "visible_plan_label": "current.visible_plan_label: must identify a Pro-capable ChatGPT plan",
+                }[field]
                 self.assertIn(expected, errors)
 
         missing_identity = valid_state("LOCAL_VERIFICATION", 0)
@@ -3379,8 +3388,28 @@ class TransitionTests(unittest.TestCase):
             visible_model_label="Standard",
         )
         self.assertIn(
-            "current.visible_model_label: must equal the controlled Pro-class label Pro",
+            "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Sol",
             validate_transition(previous, wrong_class),
+        )
+
+        wrong_reasoning = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            visible_reasoning_label="Extra High",
+        )
+        self.assertIn(
+            "current.visible_reasoning_label: must equal the controlled Pro-class reasoning level Pro",
+            validate_transition(previous, wrong_reasoning),
+        )
+
+        wrong_plan = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            visible_plan_label="Plus",
+        )
+        self.assertIn(
+            "current.visible_plan_label: must identify a Pro-capable ChatGPT plan",
+            validate_transition(previous, wrong_plan),
         )
 
         exact_previous = valid_state(
