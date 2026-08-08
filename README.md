@@ -1,6 +1,6 @@
 # Agent Engineering Skills
 
-This repository is the canonical catalog for eleven independent reusable Skills.
+This repository is the canonical catalog for twelve independent reusable Skills.
 The catalog is generated from each Skill's frontmatter; regenerate it with
 `python scripts/generate-skill-catalog.py` after changing a description.
 
@@ -15,6 +15,7 @@ The catalog is generated from each Skill's frontmatter; regenerate it with
 | [`handoff`](skills/handoff/README.md) | Create a safe, conversation-centered handoff to a fresh task, thread, session, or chat while preserving the original purpose, changes of direction, decisions, constraints, failed approaches, artifacts, unresolved work, and next action. Use when the user explicitly asks to hand off, transfer, continue in a new task, start fresh without losing context, or says phrases such as "引き継いで", "別セッションに移して", "新しいタスクにして", or "move this to a fresh chat"; if the user only remarks that the conversation is long or slow without asking to move it, recommend a handoff but do not create one. |
 | [`monitoring-subagents`](skills/monitoring-subagents/README.md) | Use when coordinating two or more concurrent subagents, when a user asks who is doing what, when parallel work may be blocked, stale, or failed, or when long-running or cross-session agent work needs a concise intervention view. |
 | [`open-pull-request`](skills/open-pull-request/README.md) | Use when a completed and verified local branch should be published as a pull request. Triggers on requests such as "PRを作って", "プルリクを出して", "open a pull request", "push this and open a PR", or when finished work must be shared for review. Does not apply when the implementation is unfinished, when tracked files have uncommitted changes, or when the current branch is the repository default branch. |
+| [`orchestrate-gpt-pro-sol-advisor`](skills/orchestrate-gpt-pro-sol-advisor/README.md) | Use when the user explicitly requests combined GPT Pro Codex Loop and Sol Advisor handling for one Codex task. |
 | [`refresh-thread-titles`](skills/refresh-thread-titles/README.md) | Use when a user asks to refresh, rename, update, or clean up titles for multiple recent Codex threads or tasks, including requests scoped by recent activity or repeated external invocations. |
 | [`review-implementation-html`](skills/review-implementation-html/README.md) | Review a completed implementation in separate plan-blind and plan-aware passes, group the diff by intent and risk, and generate a local interactive HTML report with persistent reviewer comments, JSON export, and a copyable correction prompt. Use after implementation when a user asks for an explained diff, visual code review, review screen, or HTML review artifact. |
 | [`writing-style`](skills/writing-style/README.md) | Use when drafting or revising Japanese explanatory prose, technical articles, essays, or chapters; when accurate, information-dense writing feels flat, monotonous, mechanical, or difficult to keep reading; or when openings, paragraph rhythm, section transitions, lists, and conclusions need stylistic diagnosis. |

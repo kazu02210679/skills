@@ -43,6 +43,16 @@ Claude Code may inspect or maintain this Skill only. It cannot execute the
 Browser-backed runtime loop, and it must not imitate ChatGPT Pro locally or
 silently substitute a different transport.
 
+## `orchestrate-gpt-pro-sol-advisor`
+
+This is an explicit, optional composition policy for a Codex task; it preserves
+the standalone interfaces of `gpt-pro-codex-loop` and
+`sol-advisor:orchestration`. It does not claim native Sol lane availability or
+identical combined-mode runtime behavior across hosts. A host must expose the
+required dependency and the selected lane at runtime; otherwise combined mode
+reports that dependency failure rather than fabricating advice or silently
+falling back to standalone work.
+
 ## Host-specific metadata
 
 `agents/openai.yaml` provides Codex UI metadata. Claude Code does not consume
