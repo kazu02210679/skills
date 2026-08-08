@@ -155,8 +155,10 @@ Before sending this correction, persist the strictly recovered payload and its c
 
 After a timeout:
 
-1. Reacquire only the bound URL and verify the model label.
+1. Reacquire only the bound URL and verify the complete model attestation.
 2. Search visible conversation content for the exact expected `turn_id` and `nonce`.
-3. If the response exists, extract it without resending.
-4. If absence is proven, record a fresh expected attempt and send once.
-5. If status is ambiguous, stop; do not guess or duplicate the turn.
+3. If that Pro turn is visibly active, keep waiting and re-observe it without `Answer now`, cancellation, regeneration, or resend.
+4. If the response exists, extract it without resending.
+5. If an explicit generation failure is visible, follow the bounded recovery path.
+6. If absence is proven, record a fresh expected attempt and send once.
+7. If status is ambiguous, stop; do not guess or duplicate the turn.
