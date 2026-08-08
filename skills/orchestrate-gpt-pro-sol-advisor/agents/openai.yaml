@@ -1,0 +1,6 @@
+interface:
+  display_name: "GPT Pro + Sol Advisor"
+  short_description: "Compose GPT Pro and Sol without authority drift"
+  default_prompt: "Use $orchestrate-gpt-pro-sol-advisor to coordinate GPT Pro and Sol Advisor in explicit combined mode."
+policy:
+  allow_implicit_invocation: false

@@ -72,6 +72,7 @@ class HostCompatibilityTests(unittest.TestCase):
                 "handoff",
                 "monitoring-subagents",
                 "open-pull-request",
+                "orchestrate-gpt-pro-sol-advisor",
                 "review-implementation-html",
                 "refresh-thread-titles",
                 "writing-style",
@@ -95,6 +96,13 @@ class HostCompatibilityTests(unittest.TestCase):
             "Claude Code may inspect or maintain this Skill only",
             compatibility,
         )
+
+    def test_composition_skill_does_not_claim_cross_host_lane_parity(self) -> None:
+        compatibility = (
+            REPOSITORY_ROOT / "docs" / "host-compatibility.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("`orchestrate-gpt-pro-sol-advisor`", compatibility)
+        self.assertIn("does not claim native Sol lane availability", compatibility)
 
     def test_task_plan_contract_permits_untracked_active_plan(self) -> None:
         contract = (
