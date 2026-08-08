@@ -43,6 +43,16 @@ The `next_commands` result is authoritative. Do not hand-author state, expected 
 4. When status permits `prepare-review`, run it (with `--supplemental-evidence FILE` only for a `PROVIDE_EVIDENCE` route). Use Browser only after that prepared prompt exists. Save the raw response, run status, then use `accept-review --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL` when listed.
 5. When status permits `final-verify`, run it. Only its successful result completes the controller run. `abandon-attempt` is allowed only when status lists it and a prompt is proven unsent; it requires exactly `--send-status NOT_SENT --not-sent-evidence FILE`. Ambiguous Browser send status is a hard stop governed by the recovery contract.
 
+## Context budget
+
+The controller enforces UTF-8 byte limits before publishing a prepared prompt:
+at most 64 dynamic evidence items, 8,192 bytes per item, 65,536 bytes per
+dynamic section, and 131,072 bytes for the complete prepared prompt. Frozen
+requirements remain complete and unabridged. Oversized supplemental artifacts
+remain unchanged on disk and are represented to the model only by bounded
+identity, digest, byte-size, and status metadata. Stable error codes identify
+the exact exceeded boundary; never silently truncate a local artifact.
+
 All Browser interaction, project-command execution, detailed design, implementation, tests, and user escalation remain outside the controller. The controller never drives the Browser or runs project commands.
 
 ## Recovery

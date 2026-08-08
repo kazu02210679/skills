@@ -1186,6 +1186,63 @@ class ControllerCase(unittest.TestCase):
         self.assertIn("literal {{PROMPT_DIGEST}}", first["prompt"])
         self.assertRegex(first["prompt_digest"], r"sha256:[0-9a-f]{64}")
 
+    def test_model_bound_item_count_limit_is_exact(self) -> None:
+        for count in (63, 64):
+            controller.validate_model_bound_items("evidence", ["x"] * count)
+        with self.assertRaises(controller.ControllerError) as raised:
+            controller.validate_model_bound_items("evidence", ["x"] * 65)
+        self.assertEqual("MODEL_BOUND_ITEM_COUNT_EXCEEDED", raised.exception.code)
+
+    def test_model_bound_multibyte_item_limit_uses_utf8_bytes(self) -> None:
+        for byte_count in (8191, 8192):
+            controller.validate_model_bound_items("evidence", ["a" * byte_count])
+        with self.assertRaises(controller.ControllerError) as raised:
+            controller.validate_model_bound_items("evidence", ["界" * 2731])
+        self.assertEqual("MODEL_BOUND_ITEM_BYTES_EXCEEDED", raised.exception.code)
+
+    def test_model_bound_section_and_prompt_limits_are_exact(self) -> None:
+        controller.validate_model_bound_section("evidence", "a" * 65535)
+        controller.validate_model_bound_section("evidence", "a" * 65536)
+        with self.assertRaises(controller.ControllerError) as section_error:
+            controller.validate_model_bound_section("evidence", "a" * 65537)
+        self.assertEqual("MODEL_BOUND_SECTION_BYTES_EXCEEDED", section_error.exception.code)
+        controller.validate_prepared_prompt("a" * 131071)
+        controller.validate_prepared_prompt("a" * 131072)
+        with self.assertRaises(controller.ControllerError) as prompt_error:
+            controller.validate_prepared_prompt("a" * 131073)
+        self.assertEqual("PREPARED_PROMPT_BYTES_EXCEEDED", prompt_error.exception.code)
+
+    def test_oversize_artifact_is_preserved_and_represented_by_bounded_metadata(self) -> None:
+        artifact = self.input_directory / "oversize.txt"
+        artifact.write_text("界" * 3000, encoding="utf-8")
+        before = controller.sha256_bytes(artifact.read_bytes())
+
+        summary = controller._bounded_model_text(
+            artifact, artifact.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(before, controller.sha256_bytes(artifact.read_bytes()))
+        payload = json.loads(summary)
+        self.assertEqual(str(artifact), payload["artifact"])
+        self.assertEqual(before, payload["digest"])
+        self.assertEqual(9000, payload["utf8_bytes"])
+        self.assertEqual("oversize_local_artifact_preserved", payload["status"])
+        self.assertLessEqual(len(summary.encode("utf-8")), 8192)
+
+    def test_prepared_prompt_overflow_calls_no_model_transport(self) -> None:
+        calls: list[str] = []
+
+        def fake_model_transport(prompt: str) -> None:
+            calls.append(prompt)
+
+        with self.assertRaises(controller.ControllerError) as raised:
+            prompt = "a" * 131073
+            controller.validate_prepared_prompt(prompt)
+            fake_model_transport(prompt)
+
+        self.assertEqual("PREPARED_PROMPT_BYTES_EXCEEDED", raised.exception.code)
+        self.assertEqual([], calls)
+
     def test_template_rejects_missing_duplicate_and_unknown_tokens(self) -> None:
         with self.assertRaisesRegex(controller.ControllerError, "duplicate"):
             controller.parse_template("{{USER_REQUEST}}{{USER_REQUEST}}\n", {"USER_REQUEST"})
@@ -1881,6 +1938,26 @@ class ControllerCase(unittest.TestCase):
             self._state()["last_consumed_packet_digest"],
         )
         self.assertIn(self._state()["active_requirements_digest"], prompt)
+        requirements = controller.load_json(self._run_dir() / "requirements.json")
+        requirements_json = controller._canonical_prompt_json(requirements)
+        report_json = controller._canonical_prompt_json(
+            controller.load_json(self._run_dir() / "implementation-report.json")
+        )
+        self.assertIn(requirements_json, prompt)
+        self.assertEqual(len(prompt.encode("utf-8")), result["prepared_prompt_utf8_bytes"])
+        self.assertEqual(
+            len(requirements_json.encode("utf-8")),
+            result["frozen_requirements_utf8_bytes"],
+        )
+        self.assertEqual(
+            len(report_json.encode("utf-8")), result["dynamic_summary_utf8_bytes"]
+        )
+        self.assertEqual(
+            len(controller._model_bound_report_items(
+                controller.load_json(self._run_dir() / "implementation-report.json")
+            )),
+            result["model_bound_item_count"],
+        )
         self.assertEqual(
             controller.status_run(self.repository, "controller-test")["next_commands"],
             ["accept-review", "abandon-attempt"],

@@ -56,6 +56,22 @@ Use `-Scope project -ProjectRoot <path>` or `--scope project --project-root
 <path>` for a project install. Add `-Force` or `--force` only when replacing an
 existing installation is intended.
 
+Both installers keep the existing install-all behavior when no selection is
+given. Use `-List` / `--list` for a non-mutating inventory, `-All` / `--all`
+for an explicit full install, or repeat `-Skill <name>` / `--skill <name>` for
+an exact selective install. Selection is validated before mutation, duplicate
+names are ignored after their first occurrence, and generated Python caches are
+not copied.
+
+Measure prompt-fed Skill context without installing anything:
+
+```bash
+python scripts/context_budget_report.py --repo . --manifest context-budget-manifest.json
+```
+
+Only auxiliary files explicitly listed in the manifest are counted. Add
+`--baseline <tracked-report.json>` to fail on an unapproved byte regression.
+
 Read [host compatibility](docs/host-compatibility.md) before relying on a
 host-specific behavior.
 

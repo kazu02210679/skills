@@ -31,6 +31,10 @@ ATTEMPT_NAME = re.compile(r"(?:expected|abandoned|consumed)-attempt-(\d+)\.json\
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 NONCE = re.compile(r"[0-9a-f]{32}\Z")
 MAX_ABANDON_EVIDENCE_BYTES = 8192
+MAX_MODEL_BOUND_ITEMS = 64
+MAX_MODEL_BOUND_ITEM_BYTES = 8192
+MAX_MODEL_BOUND_SECTION_BYTES = 65536
+MAX_PREPARED_PROMPT_BYTES = 131072
 MAX_PATH_PREVIEW = 20
 INITIALIZATION_MARKER_NAME = "initialization.json"
 APPROVAL_MANIFEST_FIELDS = {
@@ -124,6 +128,54 @@ class ControllerError(RuntimeError):
         self.code = code
         self.message = message
         self.details = tuple(details)
+
+
+def _utf8_size(value: str) -> int:
+    return len(value.encode("utf-8"))
+
+
+def validate_model_bound_items(section: str, items: Sequence[str]) -> None:
+    if len(items) > MAX_MODEL_BOUND_ITEMS:
+        raise ControllerError(
+            "MODEL_BOUND_ITEM_COUNT_EXCEEDED",
+            f"Model-bound section {section} exceeds {MAX_MODEL_BOUND_ITEMS} items.",
+        )
+    for index, item in enumerate(items):
+        if _utf8_size(item) > MAX_MODEL_BOUND_ITEM_BYTES:
+            raise ControllerError(
+                "MODEL_BOUND_ITEM_BYTES_EXCEEDED",
+                f"Model-bound item {section}.{index} exceeds {MAX_MODEL_BOUND_ITEM_BYTES} UTF-8 bytes.",
+            )
+
+
+def validate_model_bound_section(section: str, value: str) -> None:
+    if _utf8_size(value) > MAX_MODEL_BOUND_SECTION_BYTES:
+        raise ControllerError(
+            "MODEL_BOUND_SECTION_BYTES_EXCEEDED",
+            f"Model-bound section {section} exceeds {MAX_MODEL_BOUND_SECTION_BYTES} UTF-8 bytes.",
+        )
+
+
+def validate_prepared_prompt(prompt: str) -> None:
+    if _utf8_size(prompt) > MAX_PREPARED_PROMPT_BYTES:
+        raise ControllerError(
+            "PREPARED_PROMPT_BYTES_EXCEEDED",
+            f"Prepared prompt exceeds {MAX_PREPARED_PROMPT_BYTES} UTF-8 bytes.",
+        )
+
+
+def _bounded_model_text(path: Path, value: str) -> str:
+    """Keep the local artifact complete while sending only bounded metadata."""
+    if _utf8_size(value) <= MAX_MODEL_BOUND_ITEM_BYTES:
+        return value
+    return _canonical_prompt_json(
+        {
+            "artifact": str(path),
+            "digest": sha256_bytes(value.encode("utf-8")),
+            "status": "oversize_local_artifact_preserved",
+            "utf8_bytes": _utf8_size(value),
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -369,6 +421,7 @@ def render_prompt(
     )
     prompt_digest = sha256_bytes(digest_source.encode("utf-8"))
     prompt = _normalize_prompt(_render_nodes(template.parts, values, prompt_digest))
+    validate_prepared_prompt(prompt)
     return {"prompt": prompt, "prompt_digest": prompt_digest}
 
 
@@ -1689,6 +1742,24 @@ def _forbidden_evidence_schema_field_names(value: object) -> list[str]:
     return errors
 
 
+def _model_bound_report_items(evidence: Mapping[str, object]) -> list[str]:
+    items: list[str] = [str(evidence["intent_summary"])]
+    if "changed_file_intents" in evidence:
+        items.extend(str(value) for value in evidence["changed_file_intents"].values())  # type: ignore[union-attr]
+    else:
+        items.extend(
+            str(item.get("intent", ""))
+            for item in evidence["changed_files"]  # type: ignore[union-attr]
+            if isinstance(item, dict)
+        )
+    for entries in evidence["acceptance_evidence"].values():  # type: ignore[union-attr]
+        items.extend(entries)
+    items.extend(_canonical_prompt_json(command) for command in evidence["test_commands"])  # type: ignore[union-attr]
+    for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
+        items.extend(evidence[field])  # type: ignore[arg-type]
+    return items
+
+
 def _load_local_evidence(
     path: Path, requirements: Mapping[str, object]
 ) -> dict[str, object]:
@@ -1743,6 +1814,9 @@ def _load_local_evidence(
     for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
         _validate_evidence_strings(evidence.get(field), field, errors)
     _raise_validation("INVALID_LOCAL_EVIDENCE", "Local evidence is invalid.", sorted(set(errors)))
+    model_items = _model_bound_report_items(evidence)
+    validate_model_bound_items("implementation_report", model_items)
+    validate_model_bound_section("implementation_report", _canonical_prompt_json(evidence))
     return evidence
 
 
@@ -2077,7 +2151,9 @@ def prepare_review(
                 "SNAPSHOT_DIGEST": str(snapshot["snapshot_digest"]),
                 "REQUIREMENTS_JSON": _canonical_prompt_json(requirements),
                 "PRIOR_REVIEW_JSON": _canonical_prompt_json(prior_review),
-                "SUPPLEMENTAL_EVIDENCE": supplemental,
+                "SUPPLEMENTAL_EVIDENCE": _bounded_model_text(
+                    supplemental_evidence_path, supplemental
+                ),
             }
         else:
             if state.get("phase") != "REVIEW_PENDING":
@@ -2149,6 +2225,16 @@ def prepare_review(
         "prompt_digest": expected["prompt_digest"],
         "nonce": expected["nonce"],
         "turn_id": expected["turn_id"],
+        "prepared_prompt_utf8_bytes": _utf8_size(rendered["prompt"]),
+        "frozen_requirements_utf8_bytes": _utf8_size(
+            _canonical_prompt_json(requirements)
+        ),
+        "dynamic_summary_utf8_bytes": _utf8_size(
+            values.get("IMPLEMENTATION_REPORT_JSON", values.get("SUPPLEMENTAL_EVIDENCE", ""))  # type: ignore[arg-type]
+        ),
+        "model_bound_item_count": (
+            len(_model_bound_report_items(report)) if not evidence_only else 1
+        ),
     }
 
 

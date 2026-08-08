@@ -8,6 +8,13 @@ param(
 
     [string]$ProjectRoot = (Get-Location).Path,
 
+    [Alias("Skill")]
+    [string[]]$RequestedSkill = @(),
+
+    [switch]$All,
+
+    [switch]$List,
+
     [Alias("Replace")]
     [switch]$Force
 )
@@ -27,10 +34,18 @@ function Assert-TreesEqual {
 
     $sourceFiles = @(
         Get-ChildItem -LiteralPath $Source -Recurse -Force -File |
+            Where-Object {
+                $_.Extension -notin @(".pyc", ".pyo") -and
+                $_.FullName -notmatch '[\\/]__pycache__[\\/]'
+            } |
             Sort-Object { $_.FullName.Substring($Source.Length) }
     )
     $stagedFiles = @(
         Get-ChildItem -LiteralPath $Staged -Recurse -Force -File |
+            Where-Object {
+                $_.Extension -notin @(".pyc", ".pyo") -and
+                $_.FullName -notmatch '[\\/]__pycache__[\\/]'
+            } |
             Sort-Object { $_.FullName.Substring($Staged.Length) }
     )
     if ($sourceFiles.Count -ne $stagedFiles.Count) {
@@ -69,6 +84,37 @@ foreach ($skill in $skills) {
     if (-not (Test-Path -LiteralPath $skillFile -PathType Leaf)) {
         throw "Invalid source Skill $($skill.Name): missing SKILL.md"
     }
+}
+
+$requestedNames = New-Object System.Collections.Generic.List[string]
+$seenNames = @{}
+foreach ($rawName in $RequestedSkill) {
+    foreach ($name in $rawName.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        if (-not $seenNames.ContainsKey($name)) {
+            $seenNames[$name] = $true
+            $requestedNames.Add($name)
+        }
+    }
+}
+if ($All -and $requestedNames.Count -gt 0) {
+    throw "-All and -Skill are mutually exclusive."
+}
+if ($List -and ($All -or $requestedNames.Count -gt 0)) {
+    throw "-List cannot be combined with -All or -Skill."
+}
+if ($List) {
+    $skills.Name | Write-Output
+    return
+}
+if ($requestedNames.Count -gt 0) {
+    $available = @{}
+    foreach ($candidate in $skills) { $available[$candidate.Name] = $candidate }
+    foreach ($name in $requestedNames) {
+        if (-not $available.ContainsKey($name)) {
+            throw "Unknown Skill: $name"
+        }
+    }
+    $skills = @($requestedNames | ForEach-Object { $available[$_] })
 }
 
 foreach ($sourceName in @("handoff-gist")) {
@@ -138,7 +184,14 @@ try {
 
         foreach ($skill in $skills) {
             $stagedSkill = Join-Path $stage $skill.Name
-            Copy-Item -LiteralPath $skill.FullName -Destination $stagedSkill -Recurse -Force
+            New-Item -ItemType Directory -Path $stagedSkill -Force | Out-Null
+            Get-ChildItem -LiteralPath $skill.FullName -Force |
+                Where-Object {
+                    $_.Name -ne "__pycache__" -and
+                    $_.Extension -notin @(".pyc", ".pyo")
+                } |
+                Copy-Item -Destination $stagedSkill -Recurse -Force `
+                    -Exclude "__pycache__", "*.pyc", "*.pyo"
             Assert-TreesEqual -Source $skill.FullName -Staged $stagedSkill
         }
 
