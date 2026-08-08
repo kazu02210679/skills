@@ -61,12 +61,14 @@ def build_report(repository: Path, manifest_path: Path) -> dict[str, Any]:
             }
         )
     total_bytes = sum(item["utf8_bytes"] for item in reports)
+    metadata_bytes = sum(item["metadata_utf8_bytes"] for item in reports)
     return {
         "schema_version": 1,
         "approximation": "ceil(normalized_utf8_bytes/4)",
         "skills": reports,
         "repository_totals": {
             "skill_count": len(reports),
+            "metadata_utf8_bytes": metadata_bytes,
             "utf8_bytes": total_bytes,
             "approx_tokens": approximate_tokens(total_bytes),
         },
@@ -74,8 +76,23 @@ def build_report(repository: Path, manifest_path: Path) -> dict[str, Any]:
 
 
 def check_regression(current: dict[str, Any], baseline: dict[str, Any], *, max_growth_bytes: int) -> list[str]:
-    growth = current["repository_totals"]["utf8_bytes"] - baseline["repository_totals"]["utf8_bytes"]
-    return [] if growth <= max_growth_bytes else [f"context bytes grew by {growth}; allowed {max_growth_bytes}"]
+    failures: list[str] = []
+    current_totals = current["repository_totals"]
+    baseline_totals = baseline["repository_totals"]
+    for field in ("metadata_utf8_bytes", "utf8_bytes"):
+        if field not in current_totals or field not in baseline_totals:
+            continue
+        growth = current_totals[field] - baseline_totals[field]
+        if growth > max_growth_bytes:
+            failures.append(f"repository {field} grew by {growth}; allowed {max_growth_bytes}")
+    current_skills = {item["name"]: item for item in current.get("skills", [])}
+    baseline_skills = {item["name"]: item for item in baseline.get("skills", [])}
+    for name in sorted(current_skills.keys() & baseline_skills.keys()):
+        for field in ("metadata_utf8_bytes", "skill_md_utf8_bytes", "auxiliary_utf8_bytes"):
+            growth = current_skills[name][field] - baseline_skills[name][field]
+            if growth > max_growth_bytes:
+                failures.append(f"{name} {field} grew by {growth}; allowed {max_growth_bytes}")
+    return failures
 
 
 def main() -> int:

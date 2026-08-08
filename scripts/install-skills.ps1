@@ -154,6 +154,9 @@ $targetNames = @($skills.Name) + @(".third-party-notices")
 foreach ($destinationRoot in $destinations) {
     foreach ($targetName in $targetNames) {
         $target = Join-Path $destinationRoot $targetName
+        if ($targetName -eq ".third-party-notices") {
+            continue
+        }
         if ((Test-PathEntry -LiteralPath $target) -and -not $Force) {
             throw "Installation conflict: $target already exists. Re-run with -Force to replace managed directories."
         }
@@ -219,7 +222,19 @@ try {
         if ($compatibilityHash -ne $stagedCompatibilityHash) {
             throw "Staged compatibility notice verification failed."
         }
+    }
 
+    foreach ($transaction in $transactions) {
+        $noticeTarget = Join-Path $transaction.Destination ".third-party-notices"
+        $noticeStage = Join-Path $transaction.Stage ".third-party-notices"
+        if ((Test-PathEntry -LiteralPath $noticeTarget) -and -not $Force) {
+            try {
+                Assert-TreesEqual -Source $noticeStage -Staged $noticeTarget
+            }
+            catch {
+                throw "Installation conflict: $noticeTarget differs from the retained notices. Re-run with -Force to replace it."
+            }
+        }
     }
 
     $mutationCount = 0
@@ -237,6 +252,9 @@ try {
             $stagedTarget = Join-Path $transaction.Stage $targetName
             $backupTarget = Join-Path $transaction.Backup $targetName
             $targetExists = Test-PathEntry -LiteralPath $target
+            if ($targetName -eq ".third-party-notices" -and $targetExists -and -not $Force) {
+                continue
+            }
             $transaction.Touched.Add([PSCustomObject]@{
                 Name = $targetName
                 CreatedNew = (-not $targetExists)

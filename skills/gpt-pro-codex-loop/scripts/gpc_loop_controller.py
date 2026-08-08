@@ -32,6 +32,14 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 NONCE = re.compile(r"[0-9a-f]{32}\Z")
 MAX_ABANDON_EVIDENCE_BYTES = 8192
 MAX_MODEL_BOUND_ITEMS = 64
+MODEL_BOUND_REPORT_ITEM_LIMITS = {
+    "changed_file_intents": 64,
+    "acceptance_evidence": 64,
+    "test_commands": 32,
+    "diff_evidence": 64,
+    "omissions": 32,
+    "unresolved_risks_or_blockers": 32,
+}
 MAX_MODEL_BOUND_ITEM_BYTES = 8192
 MAX_MODEL_BOUND_SECTION_BYTES = 65536
 MAX_PREPARED_PROMPT_BYTES = 131072
@@ -146,6 +154,38 @@ def validate_model_bound_items(section: str, items: Sequence[str]) -> None:
                 "MODEL_BOUND_ITEM_BYTES_EXCEEDED",
                 f"Model-bound item {section}.{index} exceeds {MAX_MODEL_BOUND_ITEM_BYTES} UTF-8 bytes.",
             )
+
+
+def validate_model_bound_report(evidence: Mapping[str, object]) -> None:
+    """Apply independent field caps, then the byte cap for the complete section."""
+    changed_intents = evidence.get("changed_file_intents", {})
+    acceptance = evidence.get("acceptance_evidence", {})
+    fields: dict[str, Sequence[str]] = {
+        "changed_file_intents": [str(value) for value in changed_intents.values()],  # type: ignore[union-attr]
+        "acceptance_evidence": [
+            str(item)
+            for entries in acceptance.values()  # type: ignore[union-attr]
+            for item in entries
+        ],
+        "test_commands": [
+            _canonical_prompt_json(item) for item in evidence.get("test_commands", [])  # type: ignore[arg-type]
+        ],
+        "diff_evidence": [str(item) for item in evidence.get("diff_evidence", [])],  # type: ignore[arg-type]
+        "omissions": [str(item) for item in evidence.get("omissions", [])],  # type: ignore[arg-type]
+        "unresolved_risks_or_blockers": [
+            str(item) for item in evidence.get("unresolved_risks_or_blockers", [])  # type: ignore[arg-type]
+        ],
+    }
+    for field, items in fields.items():
+        limit = MODEL_BOUND_REPORT_ITEM_LIMITS[field]
+        if len(items) > limit:
+            raise ControllerError(
+                "MODEL_BOUND_ITEM_COUNT_EXCEEDED",
+                f"Model-bound section implementation_report.{field} exceeds {limit} items.",
+            )
+        validate_model_bound_items(f"implementation_report.{field}", items)
+    validate_model_bound_items("implementation_report.intent_summary", [str(evidence["intent_summary"])])
+    validate_model_bound_section("implementation_report", _canonical_prompt_json(evidence))
 
 
 def validate_model_bound_section(section: str, value: str) -> None:
@@ -1142,6 +1182,8 @@ def initialize_run(
     _validate_model_policy(model_policy, requested_model_label)
     request_text = _read_input(request_path, "request")
     context_text = _read_input(repository_context_path, "repository context")
+    validate_model_bound_section("user_request", request_text)
+    validate_model_bound_section("repository_evidence", context_text)
     if approved_existing_path_manifest is not None and approved_existing_paths:
         raise ControllerError(
             "APPROVAL_SOURCE_CONFLICT",
@@ -1546,6 +1588,7 @@ def _revision_prompt_values(
     conflict = _read_input(conflict_evidence_path, "conflict evidence")
     if not conflict.strip():
         raise ControllerError("INVALID_CONFLICT_EVIDENCE", "Conflict evidence must not be empty.")
+    validate_model_bound_section("conflict_evidence", conflict)
     previous_digest = state.get("active_requirements_digest")
     revision = state.get("active_requirements_revision")
     if not isinstance(previous_digest, str) or not isinstance(revision, int):
@@ -1742,24 +1785,6 @@ def _forbidden_evidence_schema_field_names(value: object) -> list[str]:
     return errors
 
 
-def _model_bound_report_items(evidence: Mapping[str, object]) -> list[str]:
-    items: list[str] = [str(evidence["intent_summary"])]
-    if "changed_file_intents" in evidence:
-        items.extend(str(value) for value in evidence["changed_file_intents"].values())  # type: ignore[union-attr]
-    else:
-        items.extend(
-            str(item.get("intent", ""))
-            for item in evidence["changed_files"]  # type: ignore[union-attr]
-            if isinstance(item, dict)
-        )
-    for entries in evidence["acceptance_evidence"].values():  # type: ignore[union-attr]
-        items.extend(entries)
-    items.extend(_canonical_prompt_json(command) for command in evidence["test_commands"])  # type: ignore[union-attr]
-    for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
-        items.extend(evidence[field])  # type: ignore[arg-type]
-    return items
-
-
 def _load_local_evidence(
     path: Path, requirements: Mapping[str, object]
 ) -> dict[str, object]:
@@ -1814,9 +1839,7 @@ def _load_local_evidence(
     for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
         _validate_evidence_strings(evidence.get(field), field, errors)
     _raise_validation("INVALID_LOCAL_EVIDENCE", "Local evidence is invalid.", sorted(set(errors)))
-    model_items = _model_bound_report_items(evidence)
-    validate_model_bound_items("implementation_report", model_items)
-    validate_model_bound_section("implementation_report", _canonical_prompt_json(evidence))
+    validate_model_bound_report(evidence)
     return evidence
 
 
@@ -2821,6 +2844,7 @@ def accept_requirements(
             requirements, previous_requirements
         )
         _raise_validation("INVALID_RESPONSE", "Requirements response payload is invalid.", requirements_errors)
+        validate_model_bound_section("requirements", _canonical_prompt_json(requirements))
         decision = requirements["decision"]
         target = REQUIREMENTS_TARGETS.get(decision)
         if target is None:

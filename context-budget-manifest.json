@@ -1,8 +1,6 @@
 {
   "skills": {
-    "gpt-pro-codex-loop": [
-      "references/prompt-contract.md"
-    ],
+    "gpt-pro-codex-loop": [],
     "review-implementation-html": [
       "references/review-model.md"
     ]

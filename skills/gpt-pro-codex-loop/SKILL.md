@@ -9,7 +9,13 @@ ChatGPT Pro owns product requirements, acceptance criteria, and semantic review.
 
 **REQUIRED SUB-SKILL:** Use `browser:control-in-app-browser`.
 
-Read [references/packet-contract.md](references/packet-contract.md) before creating artifacts and [references/prompt-contract.md](references/prompt-contract.md) before every Pro turn.
+For the normal controller loop, do not load
+[references/prompt-contract.md](references/prompt-contract.md) or
+[references/packet-contract.md](references/packet-contract.md) into model
+context. Use only prompts, expected headers, status, and commands emitted by the
+controller. Read `prompt-contract.md` only when modifying or diagnosing prompt
+generation. Read `packet-contract.md` only for controller maintenance,
+validation diagnostics, or the documented recovery path below.
 
 ## Workflow
 
@@ -46,7 +52,7 @@ The `next_commands` result is authoritative. Do not hand-author state, expected 
 ## Context budget
 
 The controller enforces UTF-8 byte limits before publishing a prepared prompt:
-at most 64 dynamic evidence items, 8,192 bytes per item, 65,536 bytes per
+field-specific item caps (32 or 64), 8,192 bytes per item, 65,536 bytes per
 dynamic section, and 131,072 bytes for the complete prepared prompt. Frozen
 requirements remain complete and unabridged. Oversized supplemental artifacts
 remain unchanged on disk and are represented to the model only by bounded

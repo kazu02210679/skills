@@ -59,10 +59,35 @@ class ContextBudgetReportTests(unittest.TestCase):
 
     def test_regression_check_uses_explicit_tracked_baseline(self) -> None:
         module = load_module()
-        current = {"repository_totals": {"utf8_bytes": 101, "approx_tokens": 26}}
-        baseline = {"repository_totals": {"utf8_bytes": 100, "approx_tokens": 25}}
+        current = {
+            "skills": [{"name": "hot", "metadata_utf8_bytes": 10, "skill_md_utf8_bytes": 81, "auxiliary_utf8_bytes": 10}],
+            "repository_totals": {"metadata_utf8_bytes": 10, "utf8_bytes": 101, "approx_tokens": 26},
+        }
+        baseline = {
+            "skills": [{"name": "hot", "metadata_utf8_bytes": 10, "skill_md_utf8_bytes": 80, "auxiliary_utf8_bytes": 10}],
+            "repository_totals": {"metadata_utf8_bytes": 10, "utf8_bytes": 100, "approx_tokens": 25},
+        }
         self.assertEqual([], module.check_regression(current, baseline, max_growth_bytes=1))
         self.assertTrue(module.check_regression(current, baseline, max_growth_bytes=0))
+
+    def test_regression_check_catches_per_skill_growth_hidden_by_repository_total(self) -> None:
+        module = load_module()
+        current = {
+            "skills": [
+                {"name": "hot", "metadata_utf8_bytes": 10, "skill_md_utf8_bytes": 110, "auxiliary_utf8_bytes": 0},
+                {"name": "cold", "metadata_utf8_bytes": 10, "skill_md_utf8_bytes": 70, "auxiliary_utf8_bytes": 0},
+            ],
+            "repository_totals": {"metadata_utf8_bytes": 20, "utf8_bytes": 180},
+        }
+        baseline = {
+            "skills": [
+                {"name": "hot", "metadata_utf8_bytes": 10, "skill_md_utf8_bytes": 100, "auxiliary_utf8_bytes": 0},
+                {"name": "cold", "metadata_utf8_bytes": 10, "skill_md_utf8_bytes": 80, "auxiliary_utf8_bytes": 0},
+            ],
+            "repository_totals": {"metadata_utf8_bytes": 20, "utf8_bytes": 180},
+        }
+        failures = module.check_regression(current, baseline, max_growth_bytes=0)
+        self.assertTrue(any("hot skill_md_utf8_bytes grew by 10" in item for item in failures))
 
 
 if __name__ == "__main__":

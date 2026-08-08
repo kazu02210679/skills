@@ -6,16 +6,17 @@ the default budget and makes auxiliary inclusion reviewable.
 
 Using the same reporter and manifest on baseline revision `48be21a`, the
 repository measured 93,335 normalized UTF-8 bytes (about 23,334 tokens). The
-reviewed implementation measures 94,790 bytes (about 23,698 tokens), an
-increase of 1,455 bytes (about 364 tokens) caused by the new safety controls.
+reviewed implementation measures 85,448 bytes (about 21,362 tokens), a
+decrease of 7,887 bytes (about 1,972 tokens) in model-visible Skill material.
 The affected comparisons are recorded in `context-budget-comparison.json`:
-`gpt-pro-codex-loop` is 16,961 -> 17,511 bytes and
-`review-implementation-html` is 11,746 -> 12,651 bytes.
+`gpt-pro-codex-loop` is 16,961 -> 7,912 bytes because its controller-owned
+prompt contract is no longer loaded during the normal loop, while
+`review-implementation-html` is 11,746 -> 12,908 bytes for safer routing.
 
-This change therefore does not claim a reduction in the canonical instruction
-files themselves. Savings are structural: selective installation avoids
+Savings are structural: selective installation avoids
 unrequested Skill copies; ordinary review avoids a second isolated context;
-and GPT-loop evidence cannot grow past explicit model-bound limits. Provider
+the normal GPT loop no longer rereads controller contracts; and GPT-loop
+evidence cannot grow past explicit model-bound limits. Provider
 token or credit savings were not directly measured locally.
 
 Run the non-mutating report and tracked regression check with:
@@ -24,7 +25,7 @@ Run the non-mutating report and tracked regression check with:
 python scripts/context_budget_report.py --repo . \
   --manifest context-budget-manifest.json \
   --baseline context-budget-baseline.json \
-  --max-growth-bytes 1455
+  --max-growth-bytes 0
 ```
 
 This estimate is deterministic `ceil(normalized_utf8_bytes / 4)`, not a model
@@ -40,11 +41,10 @@ repository does not weaken or bypass approval policy.
 - Prepared semantic-review prompt: 48,180 UTF-8 bytes.
 - Complete frozen requirements: 35,847 UTF-8 bytes.
 - Dynamic implementation summary: 9,521 UTF-8 bytes across 59 bounded items.
-- Installer and context tests: 14 passed on the available PowerShell and Bash
+- Installer and context tests: 16 passed on the available PowerShell and Bash
   hosts.
-- GPT-loop evaluations: 219 passed, with two pre-existing skips.
-- Review HTML evaluations: 14 passed before the added lifecycle traces; the
-  focused lifecycle suite then passed all six selector/orchestration cases.
+- GPT-loop evaluations: 223 passed, with two platform-specific skips.
+- Review HTML evaluations: 21 passed, including diff-risk and lifecycle cases.
 - Canonical validation: all 11 Skills passed; the generated catalog was current.
 - README adjacency: 11 canonical Skill directories inspected, zero missing
   adjacent README files.

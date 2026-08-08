@@ -8,13 +8,13 @@
     "review-implementation-html": {"utf8_bytes": 11746, "approx_tokens": 2937}
   },
   "current": {
-    "repository": {"utf8_bytes": 94790, "approx_tokens": 23698},
-    "gpt-pro-codex-loop": {"utf8_bytes": 17511, "approx_tokens": 4378},
-    "review-implementation-html": {"utf8_bytes": 12651, "approx_tokens": 3163}
+    "repository": {"utf8_bytes": 85448, "approx_tokens": 21362},
+    "gpt-pro-codex-loop": {"utf8_bytes": 7912, "approx_tokens": 1978},
+    "review-implementation-html": {"utf8_bytes": 12908, "approx_tokens": 3227}
   },
   "delta": {
-    "repository": {"utf8_bytes": 1455, "approx_tokens": 364},
-    "gpt-pro-codex-loop": {"utf8_bytes": 550, "approx_tokens": 137},
-    "review-implementation-html": {"utf8_bytes": 905, "approx_tokens": 226}
+    "repository": {"utf8_bytes": -7887, "approx_tokens": -1972},
+    "gpt-pro-codex-loop": {"utf8_bytes": -9049, "approx_tokens": -2263},
+    "review-implementation-html": {"utf8_bytes": 1162, "approx_tokens": 290}
   }
 }

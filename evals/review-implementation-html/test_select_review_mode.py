@@ -67,6 +67,24 @@ class SelectReviewModeTests(unittest.TestCase):
         self.assertEqual("isolated", decision["mode"])
         self.assertIn("auth_or_authorization", decision["risk_categories"])
 
+    def test_diff_risk_signals_force_isolation_for_ordinary_paths(self) -> None:
+        decision = load_module().select_review_mode(
+            1,
+            1,
+            0,
+            ["src/server.py"],
+            risk_signals=["command_or_rce"],
+        )
+        self.assertEqual("isolated", decision["mode"])
+        self.assertIn("high_risk:command_or_rce", decision["reasons"])
+
+    def test_force_isolated_is_fail_closed(self) -> None:
+        decision = load_module().select_review_mode(
+            1, 1, 0, ["README.md"], force_isolated=True
+        )
+        self.assertEqual("isolated", decision["mode"])
+        self.assertIn("force_isolated", decision["reasons"])
+
     def test_plan_blind_always_precedes_plan_aware(self) -> None:
         decision = load_module().select_review_mode(1, 1, 1, ["README.md"])
         self.assertEqual(["plan_blind", "plan_aware"], decision["review_order"])

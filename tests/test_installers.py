@@ -278,6 +278,36 @@ class InstallerSafetyTests(unittest.TestCase):
                     self.assertFalse((destination / "alpha-skill" / "__pycache__").exists())
                     self.assertFalse((destination / "alpha-skill" / "fixture.pyo").exists())
 
+    def test_incremental_selective_install_reuses_identical_notices(self) -> None:
+        for installer in INSTALLERS:
+            with self.subTest(installer=installer.name):
+                with tempfile.TemporaryDirectory(dir=TEMPORARY_ROOT) as temporary_directory:
+                    root = Path(temporary_directory)
+                    repository = root / "repository"
+                    project = root / "project"
+                    repository.mkdir()
+                    project.mkdir()
+                    write_fixture_repository(repository)
+
+                    first = self.run_installer(
+                        installer,
+                        repository,
+                        project,
+                        extra=self.selection_args(installer, "alpha-skill"),
+                    )
+                    second = self.run_installer(
+                        installer,
+                        repository,
+                        project,
+                        extra=self.selection_args(installer, "beta-skill"),
+                    )
+
+                    self.assertEqual(0, first.returncode, first.stderr)
+                    self.assertEqual(0, second.returncode, second.stderr)
+                    destination = project / ".agents" / "skills"
+                    self.assertTrue((destination / "alpha-skill" / "SKILL.md").is_file())
+                    self.assertTrue((destination / "beta-skill" / "SKILL.md").is_file())
+
     def test_explicit_all_matches_no_selection(self) -> None:
         for installer in INSTALLERS:
             with self.subTest(installer=installer.name):

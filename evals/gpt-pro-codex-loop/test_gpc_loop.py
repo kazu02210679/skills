@@ -1193,6 +1193,34 @@ class ControllerCase(unittest.TestCase):
             controller.validate_model_bound_items("evidence", ["x"] * 65)
         self.assertEqual("MODEL_BOUND_ITEM_COUNT_EXCEEDED", raised.exception.code)
 
+    def test_report_item_limits_are_per_field_not_aggregate(self) -> None:
+        evidence = {
+            "intent_summary": "summary",
+            "changed_file_intents": {f"file-{index}.py": "intent" for index in range(64)},
+            "acceptance_evidence": {"AC-1": ["evidence"] * 64},
+            "test_commands": [
+                {"command": "test", "outcome": "PASS", "output_summary": "ok"}
+            ] * 32,
+            "diff_evidence": ["diff"] * 64,
+            "omissions": ["none"] * 32,
+            "unresolved_risks_or_blockers": ["none"] * 32,
+        }
+        controller.validate_model_bound_report(evidence)
+        evidence["diff_evidence"] = ["diff"] * 65
+        with self.assertRaises(controller.ControllerError) as raised:
+            controller.validate_model_bound_report(evidence)
+        self.assertEqual("MODEL_BOUND_ITEM_COUNT_EXCEEDED", raised.exception.code)
+
+    def test_init_rejects_each_oversize_model_bound_input_before_state_creation(self) -> None:
+        for target in (self.request, self.context):
+            with self.subTest(target=target.name):
+                target.write_text("a" * 65537, encoding="utf-8")
+                with self.assertRaises(controller.ControllerError) as raised:
+                    self._init_run()
+                self.assertEqual("MODEL_BOUND_SECTION_BYTES_EXCEEDED", raised.exception.code)
+                self.assertFalse(self._run_dir().exists())
+                target.write_text("bounded\n", encoding="utf-8")
+
     def test_model_bound_multibyte_item_limit_uses_utf8_bytes(self) -> None:
         for byte_count in (8191, 8192):
             controller.validate_model_bound_items("evidence", ["a" * byte_count])

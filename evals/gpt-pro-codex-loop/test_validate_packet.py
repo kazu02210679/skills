@@ -1039,6 +1039,18 @@ class TransportEnvelopeTests(unittest.TestCase):
 
 
 class RequirementsPacketTests(unittest.TestCase):
+    def test_model_bound_requirement_lists_are_capped(self) -> None:
+        requirements = valid_requirements(
+            acceptance_criteria=[
+                {"id": f"AC-{index}", "criterion": "bounded", "required_evidence": "proof"}
+                for index in range(65)
+            ]
+        )
+        self.assertIn(
+            "acceptance_criteria: must contain at most 64 items",
+            validate_requirements(requirements),
+        )
+
     def test_unapproved_material_revision_can_request_user_input(self) -> None:
         previous = valid_requirements()
         revised = valid_requirements(
@@ -3722,6 +3734,17 @@ class TransitionTests(unittest.TestCase):
         for fragment in required_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, prompt_contract)
+
+    def test_normal_loop_does_not_require_contracts_in_model_context(self) -> None:
+        skill = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "gpt-pro-codex-loop"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("before every Pro turn", skill)
+        self.assertIn("do not load", skill)
+        self.assertIn("controller", skill)
 
     def test_material_approval_must_clear_review_bindings_and_preserve_history(self) -> None:
         active_digest = "sha256:" + "a" * 64

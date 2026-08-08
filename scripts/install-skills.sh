@@ -184,6 +184,9 @@ target_names=("${skill_names[@]}" ".third-party-notices")
 for destination_root in "${destinations[@]}"; do
   for target_name in "${target_names[@]}"; do
     target="$destination_root/$target_name"
+    if [[ "$target_name" == ".third-party-notices" ]]; then
+      continue
+    fi
     if [[ -e "$target" || -L "$target" ]]; then
       if [[ "$replace_existing" -ne 1 ]]; then
         echo "Installation conflict: $target already exists. Re-run with --force to replace managed directories." >&2
@@ -259,6 +262,21 @@ for destination_root in "${destinations[@]}"; do
 
 done
 
+for index in "${!destinations[@]}"; do
+  destination_root="${destinations[$index]}"
+  stage="${stages[$index]}"
+  notice_target="$destination_root/.third-party-notices"
+  if [[ -e "$notice_target" || -L "$notice_target" ]]; then
+    if [[ "$replace_existing" -ne 1 ]] && {
+      [[ ! -d "$notice_target" ]] || [[ -L "$notice_target" ]] ||
+      ! diff -qr -- "$stage/.third-party-notices" "$notice_target" >/dev/null
+    }; then
+      echo "Installation conflict: $notice_target differs from the retained notices. Re-run with --force to replace it." >&2
+      exit 3
+    fi
+  fi
+done
+
 rollback() {
   local original_status="$1"
   trap - ERR INT TERM
@@ -298,6 +316,13 @@ for index in "${!destinations[@]}"; do
   mkdir -p "$destination_root"
 
   for target_name in "${target_names[@]}"; do
+    if [[ "$target_name" == ".third-party-notices" ]] &&
+       [[ "$replace_existing" -ne 1 ]] &&
+       [[ -d "$destination_root/$target_name" ]] &&
+       [[ ! -L "$destination_root/$target_name" ]] &&
+       diff -qr -- "$stage/$target_name" "$destination_root/$target_name" >/dev/null; then
+      continue
+    fi
     touch "$transaction/touched/$target_name"
     if [[ -e "$destination_root/$target_name" || -L "$destination_root/$target_name" ]]; then
       backup_attempt_count=$((backup_attempt_count + 1))

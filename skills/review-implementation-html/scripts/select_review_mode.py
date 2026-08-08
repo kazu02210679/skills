@@ -31,17 +31,22 @@ def select_review_mode(
     added_lines: int,
     deleted_lines: int,
     paths: Iterable[str],
+    risk_signals: Iterable[str] = (),
+    force_isolated: bool = False,
 ) -> dict[str, object]:
-    risks = sorted(
+    path_risks = {
         category
         for category, pattern in RISK_PATTERNS.items()
         if any(pattern.search(path) for path in paths)
-    )
+    }
+    risks = sorted(path_risks | {str(signal) for signal in risk_signals})
     reasons = []
     if changed_files >= 20:
         reasons.append("changed_files_at_least_20")
     if added_lines + deleted_lines >= 1000:
         reasons.append("changed_lines_at_least_1000")
+    if force_isolated:
+        reasons.append("force_isolated")
     reasons.extend(f"high_risk:{risk}" for risk in risks)
     return {
         "mode": "isolated" if reasons else "serial_same_session",
