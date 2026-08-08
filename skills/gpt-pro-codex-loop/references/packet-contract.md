@@ -12,7 +12,7 @@ Every Pro response is a closed envelope with exactly:
 
 `packet_type` is `requirements` or `review`; the matching v1 payload is also closed. Before sending, persist the exact expected header locally. Accept a response only if all header values match, its canonical envelope digest has not been consumed, and `previous_packet_digest` equals the trusted chain head.
 
-On timeout, reacquire the bound conversation and search for the exact `turn_id` and `nonce`. Extract an existing response without resending. If absence is proven, use a new attempt nonce and prompt digest and send once. If sent/unsent status is ambiguous, stop. A format correction preserves semantic turn and domain state, uses a fresh nonce, and cannot change round, decisions, actions, requirements lineage, finding history, snapshot identity, or consumed history.
+On Browser-tool timeout, reacquire the bound conversation and search for the exact `turn_id` and `nonce`. Do not interrupt a visibly active Pro turn: elapsed time is not failure evidence, so re-observe the same turn until it completes or shows an explicit generation failure. Never activate `Answer now`, stop generation, regenerate, or resend merely because reasoning is slow. Extract an existing response without resending. Only after absence is proven may a new attempt nonce and prompt digest be used to send once. If sent/unsent status is ambiguous, stop. A format correction preserves semantic turn and domain state, uses a fresh nonce, and cannot change round, decisions, actions, requirements lineage, finding history, snapshot identity, or consumed history.
 
 ## Executable commands
 
