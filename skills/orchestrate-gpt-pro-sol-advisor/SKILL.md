@@ -24,10 +24,12 @@ Before GPT Pro `inspect-init` or `init`:
 2. Adapter installation or update requires a fresh Codex task.
 3. Derive the current canonical workspace from trusted runtime context, then
    call `get_preferences`; success returns the upstream-validated active object.
-   `preferences.client` must equal `codex`; `preferences.workspace` must equal
-   the current canonical workspace; and `profileKey` must equal
-   `codex:<scope>:<workspace>` for scope `project` or `user`. Require the saved
-   advisor model and effort; preferences have no permission profile.
+   `preferences.client` must equal `codex`. Compare workspace identity by
+   canonicalizing `preferences.workspace` and the current workspace. Validate
+   `profileKey` exactly as `codex:<scope>:<raw preferences.workspace>` for scope
+   `project` or `user`; never rebuild it from another runtime's canonical path.
+   Require the saved advisor model and effort; preferences have no permission
+   profile.
 4. Require a well-formed role list and only observable `sol_advisor_advisor` in
    the combined role set. Any identity, interface, preference, or role failure
    stops before Pro. Do not silently downgrade or fabricate a consultation.

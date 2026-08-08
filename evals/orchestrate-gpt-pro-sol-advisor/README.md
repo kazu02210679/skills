@@ -14,9 +14,10 @@ downstream use; valid low-risk work skipped Sol without making it a gate.
 
 `policy.py` is a deterministic evaluation harness, not a runtime dependency.
 Its cases verify pre-GPC setup ordering, the single active preferences object,
-canonical workspace/profile binding, the exact Codex advisor, trusted runtime
-identity/isolation attestation, opaque permission audit evidence, authority,
-bounded recurrence, and fail-closed dependency handling.
+canonical workspace identity plus exact upstream raw-workspace `profileKey`
+serialization, the exact Codex advisor, trusted runtime identity/isolation
+attestation, opaque permission audit evidence, authority, bounded recurrence,
+and fail-closed dependency handling.
 
 Run:
 

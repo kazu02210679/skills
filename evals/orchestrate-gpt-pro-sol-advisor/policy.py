@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import posixpath
 from typing import Any
 
 
@@ -19,9 +20,16 @@ PROFILE_SCOPES = {"project", "user"}
 
 
 def canonical_workspace(value: Any) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
         return ""
-    return os.path.normcase(os.path.realpath(os.path.abspath(os.path.normpath(value.strip()))))
+    try:
+        if os.name == "nt" and value.startswith("/") and not value.startswith("//"):
+            return posixpath.normpath(value)
+        return os.path.normcase(
+            os.path.realpath(os.path.abspath(os.path.normpath(value)))
+        )
+    except (OSError, ValueError):
+        return ""
 
 
 def _failure(terminal: str, dependency: str) -> dict[str, Any]:
@@ -160,7 +168,8 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
     client = client_value.strip() if isinstance(client_value, str) else ""
     if client != "codex":
         return _failure("profile-client-mismatch", "sol-profile")
-    workspace = canonical_workspace(scenario.get("preferences_workspace"))
+    preferences_workspace = scenario.get("preferences_workspace")
+    workspace = canonical_workspace(preferences_workspace)
     current_workspace = canonical_workspace(scenario.get("trusted_current_workspace"))
     if not workspace or not current_workspace or workspace != current_workspace:
         return _failure("profile-workspace-mismatch", "sol-profile")
@@ -168,7 +177,7 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
     scope = scope_value.strip() if isinstance(scope_value, str) else ""
     if scope not in PROFILE_SCOPES:
         return _failure("profile-scope-invalid", "sol-profile")
-    expected_profile_key = f"codex:{scope}:{current_workspace}"
+    expected_profile_key = f"codex:{scope}:{preferences_workspace}"
     profile_key = scenario.get("preferences_profile_key")
     if not isinstance(profile_key, str) or profile_key != expected_profile_key:
         return _failure("profile-key-mismatch", "sol-profile")

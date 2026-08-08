@@ -4,6 +4,7 @@ import json
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +30,7 @@ def valid_combined(**overrides: object) -> dict[str, object]:
         "preferences_workspace": "/repo/current",
         "trusted_current_workspace": "/repo/current",
         "current_workspace": "/repo/current",
-        "preferences_profile_key": f"codex:project:{POLICY.canonical_workspace('/repo/current')}",
+        "preferences_profile_key": "codex:project:/repo/current",
         "configured_advisor_role": "sol_advisor_advisor",
         "configured_combined_roles": ["sol_advisor_advisor"],
         "available_roles": ["sol_advisor_advisor"],
@@ -107,9 +108,9 @@ class CompositionContractTests(unittest.TestCase):
         lower = self.skill.lower()
         for phrase in (
             "`preferences.client` must equal `codex`",
-            "`preferences.workspace` must equal",
-            "current canonical workspace",
-            "profilekey",
+            "canonicalizing `preferences.workspace`",
+            "`codex:<scope>:<raw preferences.workspace>`",
+            "never rebuild it from another runtime's canonical path",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, lower)
@@ -136,11 +137,20 @@ class CompositionContractTests(unittest.TestCase):
             valid_combined(
                 preferences_workspace="/repo/current/.",
                 trusted_current_workspace="/repo/current",
-                preferences_profile_key="codex:project:"
-                + POLICY.canonical_workspace("/repo/current"),
+                preferences_profile_key="codex:project:/repo/current/.",
             )
         )
         self.assertTrue(equivalent["gpc_started"])
+
+        transformed_posix_key = POLICY.route(
+            valid_combined(
+                preferences_workspace="/repo/current/.",
+                trusted_current_workspace="/repo/current",
+                preferences_profile_key="codex:project:/repo/current",
+            )
+        )
+        self.assertEqual("profile-key-mismatch", transformed_posix_key["terminal"])
+        self.assertFalse(transformed_posix_key["gpc_started"])
 
         attacker_supplied = POLICY.route(
             valid_combined(
@@ -149,6 +159,135 @@ class CompositionContractTests(unittest.TestCase):
             )
         )
         self.assertTrue(attacker_supplied["gpc_started"])
+
+    def test_profile_key_preserves_upstream_raw_workspace_serialization(self) -> None:
+        raw_workspace = r"C:\Users\Foo\repo"
+        runtime_workspace = "c:/users/foo/repo"
+        canonical_identity = r"c:\users\foo\repo"
+        with patch.object(
+            POLICY,
+            "canonical_workspace",
+            side_effect=lambda value: str(value).replace("/", "\\").lower(),
+        ):
+            matching_upstream_key = POLICY.route(
+                attested_combined(
+                    preferences_workspace=raw_workspace,
+                    trusted_current_workspace=runtime_workspace,
+                    preferences_profile_key=f"codex:project:{raw_workspace}",
+                    codex_commitment_boundary=True,
+                    concrete_question=True,
+                    material_risk=True,
+                    decision_value=True,
+                    precise_question="Is the raw-bound profileKey valid?",
+                    sol_response={"recommendation": "keep the raw-bound key"},
+                )
+            )
+            recomputed_canonical_key = POLICY.route(
+                valid_combined(
+                    preferences_workspace=raw_workspace,
+                    trusted_current_workspace=runtime_workspace,
+                    preferences_profile_key=f"codex:project:{canonical_identity}",
+                )
+            )
+
+        self.assertTrue(matching_upstream_key["gpc_started"])
+        self.assertEqual(1, matching_upstream_key["advice_admitted"])
+        self.assertFalse(matching_upstream_key["advice_discarded"])
+        self.assertEqual("profile-key-mismatch", recomputed_canonical_key["terminal"])
+        self.assertTrue(recomputed_canonical_key["advice_discarded"])
+
+    def test_workspace_identity_preserves_significant_edge_whitespace(self) -> None:
+        trailing_space_workspace = "/repo/current "
+        matching = POLICY.route(
+            valid_combined(
+                preferences_workspace=trailing_space_workspace,
+                trusted_current_workspace=trailing_space_workspace,
+                preferences_profile_key=f"codex:project:{trailing_space_workspace}",
+            )
+        )
+        mismatching = POLICY.route(
+            valid_combined(
+                preferences_workspace=trailing_space_workspace,
+                trusted_current_workspace="/repo/current",
+                preferences_profile_key=f"codex:project:{trailing_space_workspace}",
+            )
+        )
+
+        self.assertTrue(matching["gpc_started"])
+        self.assertEqual("profile-workspace-mismatch", mismatching["terminal"])
+        self.assertFalse(mismatching["gpc_started"])
+
+    def test_malformed_workspace_values_fail_closed_without_coercion(self) -> None:
+        missing = valid_combined()
+        missing.pop("preferences_workspace")
+        nul_workspace = "bad" + chr(0) + "workspace"
+        scenarios = {
+            "missing": missing,
+            "null": valid_combined(preferences_workspace=None),
+            "non-string": valid_combined(preferences_workspace=7),
+            "empty": valid_combined(preferences_workspace=""),
+            "whitespace-only": valid_combined(preferences_workspace="   "),
+            "nul": valid_combined(
+                preferences_workspace=nul_workspace,
+                trusted_current_workspace=nul_workspace,
+                preferences_profile_key=f"codex:project:{nul_workspace}",
+            ),
+        }
+        for name, scenario in scenarios.items():
+            with self.subTest(name=name):
+                result = POLICY.route(scenario)
+                self.assertEqual("profile-workspace-mismatch", result["terminal"])
+                self.assertFalse(result["gpc_started"])
+                self.assertTrue(result["advice_discarded"])
+                self.assertEqual(0, result["fallback_calls"])
+
+    def test_canonicalization_exception_fails_closed(self) -> None:
+        workspace = r"C:\repo\current"
+        with patch.object(
+            POLICY.os.path, "normpath", side_effect=ValueError("invalid path")
+        ):
+            result = POLICY.route(
+                valid_combined(
+                    preferences_workspace=workspace,
+                    trusted_current_workspace=workspace,
+                    preferences_profile_key=f"codex:project:{workspace}",
+                )
+            )
+
+        self.assertEqual("profile-workspace-mismatch", result["terminal"])
+        self.assertTrue(result["advice_discarded"])
+
+    def test_profile_key_rejects_altered_complete_strings(self) -> None:
+        workspace = r"C:\Users\Foo\repo"
+        for profile_key in (
+            f"prefix:codex:project:{workspace}",
+            f"cursor:project:{workspace}",
+            f"codex:user:{workspace}",
+            f"codex:project:{workspace}\\extra",
+            r"codex:project:c:\users\foo\repo",
+        ):
+            with self.subTest(profile_key=profile_key):
+                result = POLICY.route(
+                    valid_combined(
+                        preferences_workspace=workspace,
+                        trusted_current_workspace=workspace,
+                        preferences_profile_key=profile_key,
+                    )
+                )
+                self.assertEqual("profile-key-mismatch", result["terminal"])
+                self.assertTrue(result["advice_discarded"])
+
+    def test_exact_raw_key_does_not_override_workspace_identity_mismatch(self) -> None:
+        result = POLICY.route(
+            valid_combined(
+                preferences_workspace="/repo/other",
+                trusted_current_workspace="/repo/current",
+                preferences_profile_key="codex:project:/repo/other",
+            )
+        )
+
+        self.assertEqual("profile-workspace-mismatch", result["terminal"])
+        self.assertTrue(result["advice_discarded"])
 
     def test_missing_profile_fields_fail_closed(self) -> None:
         cases = {
@@ -602,8 +741,7 @@ class CompositionContractTests(unittest.TestCase):
             "pro-green-canonical": valid_combined(
                 preferences_workspace="/repo/current/.",
                 trusted_current_workspace="/repo/current",
-                preferences_profile_key="codex:project:"
-                + POLICY.canonical_workspace("/repo/current"),
+                preferences_profile_key="codex:project:/repo/current/.",
                 material_risk=False,
             ),
         }
