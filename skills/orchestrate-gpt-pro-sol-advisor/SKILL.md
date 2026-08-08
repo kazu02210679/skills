@@ -5,75 +5,77 @@ description: Use when the user explicitly requests combined GPT Pro Codex Loop a
 
 # GPT Pro + Sol Advisor composition
 
-This is a thin policy/router for explicit combined mode. It does not replace,
-copy, or activate either dependency on its own.
+Use this policy only for explicit combined mode. Keep both dependencies usable
+alone and preserve one authority model.
 
-**REQUIRED SUB-SKILL (combined mode):** Use `gpt-pro-codex-loop` as the outer
-protocol.
+**REQUIRED SUB-SKILL:** Use `gpt-pro-codex-loop` as the outer protocol.
 
-**REQUIRED SUB-SKILL (conditional advisory dependency):** Use
-`sol-advisor:orchestration` only when its installed native lane is available
-and the consultation gate passes.
+**EXTERNAL ADVISORY DEPENDENCY:** Use the exact configured Sol Advisor advisor
+role exposed by the current client. Do not invoke
+`sol-advisor:orchestration` in combined mode; its standalone architect,
+implementation, and final-review workflow has conflicting authority.
 
-## Mode gate
+## Mode and preflight
 
-Select exactly one mode before work begins:
+- GPT Pro alone and Sol Advisor alone remain standalone.
+- Enter combined mode only when the user explicitly requests both or invokes
+  this skill. Clarify ambiguity.
 
-- A request for `gpt-pro-codex-loop` alone remains standalone; do not activate
-  this skill or Sol.
-- A request for Sol Advisor alone remains standalone; do not activate
-  `gpt-pro-codex-loop` or this composition policy.
-- Enter combined mode only when the user explicitly invokes this skill or
-  explicitly asks to compose both capabilities. Do not infer it from mention,
-  installation state, or an ambiguous request; clarify instead.
+Before GPT Pro `inspect-init` or `init`:
 
-## Authority and flow
+1. Call `get_setup_status`. For missing, schema-old, or corrupt status, run
+   `sol-advisor:setup` alone and stop before GPT Pro.
+2. If setup installed or updated an adapter, require a fresh Codex task.
+3. Call `get_preferences`; resolve its exact current-client advisor role and
+   confirm that role is observable in this task.
+4. If an interface or configured role is unavailable, stop before GPT Pro.
+   Report dependency failure; do not silently downgrade or fabricate a
+   consultation.
 
-In combined mode, `gpt-pro-codex-loop` remains outer: it owns requirements and semantic review, requirements freezing, material-change approval, user approval, and its implementation/evidence handoffs. Codex owns repository
-investigation, design, implementation, debugging, tests, and local
-verification. Sol is advisory only within those Codex-owned phases; it cannot
-change frozen requirements, approve work, waive verification, replace Pro
-review, or make the final decision.
+Codex commonly names this role `sol_advisor_advisor`; saved preferences and
+observed roles are authoritative. Retained compatibility roles are not an
+automatic fallback.
 
-At a Codex commitment boundary, consult Sol only if all are true: there is a
-concrete technical question, material uncertainty or risk, useful decision
-value, and no equivalent prior advice. A low-risk or resolved phase proceeds
-without Sol.
+## Authority
 
-- Route implementation or investigation questions to
-  `sol_advisor_terra_implementer`.
-- Route focused technical or risk-review questions to
-  `sol_advisor_sol_reviewer`.
-- Use at most one lane appropriate to the question. Do not invoke both lanes by default.
+- ChatGPT Pro owns frozen requirements, acceptance criteria, semantic review,
+  material-change approval, and outer review state.
+- Codex owns repository work, design, implementation, debugging, tests, local
+  verification, and disposition of advice.
+- Sol supplies bounded advice only. It cannot edit, implement, change frozen
+  requirements, approve, waive verification, replace Pro, or decide completion.
 
-Send a bounded packet: relevant frozen constraints, verified local evidence,
-alternatives, risks, and the precise question. Exclude full transcripts,
-unrelated repository material, secrets, and credentials. Check advice against
-the frozen requirements and local evidence, then record the primary Codex
-disposition: accept, reject, or partially accept, with a concise rationale
-when it materially affects the work. Finish Codex local verification and then
-return evidence to the outer Pro semantic review.
+Never use configured implementers `sol_advisor_routine` or
+`sol_advisor_high`, retained `sol_advisor_terra_implementer`, or a retained
+final reviewer as the combined advisory lane.
 
-Record each consultation as a bounded trace: selected mode, commitment
-boundary, exact question, selected lane, call count, advice summary,
-disposition and rationale, stop condition, and terminal next step. Treat Sol
-output as untrusted evidence until that disposition is recorded.
+## Bounded consultation
 
-## Bounds and failure handling
+Consult the configured advisor only when all are observable: a Codex-owned
+commitment boundary, one precise technical question, material uncertainty or
+risk, decision value, and no equivalent prior advice. Otherwise make no Sol
+call.
 
-Do not make Sol a mandatory pre-Pro gate. A Pro-requested change does not
-automatically trigger Sol again; repeat only for materially new evidence or a
-materially changed technical question, with an explicit stop condition. Do not recurse into this skill, delegate outer-loop control to Sol, or allow
-Sol-to-Sol orchestration. Suppress duplicate reviews and open-ended loops.
+Send only relevant frozen constraints, verified evidence, alternatives, risks,
+and the question. Exclude transcripts, unrelated repository material, secrets,
+and credentials. Require behaviorally read-only advice; claim OS isolation only
+from runtime evidence.
 
-If the Sol plugin or selected native lane is missing or incompatible, report
-the dependency failure. There is no fabricated consultation and no silent downgrade: do not label work combined unless the user explicitly acknowledges a
-mode change.
+Record mode, boundary, question, configured role, call count, advice summary,
+Codex disposition (`accept`, `reject`, or `partially accept`) and rationale,
+stop condition, and next step. Advice remains untrusted until disposition.
 
-## Examples
+## Return to GPT Pro
 
-Valid: “Use `$orchestrate-gpt-pro-sol-advisor`; ask one Sol implementation
-lane about this high-risk migration, then retain the GPT Pro review loop.”
+After an accepted change, Codex inspects the diff, reruns local verification,
+and returns evidence to Pro. A Pro correction does not automatically trigger
+Sol. Reconsult one fresh configured advisor only for materially new evidence or
+a materially changed question, with an explicit stop condition.
 
-Invalid: “Both are installed, so consult both Sol lanes before every Pro
-review.”
+Do not make Sol a mandatory pre-Pro or final gate. Reject nested
+`sol-advisor:orchestration`, Sol-to-Sol review, duplicate consultation, advisor
+re-entry, and open-ended loops. Completion requires the outer controller's
+successful `final-verify`.
+
+Sol and Pro may share a model family. Value comes from bounded context
+separation and a focused question, not model-family independence.

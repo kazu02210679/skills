@@ -5,12 +5,25 @@ from __future__ import annotations
 from typing import Any
 
 
-LANES = {
-    "implementation": "sol_advisor_terra_implementer",
-    "investigation": "sol_advisor_terra_implementer",
-    "review": "sol_advisor_sol_reviewer",
-    "risk": "sol_advisor_sol_reviewer",
+SETUP_FAILURES = {"missing", "schema-old", "corrupt"}
+IMPLEMENTER_ROLES = {
+    "sol_advisor_routine",
+    "sol_advisor_high",
+    "sol_advisor_terra_implementer",
 }
+
+
+def _failure(terminal: str, dependency: str) -> dict[str, Any]:
+    return {
+        "selected_mode": "combined-unavailable",
+        "dependency": dependency,
+        "gpc_started": False,
+        "sol_calls": 0,
+        "fabricated_consultation": False,
+        "silent_downgrade": False,
+        "compatibility_fallback": False,
+        "terminal": terminal,
+    }
 
 
 def route(scenario: dict[str, Any]) -> dict[str, Any]:
@@ -22,22 +35,48 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
     if intent != "combined":
         return {"selected_mode": "unselected", "composition_active": False, "sol_calls": 0, "terminal": "clarify"}
 
+    if scenario.get("requested_dependency") == "sol-advisor:orchestration":
+        return _failure("forbidden-nested-orchestration", "nested-orchestration")
+
+    setup_status = scenario.get("setup_status", "unavailable")
+    if setup_status in SETUP_FAILURES:
+        return _failure("setup-required-before-gpc", "sol-setup")
+    if setup_status != "ready":
+        return _failure("setup-status-unavailable", "sol-setup-status")
+    if scenario.get("setup_changed_this_task"):
+        return _failure("fresh-task-required", "native-role-discovery")
+    if not scenario.get("preferences_loaded"):
+        return _failure("preferences-unavailable", "sol-preferences")
+
+    advisor_role = str(scenario.get("configured_advisor_role", "")).strip()
+    if not advisor_role or advisor_role in IMPLEMENTER_ROLES:
+        return _failure("configured-advisor-invalid", "configured-advisor")
+    if advisor_role not in scenario.get("available_roles", []):
+        return _failure("configured-advisor-unavailable", "configured-advisor")
+
+    requested_role = scenario.get("requested_role")
+    if requested_role and requested_role != advisor_role:
+        return _failure("non-advisor-role-rejected", "advisory-role")
+
     preserved = {
+        "gpc_started": True,
         "frozen_requirements": True,
         "user_approval_authority": "user-and-outer-protocol",
         "repository_owner": "codex",
         "local_verification_retained": True,
         "pro_review_retained": True,
     }
+    if scenario.get("mandatory_final_sol_review"):
+        return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
         disposition = evaluate_advice(scenario["sol_response"])
         return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 1), **disposition, **preserved, "terminal": "outer-protocol"}
     if scenario.get("recursive") or scenario.get("duplicate") or scenario.get("advisor_reentry"):
         disposition = evaluate_advice(scenario.get("sol_response", {"requests_outer_restart": True}))
-        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 0), **disposition, "recursion": False, "sol_to_sol": False, "terminal": "outer-protocol"}
+        return {"selected_mode": "combined", "sol_calls": scenario.get("prior_sol_calls", 0), **disposition, **preserved, "recursion": False, "sol_to_sol": False, "terminal": "outer-protocol"}
     if scenario.get("follow_up") and not scenario.get("materially_new"):
         terminal = "fix-verify-return-to-pro" if scenario.get("pro_correction") else "use-existing-disposition"
-        return {"selected_mode": "combined", "sol_calls": 0, "terminal": terminal}
+        return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": terminal}
 
     gate = all(
         scenario.get(key, False)
@@ -47,14 +86,16 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
     if scenario.get("follow_up"):
         gate = gate and bool(scenario.get("stop_condition", "").strip())
     if not gate:
-        return {"selected_mode": "combined", "sol_calls": 0, "terminal": "local-verify-then-pro"}
-    if not scenario.get("plugin_available", True):
-        return {"selected_mode": "combined-unavailable", "dependency": "plugin", "sol_calls": 0, "fabricated_consultation": False, "silent_downgrade": False, "terminal": "dependency-failure"}
-
-    lane = LANES[scenario["question_kind"]]
-    if lane not in scenario.get("available_lanes", list(LANES.values())):
-        return {"selected_mode": "combined-unavailable", "dependency": "lane", "sol_calls": 0, "fabricated_consultation": False, "silent_downgrade": False, "terminal": "dependency-failure"}
-    return {"selected_mode": "combined", "selected_lane": lane, "sol_calls": 1, "maximum_lanes": 1, "requires_stop_condition": bool(scenario.get("follow_up")), "terminal": "primary-disposition"}
+        return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
+    return {
+        "selected_mode": "combined",
+        "selected_lane": advisor_role,
+        "sol_calls": 1,
+        "maximum_lanes": 1,
+        "requires_stop_condition": bool(scenario.get("follow_up")),
+        **preserved,
+        "terminal": "primary-disposition",
+    }
 
 
 def bounded_packet(context: dict[str, Any]) -> dict[str, Any]:
