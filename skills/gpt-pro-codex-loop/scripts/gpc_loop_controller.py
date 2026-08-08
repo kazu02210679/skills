@@ -1981,6 +1981,9 @@ def build_report(
             "omissions": evidence["omissions"],
             "unresolved_risks_or_blockers": evidence["unresolved_risks_or_blockers"],
         }
+        validate_model_bound_section(
+            "implementation_report", _canonical_prompt_json(report)
+        )
         candidate, phase_edges = _advance_report_phase(state)
         candidate.update(
             active_report_digest=validate_packet.canonical_digest(report),

@@ -1211,6 +1211,28 @@ class ControllerCase(unittest.TestCase):
             controller.validate_model_bound_report(evidence)
         self.assertEqual("MODEL_BOUND_ITEM_COUNT_EXCEEDED", raised.exception.code)
 
+    def test_build_report_rechecks_section_limit_after_controller_metadata(self) -> None:
+        self._freeze_initial_requirements()
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        evidence_path = self._write_local_evidence({"example.py": "Implement AC-1."})
+        evidence = controller.load_json(evidence_path)
+        evidence_bytes = len(
+            controller._canonical_prompt_json(evidence).encode("utf-8")
+        )
+
+        with patch.object(
+            controller, "MAX_MODEL_BOUND_SECTION_BYTES", evidence_bytes
+        ):
+            with self.assertRaises(controller.ControllerError) as raised:
+                controller.build_report(
+                    self.repository, "controller-test", evidence_path
+                )
+
+        self.assertEqual(
+            "MODEL_BOUND_SECTION_BYTES_EXCEEDED", raised.exception.code
+        )
+        self.assertFalse((self._run_dir() / "implementation-report.json").exists())
+
     def test_init_rejects_each_oversize_model_bound_input_before_state_creation(self) -> None:
         for target in (self.request, self.context):
             with self.subTest(target=target.name):
