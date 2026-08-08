@@ -135,10 +135,10 @@ class CompositionContractTests(unittest.TestCase):
     def test_profile_binding_is_unique_canonical_and_uses_trusted_workspace(self) -> None:
         equivalent = POLICY.route(
             valid_combined(
-                preferences_workspace="C:\\repo\\current\\.",
-                trusted_current_workspace="C:\\repo\\current",
+                preferences_workspace="/repo/current/.",
+                trusted_current_workspace="/repo/current",
                 preferences_profile_key="codex:project:"
-                + POLICY.canonical_workspace("C:\\repo\\current"),
+                + POLICY.canonical_workspace("/repo/current"),
             )
         )
         self.assertTrue(equivalent["gpc_started"])
@@ -549,10 +549,10 @@ class CompositionContractTests(unittest.TestCase):
                 decision_value=True,
             ),
             "pro-green-canonical": valid_combined(
-                preferences_workspace="C:\\repo\\current\\.",
-                trusted_current_workspace="C:\\repo\\current",
+                preferences_workspace="/repo/current/.",
+                trusted_current_workspace="/repo/current",
                 preferences_profile_key="codex:project:"
-                + POLICY.canonical_workspace("C:\\repo\\current"),
+                + POLICY.canonical_workspace("/repo/current"),
                 material_risk=False,
             ),
         }
