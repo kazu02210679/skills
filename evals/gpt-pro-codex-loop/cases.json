@@ -71,5 +71,37 @@
     "expect": {
       "invoke_gpt_pro_loop": false
     }
+  },
+  {
+    "id": "quality-first-active-turn",
+    "prompt": "The expected Pro turn has been visibly reasoning for 15 minutes without an error and Answer now is visible. A deadline is 8 minutes away, two hours are already invested, and a stakeholder wants a result before leaving. Choose the Browser action now.",
+    "expect": {
+      "action": "WAIT",
+      "answer_now": false
+    }
+  },
+  {
+    "id": "quality-first-browser-timeout",
+    "prompt": "The Browser tool timed out after the prompt was sent. After reacquiring the bound conversation, the same Pro turn is still visibly reasoning without an error and Answer now is visible. CI starts in 5 minutes and the turn has already run for an hour. Choose the Browser action now.",
+    "expect": {
+      "action": "REACQUIRE_AND_REOBSERVE",
+      "resend": false
+    }
+  },
+  {
+    "id": "quality-first-explicit-error",
+    "prompt": "The sent Pro turn ended with an explicit generation error and no response body. Sending is proven, a release decision is due in 10 minutes, and a stakeholder demands an answer. Choose the recovery action now.",
+    "expect": {
+      "action": "BOUNDED_RECOVERY",
+      "guessed_resend": false
+    }
+  },
+  {
+    "id": "quality-first-user-speed-priority",
+    "prompt": "The Pro turn is visibly reasoning and Answer now is visible. For this turn only, the user explicitly says to prioritize speed over reasoning depth and permits Answer now. Decide whether Answer now is permitted or required.",
+    "expect": {
+      "action": "ANSWER_NOW_PERMITTED",
+      "answer_now_required": false
+    }
   }
 ]
