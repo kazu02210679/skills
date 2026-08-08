@@ -1,21 +1,21 @@
 # Composition skill behavioral evaluation
 
-The RED baseline used five fresh-context samples against the prior composition
-skill. Three violated the repaired dependency contract: one reintroduced Terra
-plus a mandatory final Sol review, one continued in the task that had just
-changed setup and selected retained compatibility roles, and one invoked nested
-`sol-advisor:orchestration`. The raw normalized observations are retained in
-`pressure-results.json`.
+The second RED baseline used five fresh-context samples against the previous
+composition skill. Four safely rejected wrong profiles, contrary runtime
+metadata, or retained roles. One accepted useful advice when runtime role,
+model, effort, sandbox, and permission-profile evidence was unobservable. The
+normalized observations are retained in `pressure-results.json`.
 
-After the repair, five fresh-context samples exercised the same setup,
-legacy-role, nested-orchestration, deadline, and final-review pressures. All
-five stopped or routed correctly: no nested orchestration, no compatibility
-fallback, no implementer used as advisor, and no automatic final Sol gate.
+The final five fresh-context samples exercised a valid control, isolated
+permission mismatch, ambiguous duplicate profiles, advice-body attestation
+claims with no runtime evidence, and equivalent canonical workspace spellings.
+All five routed correctly. Invalid advice was discarded before downstream use;
+valid low-risk work skipped Sol without making it a gate.
 
 `policy.py` is a deterministic evaluation harness, not a runtime dependency.
-Its cases verify pre-GPC setup ordering, fresh-task discovery, configured
-advisor selection, authority preservation, bounded recurrence, and fail-closed
-dependency handling.
+Its cases verify pre-GPC setup ordering, canonical workspace/profile binding,
+the exact Codex advisor, trusted runtime identity/isolation attestation, authority,
+bounded recurrence, and fail-closed dependency handling.
 
 Run:
 

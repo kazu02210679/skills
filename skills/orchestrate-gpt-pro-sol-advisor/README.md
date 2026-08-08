@@ -12,7 +12,9 @@
 
 GPT Pro の初期化より先に Sol Advisor の setup status と preferences を確認します。setup が未完了・旧形式・破損なら Sol の setup だけを行い、そのタスクを終了します。adapter を導入または更新した後は、新しい Codex タスクで再開します。
 
-新しいタスクでは、preferences が示す現在の client 用 advisor role が実際に見えることを確認します。Codex では通常 `sol_advisor_advisor` ですが、保存済み設定と観測結果を正とします。旧互換の Terra / Sol reviewer へ自動フォールバックしません。
+新しいタスクではCodex runtimeから現在のworkspaceをcanonical pathに解決し、preferencesの `client=codex`、`workspace`、`profileKey=codex:<scope>:<workspace>` が一致するprofileを厳密に1件だけ要求します。別client・別workspace・曖昧なprofileは使用しません。併用設定の助言ロールは `sol_advisor_advisor` だけです。旧互換のTerra / Sol reviewerへ自動フォールバックしません。
+
+Solを起動した後、助言を読む・採否判断する前に、信頼できるruntime観測元から実際のrole、model、reasoning effort、sandbox mode、permission profileを確認します。role/model/effort/permissionはbound profileと一致し、sandboxは `read-only` でなければなりません。欠落・曖昧・不正形式・不一致・観測元未確認なら助言本文を下流へ渡さず破棄し、再試行・fallback・GPT Pro続行をせず併用モードを停止します。「編集しない」という自己申告は実行時attestationの代用になりません。
 
 ## 権限境界
 
