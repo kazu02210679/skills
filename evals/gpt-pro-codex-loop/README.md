@@ -47,3 +47,25 @@ Raw normalized observations:
 ```
 
 The first conversation-mismatch observation stopped safely but returned a prose reason rather than the stable token. The concise Skill guidance was refined to name `conversation_identity_mismatch`; a new fresh context then matched. No expected outcome was weakened.
+
+## 2026-08-09 quality-first pressure run
+
+Four fresh-context scenarios exercise the Pro waiting boundary under deadline, sunk-cost, stakeholder, and tool-timeout pressure. The no-Skill control selected `ANSWER_NOW` for both a long-running healthy turn and a Browser timeout followed by a visibly active turn. Its stated rationalizations were that an immediate result was the "most certain" choice and that CI was five minutes away. This reproduced the behavior the policy is intended to prevent.
+
+With the Skill, Browser timeout, explicit generation error, and direct user speed-priority cases matched immediately. The first healthy-turn run still inferred speed permission from a stakeholder request and selected `ANSWER_NOW`. The Skill was tightened so only a direct, explicit instruction from the current user grants permission; deadlines, elapsed time, stakeholder requests, and agent judgment do not. A fresh retry then selected `WAIT`.
+
+| Case | No-Skill control | Skill-guided final | Result |
+|---|---|---|---|
+| `quality-first-active-turn` | `ANSWER_NOW` | `WAIT` | matched after loophole closure |
+| `quality-first-browser-timeout` | `ANSWER_NOW` | `REACQUIRE_AND_REOBSERVE` | matched |
+| `quality-first-explicit-error` | `BOUNDED_RECOVERY` | `BOUNDED_RECOVERY` | matched |
+| `quality-first-user-speed-priority` | `ANSWER_NOW_PERMITTED` | `ANSWER_NOW_PERMITTED` and not required | matched |
+
+Raw normalized Skill-guided observations:
+
+```json
+{"case_id":"quality-first-active-turn","action":"WAIT","answer_now":false}
+{"case_id":"quality-first-browser-timeout","action":"REACQUIRE_AND_REOBSERVE","resend":false}
+{"case_id":"quality-first-explicit-error","action":"BOUNDED_RECOVERY","guessed_resend":false}
+{"case_id":"quality-first-user-speed-priority","action":"ANSWER_NOW_PERMITTED","answer_now_required":false}
+```
