@@ -60,6 +60,8 @@ class HotlCliTests(unittest.TestCase):
         self.authority_snapshot_digest = AUTHORITY
         self.receipt_nonce = NONCE
         self.gpt_binding = dict(GPT_BINDING)
+        self.gpt_repository: Path | None = None
+        self.gpt_task_slug: str | None = None
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -189,16 +191,128 @@ class HotlCliTests(unittest.TestCase):
             receipt["requirements_digest"],
             "sha256:" + hashlib.sha256(requirements_bytes).hexdigest(),
         )
+        self.gpt_repository = gpt_repository
+        self.gpt_task_slug = task_slug
         return receipt, requirements_artifact, receipt_bytes
 
-    def _init_from_gpt_requirements(self) -> dict[str, object]:
+    def _export_authoritative_gpt_review_and_final(
+        self,
+    ) -> tuple[dict[str, object], bytes, dict[str, object], bytes]:
+        self.assertIsNotNone(self.gpt_repository)
+        self.assertIsNotNone(self.gpt_task_slug)
+        repository = self.gpt_repository
+        task_slug = self.gpt_task_slug
+        assert repository is not None
+        assert task_slug is not None
+        (repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        evidence = self.inputs / "gpt-local-evidence.json"
+        evidence.write_text(
+            json.dumps(
+                {
+                    "acceptance_evidence": {"AC-1": ["Focused unittest passed."]},
+                    "changed_file_intents": {
+                        "example.py": "Implement deterministic behavior."
+                    },
+                    "diff_evidence": ["example.py implements AC-1."],
+                    "intent_summary": "Implement AC-1.",
+                    "omissions": [],
+                    "schema_version": 1,
+                    "test_commands": [
+                        {
+                            "command": "python -m unittest test_example.py -v",
+                            "outcome": "PASS",
+                            "output_summary": "1 test passed.",
+                        }
+                    ],
+                    "unresolved_risks_or_blockers": [],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        report = gpt_controller.build_report(repository, task_slug, evidence)
+        attempt = gpt_controller.prepare_review(repository, task_slug)
+        expected = gpt_controller.load_json(Path(attempt["expected_header_path"]))
+        state = gpt_controller.load_json(
+            repository / ".ai-pro-loop" / task_slug / "state.json"
+        )
+        review_response = self.inputs / "gpt-review.raw.md"
+        review_response.write_text(
+            "```json\n"
+            + json.dumps(
+                {
+                    **expected,
+                    "payload": {
+                        "acceptance_results": {
+                            "AC-1": {
+                                "evidence": "Focused unittest passed.",
+                                "status": "PASS",
+                            }
+                        },
+                        "decision": "PASS",
+                        "findings": [],
+                        "next_instruction": "Run final verification.",
+                        "requirements_digest": state["active_requirements_digest"],
+                        "reviewed_snapshot_digest": report["snapshot_digest"],
+                        "schema_version": 1,
+                        "scope_violations": [],
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        gpt_controller.accept_review(
+            repository,
+            task_slug,
+            review_response,
+            str(state["bound_conversation_url"]),
+            "GPT-5.6 Sol",
+            "Pro",
+            "Pro",
+        )
+        review = gpt_controller.export_governance_receipt(
+            repository, task_slug, "review"
+        )
+        run = repository / ".ai-pro-loop" / task_slug
+        review_bytes = (run / "governance-receipt-review.json").read_bytes()
+        self.assertEqual(contract.canonical_json_bytes(review), review_bytes)
+
+        verified = gpt_controller.final_verify(repository, task_slug)
+        self.assertEqual("COMPLETE", verified["phase"])
+        final = gpt_controller.export_governance_receipt(
+            repository, task_slug, "final"
+        )
+        final_bytes = (run / "governance-receipt-final.json").read_bytes()
+        self.assertEqual(contract.canonical_json_bytes(final), final_bytes)
+        self.assertEqual(review["snapshot_digest"], final["snapshot_digest"])
+        return review, review_bytes, final, final_bytes
+
+    def _init_from_gpt_requirements(
+        self,
+        exported: tuple[dict[str, object], dict[str, object], bytes] | None = None,
+        *,
+        active_snapshot_digest: str = SNAPSHOT,
+    ) -> dict[str, object]:
         receipt, requirements_artifact, receipt_bytes = (
-            self._export_frozen_gpt_requirements()
+            exported or self._export_frozen_gpt_requirements()
         )
         self.execution = str(receipt["execution_id"])
         self.authority_snapshot_digest = str(receipt["authority_snapshot_digest"])
         self.receipt_nonce = str(receipt["nonce"])
         self.gpt_binding = dict(receipt["binding"])
+        host_approval_evidence = {
+            "approval_schema_version": 1,
+            "authority_snapshot_digest": self.authority_snapshot_digest,
+            "decision": "approve",
+            "execution_id": self.execution,
+            "host_id": "hotl-e2e-host",
+            "target_digest": receipt["requirements_digest"],
+        }
         requirements = self._write(
             "gpt-requirements.json",
             {
@@ -212,12 +326,14 @@ class HotlCliTests(unittest.TestCase):
         policy = self._write(
             "gpt-policy.json",
             {
-                "active_snapshot_digest": SNAPSHOT,
+                "active_snapshot_digest": active_snapshot_digest,
                 "approval_mode": "agentic",
                 "authority_snapshot_digest": self.authority_snapshot_digest,
                 "cycle_id": 1,
                 "execution_id": self.execution,
-                "host_approval_evidence_digest": None,
+                "host_approval_evidence_digest": contract.canonical_digest(
+                    host_approval_evidence
+                ),
                 "receipt_nonce": self.receipt_nonce,
                 "schema_version": 1,
             },
@@ -238,6 +354,47 @@ class HotlCliTests(unittest.TestCase):
         self.assertTrue(initialized["ok"], initialized)
         receipt_path = self.inputs / "gpt-requirements-receipt.json"
         receipt_path.write_bytes(receipt_bytes)
+        paths = store.resolve_run(self.repository, self.execution)
+        events = store.load_events(paths)
+        privileged_attempt = self._write(
+            "generic-receipt-attempt.json",
+            {
+                "artifact_refs": [],
+                "event_id": "EVT-00000000E2E0",
+                "execution_id": self.execution,
+                "input_digest": "sha256:" + hashlib.sha256(receipt_bytes).hexdigest(),
+                "issuer": {
+                    "id": "gpt-pro-codex-loop",
+                    "kind": "skill",
+                    "version": "1",
+                },
+                "output_digest": str(receipt["output_digest"]),
+                "payload": {"receipt_id": receipt["receipt_id"]},
+                "previous_event_hash": contract.canonical_digest(events[-1]),
+                "result": "pass",
+                "schema_version": 1,
+                "sequence": len(events) + 1,
+                "subject_ids": [receipt["receipt_id"]],
+                "timestamp": "2026-08-09T00:00:00Z",
+                "type": "receipt_imported",
+            },
+        )
+        rejected_generic = cli.main_json(
+            [
+                "record",
+                "--repo",
+                str(self.repository),
+                "--execution",
+                self.execution,
+                "--event",
+                str(privileged_attempt),
+            ]
+        )
+        self.assertFalse(rejected_generic["ok"], rejected_generic)
+        self.assertEqual(
+            "PRIVILEGED_EVENT_REQUIRES_RECEIPT",
+            rejected_generic["error"]["code"],
+        )
         imported = cli.main_json(
             [
                 "import-receipt",
@@ -250,6 +407,7 @@ class HotlCliTests(unittest.TestCase):
             ]
         )
         self.assertTrue(imported["ok"], imported)
+        self.host_approval_evidence = host_approval_evidence
         return receipt
 
     def _init(
@@ -555,38 +713,55 @@ class HotlCliTests(unittest.TestCase):
             "nodes": sorted(nodes, key=lambda node: str(node["node_id"])),
         }
 
-    @staticmethod
-    def _accepted_review_claims(
-        *, evidence_id: str = "EVID-1", review_id: str = "REV-1"
-    ) -> dict[str, object]:
+    def _host_approval_receipt(self) -> dict[str, object]:
+        projection = self._projection()
+        evidence = self.host_approval_evidence
         return {
-            "edges": [
-                {
-                    "edge": "supports",
-                    "source_id": evidence_id,
-                    "target_id": review_id,
-                },
-                {
-                    "edge": "reviews",
-                    "source_id": review_id,
-                    "target_id": "REQ-1",
-                },
-            ],
-            "findings": [],
-            "review_id": review_id,
-            "root_cause_ids": [],
-            "status": "accepted",
+            "authority_snapshot_digest": self.authority_snapshot_digest,
+            "claims": {"approval_evidence": evidence},
+            "cycle_id": None,
+            "evidence_set_digest": None,
+            "execution_id": self.execution,
+            "input_digest": projection["requirements_digest"],
+            "issued_at_unix": 1,
+            "issuer_skill": "hotl-host-approval",
+            "issuer_version": "1",
+            "nonce": self.receipt_nonce,
+            "output_digest": contract.canonical_digest(evidence),
+            "receipt_id": "RCP-HOST-E2E",
+            "receipt_schema_version": 1,
+            "receipt_type": "approval",
+            "requirements_digest": projection["requirements_digest"],
+            "snapshot_digest": None,
+            "transaction_id": "TXN-HOST-E2E",
         }
 
-    def _begin_real_cross_adapter_chain(self) -> dict[str, object]:
-        requirements_receipt = self._init_from_gpt_requirements()
+    def _begin_real_cross_adapter_chain(
+        self,
+        exported: tuple[dict[str, object], dict[str, object], bytes] | None = None,
+        *,
+        active_snapshot_digest: str = SNAPSHOT,
+    ) -> dict[str, object]:
+        requirements_receipt = self._init_from_gpt_requirements(
+            exported, active_snapshot_digest=active_snapshot_digest
+        )
         self.assertEqual("requirements", requirements_receipt["receipt_type"])
         self.assertIsNone(requirements_receipt["snapshot_digest"])
         self.assertIsNone(requirements_receipt["evidence_set_digest"])
         self.assertIsNone(requirements_receipt["cycle_id"])
-        approval = self._import(
-            self._receipt("approval", "RCP-E2E-APPROVAL"),
-            "e2e-approval.json",
+        approval_path = self._write(
+            "e2e-host-approval.json", self._host_approval_receipt()
+        )
+        approval = cli.main_json(
+            [
+                "approve",
+                "--repo",
+                str(self.repository),
+                "--execution",
+                self.execution,
+                "--evidence",
+                str(approval_path),
+            ]
         )
         self.assertTrue(approval["ok"], approval)
         gate_one = self._evaluate("G1")
@@ -603,6 +778,69 @@ class HotlCliTests(unittest.TestCase):
         gate_two = self._evaluate("G2")
         self.assertTrue(gate_two["ok"], gate_two)
         return requirements_receipt
+
+    def _import_receipt_bytes(
+        self, raw: bytes, name: str
+    ) -> dict[str, object]:
+        source = contract.strict_json_loads(raw.decode("utf-8"))
+        self.assertIsInstance(source, dict)
+        self.assertEqual(contract.canonical_json_bytes(source), raw)
+        path = self.inputs / name
+        path.write_bytes(raw)
+        imported = cli.main_json(
+            [
+                "import-receipt",
+                "--repo",
+                str(self.repository),
+                "--execution",
+                self.execution,
+                "--receipt",
+                str(path),
+            ]
+        )
+        self.assertTrue(imported["ok"], imported)
+        record = self._projection()["receipt_records"][source["receipt_id"]]
+        stored = (
+            store.resolve_run(self.repository, self.execution).evidence
+            / str(record["receipt_digest"])[7:]
+        ).read_bytes()
+        self.assertEqual(raw, stored)
+        return source
+
+    def _import_authoritative_gpt_review_and_final(
+        self,
+        bundle: tuple[dict[str, object], bytes, dict[str, object], bytes],
+        *,
+        evidence_id: str,
+    ) -> None:
+        review, review_bytes, final, final_bytes = bundle
+        imported_review = self._import_receipt_bytes(
+            review_bytes, f"{evidence_id.lower()}-gpt-review.json"
+        )
+        self.assertEqual(review, imported_review)
+        review_id = imported_review["claims"]["review_id"]
+        support = self._import(
+            self._receipt(
+                "implementation",
+                f"RCP-E2E-SUPPORT-{evidence_id}",
+                claims={
+                    "edges": [
+                        {
+                            "edge": "supports",
+                            "source_id": evidence_id,
+                            "target_id": review_id,
+                        }
+                    ],
+                    "nodes": [],
+                },
+            ),
+            f"{evidence_id.lower()}-review-support.json",
+        )
+        self.assertTrue(support["ok"], support)
+        imported_final = self._import_receipt_bytes(
+            final_bytes, f"{evidence_id.lower()}-gpt-final.json"
+        )
+        self.assertEqual(final, imported_final)
 
     def _record_current_verification(
         self,
@@ -629,6 +867,38 @@ class HotlCliTests(unittest.TestCase):
             f"{evidence_id.lower()}-verification.json",
         )
         self.assertTrue(verification["ok"], verification)
+
+    def _imported_source_receipts(self) -> list[dict[str, object]]:
+        paths = store.resolve_run(self.repository, self.execution)
+        projection = self._projection()
+        sources: list[dict[str, object]] = []
+        for record in projection["receipt_records"].values():
+            digest = record["receipt_digest"]
+            source = contract.strict_json_loads(
+                (paths.evidence / str(digest)[7:]).read_text(encoding="utf-8")
+            )
+            self.assertIsInstance(source, dict)
+            sources.append(source)
+        return sources
+
+    def _assert_authoritative_privileged_ingress(self) -> None:
+        sources = self._imported_source_receipts()
+        approval = next(
+            source for source in sources if source["receipt_type"] == "approval"
+        )
+        review = next(
+            source
+            for source in sources
+            if source["receipt_type"] == "semantic_review"
+        )
+        final = next(source for source in sources if source["receipt_type"] == "final")
+        self.assertEqual("hotl-host-approval", approval["issuer_skill"])
+        self.assertEqual(
+            "gpc-loop-hotl-e2e:review-01", review["transaction_id"]
+        )
+        self.assertEqual(
+            "gpc-loop-hotl-e2e:final-verify-01", final["transaction_id"]
+        )
 
     def test_stable_command_set_and_parser_errors_never_raise_system_exit(self) -> None:
         self.assertEqual(
@@ -1386,24 +1656,19 @@ class HotlCliTests(unittest.TestCase):
     def test_real_gpt_requirements_receipt_completes_and_replays_byte_identically(
         self,
     ) -> None:
-        self._begin_real_cross_adapter_chain()
+        exported = self._export_frozen_gpt_requirements()
+        authoritative = self._export_authoritative_gpt_review_and_final()
+        self._begin_real_cross_adapter_chain(
+            exported,
+            active_snapshot_digest=str(authoritative[0]["snapshot_digest"]),
+        )
         self._record_current_verification()
         gate_three = self._evaluate("G3")
         self.assertTrue(gate_three["ok"], gate_three)
 
-        review = self._import(
-            self._receipt(
-                "semantic_review",
-                "RCP-E2E-REVIEW",
-                claims=self._accepted_review_claims(),
-            ),
-            "e2e-review.json",
+        self._import_authoritative_gpt_review_and_final(
+            authoritative, evidence_id="EVID-1"
         )
-        self.assertTrue(review["ok"], review)
-        final = self._import(
-            self._receipt("final", "RCP-E2E-FINAL"), "e2e-final.json"
-        )
-        self.assertTrue(final["ok"], final)
         gate_four = self._evaluate("G4")
         self.assertTrue(gate_four["ok"], gate_four)
         self.assertEqual("COMPLETE", gate_four["result"]["state"])
@@ -1421,16 +1686,19 @@ class HotlCliTests(unittest.TestCase):
             contract.canonical_json_bytes(first),
             contract.canonical_json_bytes(second),
         )
+        self._assert_authoritative_privileged_ingress()
 
     def test_snapshot_change_closes_g4_until_replacement_evidence_and_review(
         self,
     ) -> None:
-        self._begin_real_cross_adapter_chain()
+        exported = self._export_frozen_gpt_requirements()
+        self._begin_real_cross_adapter_chain(exported)
         self._record_current_verification()
         gate_three = self._evaluate("G3")
         self.assertTrue(gate_three["ok"], gate_three)
 
-        replacement_snapshot = "sha256:" + "e" * 64
+        authoritative = self._export_authoritative_gpt_review_and_final()
+        replacement_snapshot = str(authoritative[0]["snapshot_digest"])
         controller.activate_snapshot(
             self.repository, self.execution, replacement_snapshot
         )
@@ -1464,25 +1732,13 @@ class HotlCliTests(unittest.TestCase):
         self.assertFalse(closed_without_review["ok"], closed_without_review)
         self.assertEqual("GATE_FAILED", closed_without_review["error"]["code"])
 
-        replacement_review = self._import(
-            self._receipt(
-                "semantic_review",
-                "RCP-E2E-REPLACEMENT-REVIEW",
-                claims=self._accepted_review_claims(
-                    evidence_id="EVID-2", review_id="REV-2"
-                ),
-            ),
-            "e2e-replacement-review.json",
+        self._import_authoritative_gpt_review_and_final(
+            authoritative, evidence_id="EVID-2"
         )
-        self.assertTrue(replacement_review["ok"], replacement_review)
-        replacement_final = self._import(
-            self._receipt("final", "RCP-E2E-REPLACEMENT-FINAL"),
-            "e2e-replacement-final.json",
-        )
-        self.assertTrue(replacement_final["ok"], replacement_final)
         completed = self._evaluate("G4")
         self.assertTrue(completed["ok"], completed)
         self.assertEqual("COMPLETE", completed["result"]["state"])
+        self._assert_authoritative_privileged_ingress()
 
     def test_stale_receipt_is_rejected_after_snapshot_change(self) -> None:
         self._init()
