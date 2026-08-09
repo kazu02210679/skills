@@ -292,6 +292,21 @@ class EnvelopeValidationTests(unittest.TestCase):
                 1,
             )
 
+    def test_event_enum_fields_reject_unhashable_values_as_contract_errors(self) -> None:
+        for event_type, field, malformed in (
+            ("review_recorded", "status", []),
+            ("finding_recorded", "status", {}),
+            ("transition_committed", "gate", []),
+            ("transition_committed", "from_state", {}),
+            ("transition_committed", "to_state", []),
+        ):
+            with self.subTest(event_type=event_type, field=field):
+                event = event_for(event_type)
+                payload = dict(event["payload"])
+                payload[field] = malformed
+                with self.assertRaises(contract.ContractError):
+                    contract.validate_event(event | {"payload": payload}, None, 1)
+
     def test_receipt_is_closed_and_bound_to_issuer_execution_and_authority(self) -> None:
         receipt = valid_receipt()
         self.assertEqual(

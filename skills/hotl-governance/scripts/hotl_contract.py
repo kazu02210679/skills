@@ -288,6 +288,13 @@ def _require_nonnegative_integer(value: object, label: str) -> int:
     return value
 
 
+def _require_enum(value: object, allowed: frozenset[str], label: str) -> str:
+    result = _require_string(value, label)
+    if result not in allowed:
+        raise ContractError("INVALID_VALUE", f"{label} is not an allowed value.")
+    return result
+
+
 def _node_type_for_id(value: object, label: str) -> str:
     node_id = _require_string(value, label)
     if not NODE_ID.fullmatch(node_id):
@@ -402,9 +409,9 @@ def _validate_event_contract(event: dict[str, object]) -> None:
         )
         if _node_type_for_id(payload["review_id"], "review_id") != "review":
             raise ContractError("NODE_TYPE_MISMATCH", "review_id must use the REV- prefix.")
-        status = payload["status"]
-        if status not in {"accepted", "rejected"}:
-            raise ContractError("INVALID_REVIEW_STATUS", "Review status must be accepted or rejected.")
+        status = _require_enum(
+            payload["status"], frozenset({"accepted", "rejected"}), "review status"
+        )
         _require_digest(payload["evidence_set_digest"], "evidence_set_digest")
         _require_nonnegative_integer(payload["cycle_id"], "cycle_id")
         _require_subjects(event["subject_ids"], [payload["review_id"]])
@@ -423,9 +430,9 @@ def _validate_event_contract(event: dict[str, object]) -> None:
                 raise ContractError("INVALID_FINDING_ID", f"{field} is not a stable identifier.")
         if _node_type_for_id(payload["review_id"], "review_id") != "review":
             raise ContractError("NODE_TYPE_MISMATCH", "review_id must use the REV- prefix.")
-        status = payload["status"]
-        if status not in {"open", "resolved"}:
-            raise ContractError("INVALID_FINDING_STATUS", "Finding status must be open or resolved.")
+        status = _require_enum(
+            payload["status"], frozenset({"open", "resolved"}), "finding status"
+        )
         _require_subjects(event["subject_ids"], [payload["review_id"]])
         _require_event_issuer(event, "skill")
         _require_event_result(event, "fail" if status == "open" else "pass")
@@ -450,11 +457,10 @@ def _validate_event_contract(event: dict[str, object]) -> None:
         frozenset({"gate", "from_state", "to_state", "evidence_set_digest", "cycle_id"}),
         event_type,
     )
-    if payload["gate"] not in {"G1", "G2", "G3", "G4"}:
-        raise ContractError("INVALID_GATE", "Transition gate must be G1 through G4.")
-    if payload["from_state"] not in STATES or payload["to_state"] not in STATES:
-        raise ContractError("INVALID_STATE", "Transition states must be known controller states.")
-    if payload["from_state"] == payload["to_state"]:
+    gate = _require_enum(payload["gate"], frozenset({"G1", "G2", "G3", "G4"}), "transition gate")
+    from_state = _require_enum(payload["from_state"], STATES, "transition from_state")
+    to_state = _require_enum(payload["to_state"], STATES, "transition to_state")
+    if from_state == to_state:
         raise ContractError("INVALID_STATE", "Transition states must differ.")
     _require_digest(payload["evidence_set_digest"], "evidence_set_digest")
     _require_nonnegative_integer(payload["cycle_id"], "cycle_id")
