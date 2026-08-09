@@ -21,6 +21,7 @@ RUNTIME_FIELDS = {
 PROFILE_SCOPES = {"project", "user"}
 PUBLIC_RUNTIME_SOURCE = "public-native-details"
 INSPECTOR_RUNTIME_SOURCE = "local-runtime-inspector"
+HOST_COMPLETION_SOURCES = {"native-result", "native-wait", "native-details"}
 INSPECTOR_OUTPUT_FIELDS = {
     "thread_id",
     "parent_thread_id",
@@ -236,6 +237,7 @@ def _runtime_attestation(
     scenario: dict[str, Any],
     advisor_role: str,
     trusted_catalog: dict[str, Any] | None,
+    trusted_host: dict[str, Any] | None,
 ) -> dict[str, Any]:
     public = _observation_map(
         scenario.get("public_runtime_observations"), allow_partial=True
@@ -259,6 +261,14 @@ def _runtime_attestation(
         or public_thread_id != advisor_thread_id
     ):
         return _runtime_failure(scenario, "advisor-attestation-thread-mismatch")
+
+    completion = trusted_host if isinstance(trusted_host, dict) else {}
+    if (
+        completion.get("advisor_thread_id") != advisor_thread_id
+        or completion.get("terminal_state") != "completed"
+        or completion.get("source") not in HOST_COMPLETION_SOURCES
+    ):
+        return _runtime_failure(scenario, "advisor-completion-unavailable")
 
     missing = set(RUNTIME_FIELDS) - set(public)
     observed = dict(public)
@@ -336,6 +346,11 @@ def _runtime_attestation(
         "runtime_observation_trusted": True,
         "advisor_thread_id": advisor_thread_id,
         "public_runtime_thread_id": public_thread_id,
+        "advisor_completion": {
+            "thread_id": advisor_thread_id,
+            "terminal_state": "completed",
+            "source": completion["source"],
+        },
         "runtime_inspector": (
             None
             if not missing
@@ -343,7 +358,7 @@ def _runtime_attestation(
                 "script": _official_inspector_path(scenario, trusted_catalog),
                 "thread_id": inspector_thread_id,
                 "rollout_count": 1,
-                "status": "complete",
+                "inspection_status": "success",
                 "exit_code": 0,
             }
         ),
@@ -359,6 +374,7 @@ def route(
     scenario: dict[str, Any],
     *,
     trusted_catalog: dict[str, Any] | None = None,
+    trusted_host: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     intent = scenario["intent"]
     if intent == "gpt-pro-only":
@@ -439,7 +455,9 @@ def route(
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
         if failure := _advisor_invocation_failure(scenario):
             return failure
-        attestation = _runtime_attestation(scenario, advisor_role, trusted_catalog)
+        attestation = _runtime_attestation(
+            scenario, advisor_role, trusted_catalog, trusted_host
+        )
         if "terminal" in attestation:
             return attestation
         disposition = evaluate_advice(scenario["sol_response"])
@@ -447,7 +465,9 @@ def route(
     if scenario.get("recursive") or scenario.get("duplicate") or scenario.get("advisor_reentry"):
         if failure := _advisor_invocation_failure(scenario):
             return failure
-        attestation = _runtime_attestation(scenario, advisor_role, trusted_catalog)
+        attestation = _runtime_attestation(
+            scenario, advisor_role, trusted_catalog, trusted_host
+        )
         if "terminal" in attestation:
             return attestation
         disposition = evaluate_advice(scenario.get("sol_response", {"requests_outer_restart": True}))
@@ -467,7 +487,9 @@ def route(
         return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
     if failure := _advisor_invocation_failure(scenario):
         return failure
-    attestation = _runtime_attestation(scenario, advisor_role, trusted_catalog)
+    attestation = _runtime_attestation(
+        scenario, advisor_role, trusted_catalog, trusted_host
+    )
     if "terminal" in attestation:
         return attestation
     return {

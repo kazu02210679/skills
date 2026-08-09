@@ -14,8 +14,6 @@ Use only in explicit combined mode; other modes remain standalone.
 
 ## Preflight
 
-Clarify ambiguity.
-
 Before GPT Pro `inspect-init` or `init`:
 
 1. Call `get_setup_status`. Invalid setup runs `sol-advisor:setup` alone
@@ -55,8 +53,8 @@ After spawn, bind the public-details query/returned thread ID to the spawned
 advisor ID and require `sol_advisor_advisor`. For omitted non-role fields,
 use only the inspector derived from the exact trusted-catalog `SKILL.md` passed
 outside advisor/scenario data; origin must match. Reject other versions/roots.
-Trust exit 0 + exact 10-field JSON; derive rollout/completion. Any identity,
-path, output, or overlap failure stops.
+`Exit 0` + exact JSON proves inspector success/one rollout, not completion.
+Require same-thread host result/wait/details proving completion; otherwise stop.
 
 Record each field as `public-native-details` or `local-runtime-inspector`.
 Only these paths are trusted; self-claims, Booleans, manifests, and requested
