@@ -1,6 +1,6 @@
 # Agent Engineering Skills
 
-This repository is the canonical catalog for twelve independent reusable Skills.
+This repository is the canonical catalog for thirteen independent reusable Skills.
 The catalog is generated from each Skill's frontmatter; regenerate it with
 `python scripts/generate-skill-catalog.py` after changing a description.
 
