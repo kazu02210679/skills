@@ -1,5 +1,16 @@
 # GPT Pro + Sol Advisor composition
 
+## Governance receipts
+
+The production issuer records either a bound `consultation` receipt after
+trusted runtime attestation and Codex disposition, or a `no-consultation`
+receipt with one closed reason. Combined-mode setup, invocation, and
+attestation failures remain hard stops and produce no receipt.
+
+A receipt is audit evidence only. It is not Sol approval, final review,
+completion, or permission to mutate files, commit, push, deploy, or skip
+verification.
+
 `gpt-pro-codex-loop` と Sol Advisor を、それぞれ単独利用できる状態を保ちながら明示的に併用するためのルーティング Skill です。
 
 ## 3つのモード

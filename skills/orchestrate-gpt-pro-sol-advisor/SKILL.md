@@ -67,6 +67,27 @@ Record mode, question, role, calls, exact trusted observations, advice,
 disposition, rationale, stop condition, and next step. Use `accept`, `reject`,
 or `partially accept`.
 
+## Governance receipt
+
+After routing and Codex disposition, normalize the outcome with the production
+issuer at `scripts/governance_receipt.py`. A `consultation` receipt is valid
+only for advice already admitted by `route()`, after explicit invocation
+success and trusted runtime attestation. It binds the execution and invocation,
+nonce, input/output/authority digests, the actual advisor role/model/effort,
+the exact opaque permission observation, the `read-only` sandbox, and Codex's
+closed `accept`, `reject`, or `partially accept` disposition. Free-text
+rationale is not an authority or routing input.
+
+When no consultation occurred, record only a closed `no-consultation` reason:
+`NOT_APPLICABLE`, `NO_MATERIAL_UNCERTAINTY`, `POLICY_NOT_REQUIRED`, or
+`ADVISOR_UNAVAILABLE`. The unavailable reason requires an explicit standalone
+policy in which advisor availability is not a runtime dependency. In combined
+mode, preflight, invocation, and attestation failures remain hard stops and
+emit no receipt; never normalize or downgrade them as no consultation.
+
+The receipt is audit output. It is not Sol approval, final review, completion,
+or permission to edit, mutate, commit, push, deploy, or bypass verification.
+
 ## Return to GPT Pro
 
 After an accepted change, Codex inspects the diff, reruns local verification,

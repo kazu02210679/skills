@@ -4,7 +4,28 @@ from __future__ import annotations
 
 import os
 import posixpath
+import importlib.util
+from pathlib import Path
 from typing import Any
+
+
+RECEIPT_ISSUER_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "skills"
+    / "orchestrate-gpt-pro-sol-advisor"
+    / "scripts"
+    / "governance_receipt.py"
+)
+_RECEIPT_SPEC = importlib.util.spec_from_file_location(
+    "sol_governance_receipt", RECEIPT_ISSUER_PATH
+)
+if _RECEIPT_SPEC is None or _RECEIPT_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load {RECEIPT_ISSUER_PATH}")
+RECEIPT_ISSUER = importlib.util.module_from_spec(_RECEIPT_SPEC)
+_RECEIPT_SPEC.loader.exec_module(RECEIPT_ISSUER)
+ReceiptError = RECEIPT_ISSUER.ReceiptError
+NO_CONSULTATION_REASONS = RECEIPT_ISSUER.NO_CONSULTATION_REASONS
+governance_receipt = RECEIPT_ISSUER.governance_receipt
 
 
 SETUP_FAILURES = {"missing", "schema-old", "corrupt"}
