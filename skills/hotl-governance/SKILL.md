@@ -25,8 +25,8 @@ Use the following sequence. Before every state-changing operation, run `status`;
 3. **Record implementation.** Produce an implementation receipt with a change manifest, requirement-to-code links, worker report, base snapshot identity, and bound input/output digests. Evaluate G2.
 4. **Collect local evidence.** Run the exact verification commands, preserve their exit status, output artifacts, SHA-256 hashes, test-to-requirement links, and repository snapshot digest. Evaluate G3 only against current-cycle evidence.
 5. **Import semantic receipt.** Import the closed-schema GPT Pro review receipt; in combined mode also import the required Sol advice/disposition receipt, or the policy-allowed no-consultation event. Do not compare free-text findings: use stable `finding_id` and `root_cause_id` values.
-6. **Evaluate gates.** Let `evaluate` append the only state-changing `transition_committed` event when the complete gate predicate passes. Missing, mismatched, stale, malformed, or replayed evidence cannot advance the execution.
-7. **Final verify.** When an outer `gpt-pro-codex-loop` protocol is bound, import its final governance receipt and run its `final-verify` before G4 can complete. Verify the log, witness, projection, and artifact integrity after terminal completion.
+6. **Evaluate gates G1-G3.** Let `evaluate` append the only state-changing `transition_committed` event when the complete gate predicate passes. Missing, mismatched, stale, malformed, or replayed evidence cannot advance the execution.
+7. **Final verify and evaluate G4.** When an outer `gpt-pro-codex-loop` protocol is bound, first run its `final-verify`, then export its final governance receipt, import that receipt into HOTL, and evaluate G4. After `COMPLETE`, verify the log, witness, projection, and artifact integrity.
 8. **Start a successor when required.** A material frozen-artifact change, an escalation, or `RECOVERY_REQUIRED` terminates the same execution. Preserve evidence and initialize a successor with the predecessor execution ID, lineage receipt digest, and explicit supersession relation.
 
 ## Authority and hard stops

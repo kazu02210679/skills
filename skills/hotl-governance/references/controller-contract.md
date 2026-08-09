@@ -14,6 +14,23 @@ INIT | REQUIREMENTS | IMPLEMENT | LOCAL_VERIFY | SEMANTIC_REVIEW
 
 `COMPLETE`, `ESCALATED`, `RECOVERY_REQUIRED`, and `STOPPED` are terminal for the same execution. An unlisted transition is rejected. A material change to scope, policy, authority snapshot, or frozen requirements is not an in-place edit: terminate the execution and create a successor that records `predecessor_execution_id`, `lineage_receipt_digest`, and an explicit `supersedes` relation.
 
+## Transition table
+
+| From | Condition | To |
+| --- | --- | --- |
+| none | valid `init` input, policy snapshot, and execution identity | `INIT` |
+| `INIT` | initial artifact publication succeeds | `REQUIREMENTS` |
+| `REQUIREMENTS` | G1 `requirements_frozen` | `IMPLEMENT` |
+| `IMPLEMENT` | G2 `implementation_recorded` | `LOCAL_VERIFY` |
+| `LOCAL_VERIFY` | G3 `local_verified` | `SEMANTIC_REVIEW` |
+| `SEMANTIC_REVIEW` | correctable findings within the retry budget | `IMPLEMENT` |
+| `SEMANTIC_REVIEW` | G4 `semantically_accepted` | `COMPLETE` |
+| mutable state | escalation condition | `ESCALATED` |
+| mutable state | transaction or integrity ambiguity | `RECOVERY_REQUIRED` |
+| mutable state | trusted operator explicitly stops | `STOPPED` |
+
+Reject every transition not listed in this table.
+
 ## Gate table
 
 | Gate | From | Required predicate | To |
@@ -51,10 +68,17 @@ The projection accepts only these completion-relevant triples:
 | evidence | proves | test |
 | evidence | supports | review |
 | review | reviews | requirement |
-| code or test | included_in | change |
+| code | included_in | change |
+| test | included_in | change |
 | failure | violates | requirement |
 | change | fixes | failure |
-| requirement, review, change, or evidence | derived_from or supersedes | same typed lineage target |
+| evidence | derived_from | evidence |
+| review | derived_from | review |
+| change | derived_from | change |
+| requirement | supersedes | requirement |
+| policy | supersedes | policy |
+
+Reject every triple not listed in this table. `derived_from` is audit lineage and does not satisfy completion coverage on its own.
 
 Node IDs are execution-local and typed (`REQ-`, `CODE-`, `TEST-`, `CMD-`, `EVID-`, `REV-`, `CHG-`, `FAIL-`, and `POL-`). Unknown types, invalid IDs, or unsupported edges are rejected.
 
@@ -62,7 +86,7 @@ Node IDs are execution-local and typed (`REQ-`, `CODE-`, `TEST-`, `CMD-`, `EVID-
 
 For every active requirement, require an active code node that implements it, an active test node that verifies it, and a command that executes the test and produces valid current evidence proving it. Require an accepted review that reviews the requirement and is bound to the current evidence set. Require the active code and test to be included in an active change.
 
-For a bound outer protocol, also require its imported final governance receipt and successful `final-verify`. G4 may commit only when all active requirements meet this predicate and no unresolved findings remain.
+For a bound outer protocol, run the GPT Pro controller's `final-verify`, export its final governance receipt, import that receipt into HOTL, and only then evaluate G4. G4 may commit only when all active requirements meet this predicate and no unresolved findings remain. After `COMPLETE`, run `verify-log` to revalidate the event chain, witness, projection, and artifact integrity.
 
 ## Evidence lifecycle
 
