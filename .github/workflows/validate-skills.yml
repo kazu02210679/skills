@@ -22,6 +22,15 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - run: python -m unittest discover -s evals/review-implementation-html -p "test_*.py" -v
 
+  orchestrate-gpt-pro-sol-advisor-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest evals/orchestrate-gpt-pro-sol-advisor/test_contract.py -v
+
   gpt-pro-loop-evals:
     name: gpt-pro-loop-evals (${{ matrix.name }})
     strategy:
