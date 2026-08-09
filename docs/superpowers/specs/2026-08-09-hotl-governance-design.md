@@ -335,6 +335,8 @@ hash chain が検出するのは accidental corruption、partial modification、
 
 event と receipt、command output などの immutable evidence artifact は `.hotl/evidence/<sha256>` に content-addressed で保存する。mutable repository file の過去 digest は historical observation であり、現在の file digest と一致し続ける必要はない。
 
+`.hotl/` は予約済み controller metadata root とする。tracked または staged されている場合は hygiene gate を失敗させる。GPT Pro snapshot adapter は、予約状態と hygiene を検証した後だけ `.hotl/` を product snapshot から除外し、governance metadata による snapshot の自己汚染を防ぐ。
+
 code、test、または active snapshot が変わった場合、`evidence_invalidated` event により関連 evidence の projection status を `historically_valid` へ移す。削除せず監査履歴に残すが、G3/G4 の current coverage には数えない。再検証で新しい `valid_current` evidence を生成する。
 
 `verify-log` は次を別々に報告する。
