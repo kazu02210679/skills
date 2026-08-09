@@ -72,11 +72,19 @@ or `partially accept`.
 After routing and Codex disposition, normalize the outcome with the production
 issuer at `scripts/governance_receipt.py`. A `consultation` receipt is valid
 only for advice already admitted by `route()`, after explicit invocation
-success and trusted runtime attestation. It binds the execution and invocation,
-nonce, input/output/authority digests, the actual advisor role/model/effort,
-the exact opaque permission observation, the `read-only` sandbox, and Codex's
-closed `accept`, `reject`, or `partially accept` disposition. Free-text
-rationale is not an authority or routing input.
+success and trusted runtime attestation. The route binds the exact canonical
+scenario with the domain-separated v1 `scenario_digest`; the issuer requires
+that binding and all execution/invocation identity fields. The receipt binds
+the scenario digest, execution and invocation, nonce, input/output/authority
+digests, the actual advisor role/model/effort, the exact opaque permission
+observation, the `read-only` sandbox, and Codex's closed `accept`, `reject`, or
+`partially accept` disposition. Free-text rationale is not an authority or
+routing input.
+
+`issued_at_unix=0` is the sentinel for no authoritative issuance timestamp
+supplied. It means issuance time is unknown and non-authoritative, including
+when zero was supplied explicitly. Never use this sentinel or any issuance
+timestamp for routing, authority, freshness, or transition decisions.
 
 When no consultation occurred, record only a closed `no-consultation` reason:
 `NOT_APPLICABLE`, `NO_MATERIAL_UNCERTAINTY`, `POLICY_NOT_REQUIRED`, or

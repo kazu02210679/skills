@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import posixpath
-import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -163,12 +163,14 @@ def _runtime_attestation(scenario: dict[str, Any], advisor_role: str) -> dict[st
     return None
 
 
-def route(scenario: dict[str, Any]) -> dict[str, Any]:
+def _route_unbound(scenario: dict[str, Any]) -> dict[str, Any]:
     intent = scenario["intent"]
     if intent == "gpt-pro-only":
         return {"selected_mode": intent, "gpt_pro_calls": 1, "sol_calls": 0, "terminal": "continue-outer-loop"}
     if intent == "sol-only":
         return {"selected_mode": intent, "gpt_pro_calls": 0, "sol_calls": 1, "terminal": "continue-sol-standalone"}
+    if intent == "standalone":
+        return {"selected_mode": intent, "gpt_pro_calls": 0, "sol_calls": 0, "terminal": "continue-codex-standalone"}
     if intent != "combined":
         return {"selected_mode": "unselected", "composition_active": False, "sol_calls": 0, "terminal": "clarify"}
 
@@ -176,9 +178,9 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
         return _failure("forbidden-nested-orchestration", "nested-orchestration")
 
     setup_status = scenario.get("setup_status", "unavailable")
-    if setup_status in SETUP_FAILURES:
+    if isinstance(setup_status, str) and setup_status in SETUP_FAILURES:
         return _failure("setup-required-before-gpc", "sol-setup")
-    if setup_status != "ready":
+    if not isinstance(setup_status, str) or setup_status != "ready":
         return _failure("setup-status-unavailable", "sol-setup-status")
     if scenario.get("setup_changed_this_task"):
         return _failure("fresh-task-required", "native-role-discovery")
@@ -288,6 +290,19 @@ def route(scenario: dict[str, Any]) -> dict[str, Any]:
         **preserved,
         "terminal": "primary-disposition",
     }
+
+
+def route(scenario: dict[str, Any]) -> dict[str, Any]:
+    """Route once, then bind the closed result to the exact canonical scenario."""
+    if not isinstance(scenario, dict):
+        raise ReceiptError("Scenario must be an object.")
+    routed = _route_unbound(scenario)
+    routed["scenario_digest"] = RECEIPT_ISSUER.scenario_digest(scenario)
+    routed.setdefault("advice_admitted", 0)
+    for field in RECEIPT_ISSUER.ROUTE_IDENTITY_FIELDS:
+        if field in scenario:
+            routed[field] = scenario[field]
+    return routed
 
 
 def bounded_packet(context: dict[str, Any]) -> dict[str, Any]:

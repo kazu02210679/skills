@@ -5,7 +5,14 @@
 The production issuer records either a bound `consultation` receipt after
 trusted runtime attestation and Codex disposition, or a `no-consultation`
 receipt with one closed reason. Combined-mode setup, invocation, and
-attestation failures remain hard stops and produce no receipt.
+attestation failures remain hard stops and produce no receipt. Each receipt
+requires the route's domain-separated v1 digest of the exact canonical
+scenario and the complete execution/invocation identity binding.
+
+`issued_at_unix=0` means no authoritative issuance timestamp was supplied.
+Zero is always an unknown-time, non-authoritative sentinel, even when supplied
+explicitly; it never participates in routing, authority, freshness, or
+transition decisions.
 
 A receipt is audit evidence only. It is not Sol approval, final review,
 completion, or permission to mutate files, commit, push, deploy, or skip

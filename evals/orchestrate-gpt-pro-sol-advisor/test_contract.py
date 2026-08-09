@@ -31,6 +31,7 @@ RECEIPT_FIELDS = {
     "receipt_id",
     "receipt_schema_version",
     "receipt_type",
+    "scenario_digest",
 }
 CONSULTATION_BINDING_FIELDS = {
     "advice_admitted",
@@ -674,6 +675,23 @@ class CompositionContractTests(unittest.TestCase):
             POLICY.RECEIPT_ISSUER.governance_receipt,
         )
 
+    def test_route_binds_the_exact_domain_separated_scenario_digest(self) -> None:
+        scenario = {"intent": "standalone"}
+        routed = POLICY.route(scenario)
+
+        self.assertEqual(
+            "sha256:7592f8b459f31994b753f73f5870fa0fc2de1e0c083122aaa5f1cd585cb9600b",
+            routed.get("scenario_digest"),
+        )
+        self.assertEqual("standalone", routed["selected_mode"])
+        self.assertEqual("continue-codex-standalone", routed["terminal"])
+        self.assertNotEqual(
+            routed["scenario_digest"],
+            POLICY.route({"intent": "standalone", "policy": None})[
+                "scenario_digest"
+            ],
+        )
+
     def test_attested_consultation_receipt_is_bound_and_dispositioned(self) -> None:
         scenario = admitted_scenario(issued_at_unix=1_723_000_000)
         routed = POLICY.route(scenario)
@@ -695,6 +713,7 @@ class CompositionContractTests(unittest.TestCase):
         self.assertIs(True, receipt["binding"]["runtime_attested"])
         self.assertEqual("accept", receipt["disposition"])
         self.assertEqual(1_723_000_000, receipt["issued_at_unix"])
+        self.assertEqual(routed["scenario_digest"], receipt["scenario_digest"])
 
     def test_receipt_is_deterministic_and_rationale_has_no_authority(self) -> None:
         scenario = admitted_scenario()
@@ -749,11 +768,15 @@ class CompositionContractTests(unittest.TestCase):
         }
         reason_scenarios = {
             "NOT_APPLICABLE": {**base, "no_consultation_reason": "NOT_APPLICABLE"},
-            "NO_MATERIAL_UNCERTAINTY": {
-                **base,
-                "material_risk": False,
-                "no_consultation_reason": "NO_MATERIAL_UNCERTAINTY",
-            },
+            "NO_MATERIAL_UNCERTAINTY": attested_combined(
+                **receipt_identity(invocation_id="INV-LOW-RISK"),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does this low-risk route need advice?",
+                material_risk=False,
+                decision_value=True,
+                no_consultation_reason="NO_MATERIAL_UNCERTAINTY",
+            ),
             "POLICY_NOT_REQUIRED": {
                 **base,
                 "consultation_policy_required": False,
@@ -768,15 +791,21 @@ class CompositionContractTests(unittest.TestCase):
                 self.assertEqual(reason, receipt["reason_code"])
 
         unavailable = {
-            **base,
+            **receipt_identity(),
+            "intent": "standalone",
             "no_consultation_reason": "ADVISOR_UNAVAILABLE",
-            "standalone_policy": True,
-            "advisor_availability_runtime_dependency": False,
+            "standalone_policy_allows_advisor_unavailable": True,
+            "advisor_availability_is_runtime_dependency": False,
         }
+        unavailable_route = POLICY.route(unavailable)
+        self.assertEqual("standalone", unavailable_route["selected_mode"])
+        self.assertEqual(
+            "continue-codex-standalone", unavailable_route["terminal"]
+        )
         self.assertEqual(
             "ADVISOR_UNAVAILABLE",
             POLICY.governance_receipt(
-                unavailable, POLICY.route(unavailable), None
+                unavailable, unavailable_route, None
             )["reason_code"],
         )
 
@@ -785,8 +814,13 @@ class CompositionContractTests(unittest.TestCase):
             {**base, "no_consultation_reason": "ADVISOR_UNAVAILABLE"},
             {
                 **unavailable,
-                "advisor_availability_runtime_dependency": True,
+                "advisor_availability_is_runtime_dependency": True,
             },
+            {
+                **unavailable,
+                "standalone_policy_allows_advisor_unavailable": False,
+            },
+            {**unavailable, "intent": "ambiguous"},
         )
         for scenario in invalid_scenarios:
             with self.subTest(scenario=scenario):
@@ -794,6 +828,132 @@ class CompositionContractTests(unittest.TestCase):
                     POLICY.governance_receipt(
                         scenario, POLICY.route(scenario), None
                     )
+
+    def test_receipt_requires_exact_scenario_and_route_identity_binding(self) -> None:
+        scenario = admitted_scenario()
+        disposition = {"disposition": "accept", "rationale": "Bound."}
+        routed = POLICY.route(scenario)
+
+        missing_digest = dict(routed)
+        missing_digest.pop("scenario_digest", None)
+        wrong_digest = routed | {"scenario_digest": DIGEST_FOUR}
+        fully_bound = routed | {
+            field: scenario[field]
+            for field in (
+                "execution_id",
+                "invocation_id",
+                "input_digest",
+                "output_digest",
+                "authority_snapshot_digest",
+                "nonce",
+            )
+        }
+        missing_identity = dict(fully_bound)
+        missing_identity.pop("invocation_id")
+        wrong_identity = fully_bound | {"execution_id": "EXEC-FFFFFFFFFFFF"}
+        for route_result in (
+            missing_digest,
+            wrong_digest,
+            missing_identity,
+            wrong_identity,
+        ):
+            with self.subTest(route_result=route_result):
+                with self.assertRaises(POLICY.ReceiptError):
+                    POLICY.governance_receipt(
+                        scenario, route_result, disposition
+                    )
+
+    def test_receipt_rejects_consultation_and_no_consultation_scenario_substitution(self) -> None:
+        admitted = admitted_scenario()
+        admitted_route = POLICY.route(admitted)
+        admitted_hard_stop = admitted_scenario(advisor_invocation_succeeded=False)
+        with self.assertRaises(POLICY.ReceiptError):
+            POLICY.governance_receipt(
+                admitted_hard_stop,
+                admitted_route,
+                {"disposition": "accept"},
+            )
+
+        low_risk = admitted_scenario(material_risk=False)
+        low_risk_route = POLICY.route(low_risk)
+        low_risk_hard_stop = admitted_scenario(
+            material_risk=False,
+            setup_status="missing",
+        )
+        with self.assertRaises(POLICY.ReceiptError):
+            POLICY.governance_receipt(
+                low_risk_hard_stop,
+                low_risk_route,
+                None,
+            )
+
+    def test_consultation_receipt_disposition_must_match_routed_disposition(self) -> None:
+        scenario = admitted_scenario(
+            authority_escalation=True,
+            sol_response={"claims_approval": True},
+        )
+        routed = POLICY.route(scenario)
+        self.assertEqual("reject", routed["disposition"])
+
+        receipt = POLICY.governance_receipt(
+            scenario,
+            routed,
+            {"disposition": "reject", "rationale": "Codex rejects it."},
+        )
+        self.assertEqual("reject", receipt["disposition"])
+        with self.assertRaises(POLICY.ReceiptError):
+            POLICY.governance_receipt(
+                scenario,
+                routed,
+                {"disposition": "accept", "rationale": "Contradiction."},
+            )
+
+    def test_receipt_malformed_membership_values_raise_stable_receipt_error(self) -> None:
+        scenario = admitted_scenario()
+        routed = POLICY.route(scenario)
+        malformed_consultation_routes = (
+            routed | {"terminal": []},
+            routed | {"selected_mode": {}},
+            routed | {"disposition": []},
+        )
+        for route_result in malformed_consultation_routes:
+            with self.subTest(route_result=route_result):
+                with self.assertRaises(POLICY.ReceiptError):
+                    POLICY.governance_receipt(
+                        scenario,
+                        route_result,
+                        {"disposition": "accept"},
+                    )
+
+        with self.assertRaises(POLICY.ReceiptError):
+            POLICY.governance_receipt(
+                scenario,
+                routed,
+                {"disposition": []},  # type: ignore[dict-item]
+            )
+
+        low_risk = admitted_scenario(material_risk=False)
+        low_risk_route = POLICY.route(low_risk)
+        for route_result in (
+            low_risk_route | {"selected_mode": []},
+            low_risk_route | {"terminal": {}},
+        ):
+            with self.subTest(route_result=route_result):
+                with self.assertRaises(POLICY.ReceiptError):
+                    POLICY.governance_receipt(low_risk, route_result, None)
+
+        malformed_reason = {
+            **receipt_identity(),
+            "intent": "gpt-pro-only",
+            "no_consultation_reason": [],
+        }
+        with self.assertRaises(POLICY.ReceiptError):
+            POLICY.governance_receipt(
+                malformed_reason, POLICY.route(malformed_reason), None
+            )
+
+        malformed_setup = POLICY.route(valid_combined(setup_status=[]))
+        self.assertEqual("setup-status-unavailable", malformed_setup["terminal"])
 
     def test_unavailable_combined_advisor_cannot_be_downgraded_to_no_consultation_receipt(self) -> None:
         failures = (
@@ -902,6 +1062,7 @@ class CompositionContractTests(unittest.TestCase):
             {
                 "standalone-gpt-pro-remains-standalone",
                 "standalone-sol-remains-standalone",
+                "standalone-codex-remains-standalone",
                 "ambiguous-installation-does-not-compose",
                 "missing-setup-stops-before-gpc",
                 "setup-change-requires-fresh-task",
