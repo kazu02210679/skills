@@ -72,6 +72,7 @@ def _parser() -> argparse.ArgumentParser:
     receipt = subparsers.add_parser("import-receipt", add_help=False)
     _run_arguments(receipt)
     receipt.add_argument("--receipt", required=True)
+    receipt.add_argument("--gpt-repo")
 
     implementation = subparsers.add_parser("record-implementation", add_help=False)
     _run_arguments(implementation)
@@ -227,7 +228,8 @@ def _dispatch(arguments: argparse.Namespace) -> dict[str, object]:
         )
     if command == "import-receipt":
         return controller.import_receipt(
-            repository, arguments.execution, _read_bytes(arguments.receipt)
+            repository, arguments.execution, _read_bytes(arguments.receipt),
+            gpt_repository=Path(arguments.gpt_repo) if arguments.gpt_repo else None,
         )
     if command == "record-implementation":
         return controller.record_implementation(

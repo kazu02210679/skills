@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -937,6 +938,15 @@ class RepositoryControllerTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name) / "repository"
         self.repository.mkdir()
+        for arguments in (
+            ("init",),
+            ("config", "user.email", "hotl-controller@example.invalid"),
+            ("config", "user.name", "HOTL controller"),
+        ):
+            subprocess.run(["git", *arguments], cwd=self.repository, check=True, capture_output=True)
+        (self.repository / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "baseline.txt"], cwd=self.repository, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "baseline"], cwd=self.repository, check=True, capture_output=True)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -1346,6 +1356,10 @@ class RepositoryControllerTests(unittest.TestCase):
         )
         successor_paths = store.resolve_run(self.repository, SUCCESSOR_ONE)
         successor_state = json.loads(successor_paths.state.read_text(encoding="utf-8"))
+        self.assertEqual(
+            controller.repository_base_identity(self.repository),
+            successor_state["policy"]["base_identity"],
+        )
         successor_events = store.load_events(successor_paths)
         self.assertEqual(
             ["receipt_imported", "node_declared", "transition_committed"],

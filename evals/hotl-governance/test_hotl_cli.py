@@ -162,7 +162,7 @@ class HotlCliTests(unittest.TestCase):
             "authority_snapshot_digest": self.authority_snapshot_digest, "cycle_id": 1,
             "execution_id": self.execution, "host_approval_evidence_digest": None,
             "receipt_nonce": self.receipt_nonce,
-            "verification_specs": [{"argv": [sys.executable, "-c", "print('verified')"], "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]}],
+            "verification_specs": [{"argv": [sys.executable, "-m", "unittest", "test_example.py"], "artifact_paths": ["example.py", "test_example.py"], "test_artifacts": [{"path": "test_example.py", "test_id": "TEST-1"}], "test_ids": ["TEST-1"]}],
             "schema_version": 1,
         }
         initialized = controller.initialize_execution(self.repository, self.execution, hotl_policy, hotl_requirements)
@@ -353,7 +353,7 @@ class HotlCliTests(unittest.TestCase):
                 "execution_id": self.execution,
                 "host_approval_evidence_digest": None,
                 "receipt_nonce": self.receipt_nonce,
-                "verification_specs": [{"argv": [sys.executable, "-c", "print('verified')"], "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]}],
+                "verification_specs": [{"argv": [sys.executable, "-m", "unittest", "test_example.py"], "artifact_paths": ["example.py", "test_example.py"], "test_artifacts": [{"path": "test_example.py", "test_id": "TEST-1"}], "test_ids": ["TEST-1"]}],
                 "schema_version": 1,
             },
         )
@@ -413,8 +413,8 @@ class HotlCliTests(unittest.TestCase):
                 str(self.repository),
                 "--execution",
                 self.execution,
-                "--receipt",
-                str(receipt_path),
+                "--receipt", str(receipt_path),
+                "--gpt-repo", str(self.gpt_repository),
             ]
         )
         self.assertTrue(imported["ok"], imported)
@@ -442,7 +442,7 @@ class HotlCliTests(unittest.TestCase):
             "schema_version": 1,
         }
         if required_verification_argv is not None:
-            policy_value["verification_specs"] = [{"argv": argv, "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]} for argv in required_verification_argv]
+            policy_value["verification_specs"] = [{"argv": argv, "artifact_paths": ["example.py", "test_example.py"], "test_artifacts": [{"path": "test_example.py", "test_id": "TEST-1"}], "test_ids": ["TEST-1"]} for argv in required_verification_argv]
         policy = self._write(
             f"policy-{execution}.json",
             policy_value,
@@ -540,8 +540,8 @@ class HotlCliTests(unittest.TestCase):
                 str(self.repository),
                 "--execution",
                 self.execution,
-                "--receipt",
-                str(path),
+                "--receipt", str(path),
+                *( ["--gpt-repo", str(self.gpt_repository)] if self.gpt_repository else [] ),
             ]
         )
 
@@ -680,7 +680,10 @@ class HotlCliTests(unittest.TestCase):
         code = self.repository / "example.py"
         test = self.repository / "test_example.py"
         code.write_bytes(b"value = 1\n")
-        test.write_bytes(b"assert True\n")
+        test.write_bytes(
+            b"import unittest\n\nclass ExampleTests(unittest.TestCase):\n"
+            b"    def test_example(self):\n        self.assertTrue(True)\n"
+        )
         projection = self._projection()
         claims = self._implementation_claims(evidence_id=evidence_id)
         if evidence_id != "EVID-1":
@@ -728,7 +731,7 @@ class HotlCliTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
 
     def _run_current_verification(self) -> None:
-        argv = [sys.executable, "-c", "print('verified')"]
+        argv = [sys.executable, "-m", "unittest", "test_example.py"]
         result = cli.main_json([
             "run-verification", "--repo", str(self.repository), "--execution", self.execution,
             "--argv", str(self._write("controller-verification-argv.json", argv)),
@@ -797,8 +800,8 @@ class HotlCliTests(unittest.TestCase):
                 str(self.repository),
                 "--execution",
                 self.execution,
-                "--receipt",
-                str(path),
+                "--receipt", str(path),
+                "--gpt-repo", str(self.gpt_repository),
             ]
         )
         self.assertTrue(imported["ok"], imported)
@@ -1365,6 +1368,23 @@ class HotlCliTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual("GPT_RECEIPT_ID_MISMATCH", result["error"]["code"])
 
+    def test_g1_rejects_an_exact_gpt_receipt_without_its_persisted_source_run(self) -> None:
+        """A self-hashed receipt is not authority without its GPT transaction history."""
+        exported = self._export_frozen_gpt_requirements()
+        self._init_from_gpt_requirements(exported)
+        receipt, _artifact, receipt_bytes = exported
+        receipt_path = self.inputs / "unpersisted-gpt-requirements.json"
+        receipt_path.write_bytes(receipt_bytes)
+        missing_source = self.inputs / "missing-gpt-source"
+        result = cli.main_json(
+            [
+                "import-receipt", "--repo", str(self.repository), "--execution", self.execution,
+                "--receipt", str(receipt_path), "--gpt-repo", str(missing_source),
+            ]
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertIn(result["error"]["code"], {"GPT_SOURCE_UNAVAILABLE", "GPT_SOURCE_MISMATCH"})
+
     def test_g1_rejects_a_gpt_receipt_without_current_hotl_context(self) -> None:
         """Removing mandatory context binding would re-open cross-controller substitution."""
         self._init()
@@ -1690,7 +1710,7 @@ class HotlCliTests(unittest.TestCase):
                 "execution_id": self.execution,
                 "host_approval_evidence_digest": None,
                 "receipt_nonce": NONCE,
-                "verification_specs": [{"argv": [sys.executable, "-c", "print('verified')"], "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]}],
+                "verification_specs": [{"argv": [sys.executable, "-m", "unittest", "test_example.py"], "artifact_paths": ["example.py", "test_example.py"], "test_artifacts": [{"path": "test_example.py", "test_id": "TEST-1"}], "test_ids": ["TEST-1"]}],
                 "schema_version": 1,
             },
         )
@@ -1698,14 +1718,22 @@ class HotlCliTests(unittest.TestCase):
             ["init", "--repo", str(self.repository), "--execution", self.execution, "--policy", str(policy), "--requirements", str(requirements)]
         )
         self.assertTrue(result["ok"], result)
-        self.assertEqual([{"argv": [sys.executable, "-c", "print('verified')"], "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]}], self._projection().get("verification_specs"))
+        self.assertEqual([{"argv": [sys.executable, "-m", "unittest", "test_example.py"], "artifact_paths": ["example.py", "test_example.py"], "test_artifacts": [{"path": "test_example.py", "test_id": "TEST-1"}], "test_ids": ["TEST-1"]}], self._projection().get("verification_specs"))
+
+    def test_policy_rejects_python_c_that_hides_the_claimed_test_artifact(self) -> None:
+        """Verification must name each claimed test file as a real argv operand."""
+        result = self._init(
+            required_verification_argv=[[sys.executable, "-c", "print('verified')"]]
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("INVALID_POLICY", result["error"]["code"])
 
     def test_controller_runs_only_exact_frozen_argv_without_a_shell(self) -> None:
         """Removing controller argv execution must turn this into an argument error."""
-        argv = [sys.executable, "-c", "print('verified')"]
+        argv = [sys.executable, "-m", "unittest", "test_example.py"]
         self._init(required_verification_argv=[argv])
         (self.repository / "example.py").write_bytes(b"value = 1\n")
-        (self.repository / "test_example.py").write_bytes(b"assert True\n")
+        (self.repository / "test_example.py").write_bytes(b"import unittest\n\nclass ExampleTests(unittest.TestCase):\n    def test_example(self):\n        self.assertTrue(True)\n")
         result = cli.main_json(
             [
                 "run-verification", "--repo", str(self.repository), "--execution", self.execution,

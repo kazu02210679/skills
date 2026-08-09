@@ -21,13 +21,13 @@ This controller validates closed-schema receipts and deterministic predicates. I
 Use the following sequence. Before every state-changing operation, run `status`; execute only a listed successor command. Record or import evidence first, then run `evaluate` to create a state transition. `record` and `import-receipt` never advance state.
 
 1. **Inspect and initialize.** Inspect the repository and controller status; initialization derives the frozen Git base identity itself, never from policy input. Use a predecessor only when it is terminal and supplies its lineage receipt.
-2. **Freeze requirements.** Publish frozen requirements and the exact accepted GPT Pro requirements receipt. In agentic mode that receipt is the G1 approval boundary; a repository-local host assertion is never authority.
+2. **Freeze requirements.** Publish the exact accepted GPT Pro requirements receipt through `import-receipt --gpt-repo ROOT`; HOTL re-exports and byte-compares its persisted source run. In agentic mode it is G1 authority; a repository-local host assertion is never authority.
 3. **Record implementation.** Use `record-implementation --manifest --report`; it re-reads declared artifacts, preserves exact manifest/report bytes, and creates the controller-owned implementation receipt for G2.
-4. **Collect local evidence.** Use `run-verification --argv` only with one closed policy verification spec: exact argv, explicit `TEST-*` IDs, and canonical code/test paths. It executes without a shell, re-hashes those paths before and after execution, rejects nonzero status, and records exact outputs for G3.
+4. **Collect local evidence.** Use `run-verification --argv` only with a closed `python -m unittest` spec: exact argv, explicit `TEST-*`→test-path mapping, and canonical artifact paths. It executes without a shell, re-hashes paths before/after, rejects nonzero status, and records exact outputs for G3.
 5. **Import semantic receipts.** Import the closed GPT Pro review and one exact Task 7 Sol consultation/disposition or closed no-consultation receipt with `import-sol-receipt` before G4. Use stable `finding_id` and `root_cause_id`, never prose.
 6. **Evaluate gates G1-G3.** Let `evaluate` append the only state-changing `transition_committed` event when the complete gate predicate passes. Missing, mismatched, stale, malformed, or replayed evidence cannot advance the execution.
 7. **Final verify and evaluate G4.** When an outer `gpt-pro-codex-loop` protocol is bound, first run its `final-verify`, then export its final governance receipt, import that receipt into HOTL, and evaluate G4. After `COMPLETE`, verify the log, witness, projection, and artifact integrity.
-8. **Start a successor when required.** A material frozen-artifact change, an escalation, or `RECOVERY_REQUIRED` terminates the same execution. Preserve evidence and initialize a successor with the predecessor execution ID, lineage receipt digest, and explicit supersession relation.
+8. **Start a successor when required.** A material frozen-artifact change, escalation, or `RECOVERY_REQUIRED` terminates the execution. Preserve evidence; successor creation derives its own frozen Git base plus predecessor ID, lineage receipt digest, and supersession relation.
 
 ## Authority and hard stops
 

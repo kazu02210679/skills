@@ -8,6 +8,7 @@ import json
 import re
 import stat
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -107,6 +108,7 @@ class VerificationSpec:
     argv: tuple[str, ...]
     test_ids: tuple[str, ...]
     artifact_paths: tuple[str, ...]
+    test_artifacts: tuple[dict[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -198,16 +200,52 @@ def empty_projection(
         raise ControllerError("INVALID_POLICY", "Verification argv arrays must be unique and canonically sorted.")
     normalized_specs: list[VerificationSpec] = []
     for spec in verification_specs:
-        if not isinstance(spec, Mapping) or set(spec) != {"argv", "artifact_paths", "test_ids"}:
+        if not isinstance(spec, Mapping) or set(spec) != {"argv", "artifact_paths", "test_artifacts", "test_ids"}:
             raise ControllerError("INVALID_POLICY", "Verification specs must use the closed schema.")
-        argv, tests, paths = spec["argv"], spec["test_ids"], spec["artifact_paths"]
+        argv, tests, paths, test_artifacts = (
+            spec["argv"], spec["test_ids"], spec["artifact_paths"], spec["test_artifacts"]
+        )
         if (not isinstance(argv, (list, tuple)) or not argv or any(not isinstance(v, str) or not v or "\x00" in v for v in argv)
             or not isinstance(tests, (list, tuple)) or not tests or any(not isinstance(v, str) or contract.NODE_ID.fullmatch(v) is None or not v.startswith("TEST-") for v in tests)
             or not isinstance(paths, (list, tuple)) or not paths or any(not isinstance(v, str) or not v or v.startswith(("/", "\\")) or "\\" in v or any(p in {"", ".", ".."} for p in v.split("/")) for v in paths)):
             raise ControllerError("INVALID_POLICY", "Verification spec argv, test IDs, and artifact paths are invalid.")
         if list(tests) != sorted(set(tests)) or list(paths) != sorted(set(paths)):
             raise ControllerError("INVALID_POLICY", "Verification spec test IDs and artifact paths must be canonical.")
-        normalized_specs.append(VerificationSpec(tuple(argv), tuple(tests), tuple(paths)))
+        if not isinstance(test_artifacts, (list, tuple)) or len(test_artifacts) != len(tests):
+            raise ControllerError("INVALID_POLICY", "Each verification test ID requires one declared test artifact.")
+        normalized_test_artifacts: list[dict[str, str]] = []
+        for item in test_artifacts:
+            if not isinstance(item, Mapping) or set(item) != {"path", "test_id"}:
+                raise ControllerError("INVALID_POLICY", "Verification test artifact fields are invalid.")
+            test_id, path = item["test_id"], item["path"]
+            if (
+                not isinstance(test_id, str)
+                or not isinstance(path, str)
+                or test_id not in tests
+                or path not in paths
+                or path not in argv
+            ):
+                raise ControllerError(
+                    "INVALID_POLICY",
+                    "Verification test artifacts must map each test ID to an explicit argv path.",
+                )
+            normalized_test_artifacts.append({"path": path, "test_id": test_id})
+        if (
+            sorted(item["test_id"] for item in normalized_test_artifacts) != list(tests)
+            or normalized_test_artifacts != sorted(normalized_test_artifacts, key=lambda item: item["test_id"])
+        ):
+            raise ControllerError(
+                "INVALID_POLICY",
+                "Verification test artifacts must map each test ID to an explicit argv path.",
+            )
+        if len(argv) < 4 or tuple(argv[1:3]) != ("-m", "unittest"):
+            raise ControllerError(
+                "INVALID_POLICY",
+                "Verification uses the shell-free Python unittest runner with explicit test paths.",
+            )
+        normalized_specs.append(
+            VerificationSpec(tuple(argv), tuple(tests), tuple(paths), tuple(normalized_test_artifacts))
+        )
     if normalized_specs != sorted(normalized_specs, key=lambda spec: spec.argv) or len({spec.argv for spec in normalized_specs}) != len(normalized_specs):
         raise ControllerError("INVALID_POLICY", "Verification specs must have unique canonically sorted argv.")
     normalized_gate_evidence = {
@@ -1335,6 +1373,7 @@ def start_successor(
         )
     successor_policy.update(
         {
+            "base_identity": repository_base_identity(repository),
             "initial_state": State.INIT.value,
             "lineage_receipt_digest": lineage["lineage_receipt_digest"],
             "predecessor_execution_id": predecessor_id,
@@ -1862,7 +1901,11 @@ def _validate_gpt_binding(
             "INVALID_RECEIPT_BINDING",
             "GPT Pro model, reasoning, and plan bindings must be nonempty.",
         )
-    if (model, reasoning, plan) != ("GPT-5.6 Sol", "Pro", "Pro"):
+    if (
+        model != "GPT-5.6 Sol"
+        or reasoning != "Pro"
+        or plan not in {"Pro", "Business", "Enterprise"}
+    ):
         raise ControllerError(
             "INVALID_RECEIPT_BINDING", "GPT Pro model attestation is not canonical."
         )
@@ -1911,6 +1954,39 @@ def _validate_gpt_receipt_identity(source: Mapping[str, object]) -> None:
     expected = "RCP-GPC-" + hashlib.sha256(contract.canonical_json_bytes(seed)).hexdigest()[:20].upper()
     if source.get("receipt_id") != expected:
         raise ControllerError("GPT_RECEIPT_ID_MISMATCH", "GPT Pro receipt identity does not match the exporter algorithm.")
+
+
+def _validate_persisted_gpt_receipt(source: Mapping[str, object], raw: bytes, gpt_repository: Path) -> None:
+    """Accept GPT governance bytes only when the authoritative run still exports them."""
+    binding = source.get("binding")
+    receipt_type = source.get("receipt_type")
+    if not isinstance(binding, Mapping) or not isinstance(binding.get("task_slug"), str):
+        raise ControllerError("GPT_SOURCE_MISMATCH", "GPT receipt source binding is unavailable.")
+    kind_by_type = {"requirements": "requirements", "semantic_review": "review", "final": "final"}
+    export_kind = kind_by_type.get(receipt_type)
+    if export_kind is None:
+        return
+    try:
+        path = Path(__file__).resolve().parents[2] / "gpt-pro-codex-loop" / "scripts" / "gpc_loop_controller.py"
+        spec = importlib.util.spec_from_file_location("hotl_gpc_receipt_validator", path)
+        if spec is None or spec.loader is None:
+            raise ImportError("GPT receipt validator is unavailable.")
+        added_path = str(path.parent) not in sys.path
+        if added_path:
+            sys.path.insert(0, str(path.parent))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            exported = module.export_governance_receipt(gpt_repository, binding["task_slug"], export_kind)
+            exported_bytes = module._canonical_json_bytes(exported)
+        finally:
+            if added_path:
+                sys.path.remove(str(path.parent))
+    except (ImportError, OSError, ValueError, RuntimeError) as error:
+        raise ControllerError("GPT_SOURCE_UNAVAILABLE", "GPT receipt source run is unavailable or unsafe.") from error
+    if exported_bytes != raw:
+        raise ControllerError("GPT_SOURCE_MISMATCH", "GPT receipt bytes do not match its persisted authoritative run.")
 
 
 def _validate_claim_edges(claims: dict[str, object], fields: frozenset[str]) -> None:
@@ -2300,6 +2376,7 @@ def _import_receipt_boundary(
     *,
     expected_type: str | None = None,
     approval_command: bool = False,
+    gpt_repository: Path | None = None,
 ) -> dict[str, object]:
     paths = store.resolve_run(repository, execution_id)
     with store.run_lock(paths.lock):
@@ -2321,6 +2398,8 @@ def _import_receipt_boundary(
         receipt_digest, claims = _validate_source_receipt(
             source, source_bytes, policy, projection, expected_type
         )
+        if source.get("issuer_skill") == "gpt-pro-codex-loop":
+            _validate_persisted_gpt_receipt(source, source_bytes, gpt_repository or repository)
         if any(
             record.receipt_id == source["receipt_id"]
             or record.receipt_digest == receipt_digest
@@ -2346,6 +2425,7 @@ def import_receipt(
     source_bytes: bytes,
     *,
     expected_type: str | None = None,
+    gpt_repository: Path | None = None,
 ) -> dict[str, object]:
     """Validate one closed issuer source and atomically append its admitted batch."""
     return _import_receipt_boundary(
@@ -2353,6 +2433,7 @@ def import_receipt(
         execution_id,
         source_bytes,
         expected_type=expected_type,
+        gpt_repository=gpt_repository,
     )
 
 
@@ -2524,7 +2605,7 @@ def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> 
         ]
         source = {
             "authority_snapshot_digest": projection.authority_snapshot_digest,
-            "claims": {"argv": list(argv), "argv_digest": argv_digest, "artifacts": [{"path": path, "sha256": digest} for path, digest in sorted(before_artifacts.items())], "edges": edges, "exit_status": 0, "stderr_digest": stderr_digest, "stdout_digest": stdout_digest, "test_ids": list(spec.test_ids)},
+            "claims": {"argv": list(argv), "argv_digest": argv_digest, "artifacts": [{"path": path, "sha256": digest} for path, digest in sorted(before_artifacts.items())], "edges": edges, "exit_status": 0, "stderr_digest": stderr_digest, "stdout_digest": stdout_digest, "test_artifacts": list(spec.test_artifacts), "test_ids": list(spec.test_ids)},
             "cycle_id": projection.cycle_id,
             "evidence_set_digest": projection_evidence_set_digest(projection),
             "execution_id": projection.execution_id,

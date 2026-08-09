@@ -4,6 +4,6 @@
 
 Use it only after an explicit request for HOTL/governed execution or with a valid governance context supplied by a trusted outer controller. Ordinary repository work and standalone `gpt-pro-codex-loop` runs are not implicitly governed.
 
-G1 consumes the exact accepted GPT Pro requirements receipt, not a worker-created host assertion. G2 binds controller-derived Git base identity and exact artifacts; G3 uses shell-free closed verification specs (argv, tests, paths) with pre/post hashes. G4 also requires an exact Task 7 Sol audit receipt. One change must contain both code and test coverage. `UNINITIALIZED` offers `init`; damage, material changes, and escalation require a successor.
+G1 re-exports and byte-compares the accepted GPT Pro source receipt (`--gpt-repo`), never a worker assertion. G2 binds controller-derived Git base and artifacts; G3 uses shell-free `python -m unittest` specs with explicit TEST-to-path mapping and pre/post hashes. G4 needs Task 7 Sol audit. One change contains code and test; each successor freezes its own base identity.
 
 See [the controller contract](references/controller-contract.md) for the normative state, evidence, receipt, path, and recovery rules.
