@@ -1021,6 +1021,72 @@ class RepositoryControllerTests(unittest.TestCase):
             "REQUIREMENTS", controller.status_execution(self.repository, EXECUTION_ID)["state"]
         )
 
+    def test_init_status_advertises_exact_unauthorized_transition_targets(self) -> None:
+        _, first, policy = self._initialize("INIT")
+        projection = controller.replay(policy, [first])
+
+        self.assertEqual(("REQUIREMENTS",), controller.allowed_transitions(projection))
+        self.assertEqual(
+            ["REQUIREMENTS"],
+            controller.status_execution(self.repository, EXECUTION_ID)[
+                "allowed_transitions"
+            ],
+        )
+        for decision in ("STOP", "MATERIAL_CHANGE"):
+            with self.subTest(decision=decision), self.assertRaises(
+                controller.ControllerError
+            ) as raised:
+                controller.commit_transition(self.repository, EXECUTION_ID, decision)
+            self.assertEqual("GATE_FAILED", raised.exception.code)
+        self.assertEqual(
+            "REQUIREMENTS",
+            controller.commit_transition(self.repository, EXECUTION_ID, "INIT")["state"],
+        )
+
+    def test_init_status_advertises_authorized_terminal_target_commit_accepts(self) -> None:
+        cases = (
+            ("STOP", "stop", "EXEC-000000000001"),
+            ("MATERIAL_CHANGE", "material_change", "EXEC-000000000002"),
+        )
+        for decision, receipt_type, execution_id in cases:
+            with self.subTest(decision=decision):
+                paths, first, policy = self._initialize(
+                    "INIT", execution_id=execution_id
+                )
+                events = [first]
+                projection = controller.replay(policy, events)
+                self._admit(
+                    paths,
+                    policy,
+                    events,
+                    fixture_receipt(
+                        projection,
+                        receipt_type,
+                        f"RCP-{decision}-INIT",
+                        receipt_digest="sha256:"
+                        + hashlib.sha256(decision.encode()).hexdigest(),
+                    )
+                    | {"execution_id": execution_id},
+                )
+                projection = controller.replay(policy, events)
+
+                self.assertEqual(
+                    ("REQUIREMENTS", "STOPPED"),
+                    controller.allowed_transitions(projection),
+                )
+                self.assertEqual(
+                    ["REQUIREMENTS", "STOPPED"],
+                    controller.status_execution(self.repository, execution_id)[
+                        "allowed_transitions"
+                    ],
+                )
+                self.assertEqual(
+                    "STOPPED",
+                    controller.commit_transition(
+                        self.repository, execution_id, decision
+                    )["state"],
+                )
+
     def test_generic_record_rejects_every_privileged_or_controller_event(self) -> None:
         paths, first, policy = self._initialize("REQUIREMENTS")
         projection = controller.replay(policy, [first])
@@ -1258,6 +1324,29 @@ class RepositoryControllerTests(unittest.TestCase):
         self.assertEqual(SUCCESSOR_ONE, result["execution_id"])
         self.assertEqual(before_events, paths.events.read_bytes())
         self.assertEqual(before_state, paths.state.read_bytes())
+
+    def test_absent_predecessor_cannot_be_reclassified_by_shared_lineage_evidence(
+        self,
+    ) -> None:
+        absent_paths = store.resolve_run(self.repository, EXECUTION_ID)
+        receipt = self._lineage(absent_paths)
+        self.assertFalse(absent_paths.root.exists())
+
+        with self.assertRaises(controller.ControllerError) as raised:
+            controller.start_successor(
+                self.repository,
+                EXECUTION_ID,
+                receipt,
+                {
+                    "execution_id": SUCCESSOR_ONE,
+                    "initial_state": "INIT",
+                    "requirements_digest": DIGEST_TWO,
+                    "authority_snapshot_digest": DIGEST_THREE,
+                },
+            )
+
+        self.assertEqual("PREDECESSOR_NOT_FOUND", raised.exception.code)
+        self.assertFalse(store.resolve_run(self.repository, SUCCESSOR_ONE).root.exists())
 
 
 if __name__ == "__main__":

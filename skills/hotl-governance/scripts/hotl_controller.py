@@ -820,31 +820,22 @@ def allowed_transitions(projection: Projection) -> tuple[str, ...]:
     """Return deterministic currently permitted target states."""
     if projection.state in TERMINAL_STATES:
         return ()
-    if projection.state == State.INIT:
+    state_decisions = {
+        State.INIT: ("INIT",),
+        State.REQUIREMENTS: ("G1",),
+        State.IMPLEMENT: ("G2",),
+        State.LOCAL_VERIFY: ("G3",),
+        State.SEMANTIC_REVIEW: ("CORRECTIVE", "ESCALATION", "G4"),
+    }
+    targets: list[str] = []
+    for decision in (*state_decisions[projection.state], "STOP", "MATERIAL_CHANGE"):
         try:
-            return (_transition_target(projection, "INIT").value,)
+            target = _transition_target(projection, decision).value
         except ControllerError:
-            return ()
-    for decision in ("STOP", "MATERIAL_CHANGE"):
-        try:
-            return (_transition_target(projection, decision).value,)
-        except ControllerError:
-            pass
-    if projection.state == State.SEMANTIC_REVIEW:
-        latest = _latest_valid_round(projection)
-        if latest is not None and latest.status == "rejected":
-            decision = "ESCALATION" if _must_escalate(projection) else "CORRECTIVE"
-            return (_transition_target(projection, decision).value,)
-    gate = {
-        State.REQUIREMENTS: "G1",
-        State.IMPLEMENT: "G2",
-        State.LOCAL_VERIFY: "G3",
-        State.SEMANTIC_REVIEW: "G4",
-    }[projection.state]
-    try:
-        return (_transition_target(projection, gate).value,)
-    except ControllerError:
-        return ()
+            continue
+        if target not in targets:
+            targets.append(target)
+    return tuple(targets)
 
 
 def _json_value(value: object) -> object:
@@ -1141,6 +1132,40 @@ def _verify_lineage_evidence(paths: store.RunPaths, lineage: Mapping[str, object
         )
 
 
+def _require_material_predecessor(paths: store.RunPaths) -> None:
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    try:
+        root_metadata = paths.root.lstat()
+    except (FileNotFoundError, OSError) as error:
+        raise ControllerError(
+            "PREDECESSOR_NOT_FOUND", "Predecessor run does not exist."
+        ) from error
+    if (
+        paths.root.is_symlink()
+        or bool(getattr(root_metadata, "st_file_attributes", 0) & reparse)
+        or not stat.S_ISDIR(root_metadata.st_mode)
+    ):
+        raise ControllerError(
+            "PREDECESSOR_NOT_FOUND", "Predecessor run is not a plain directory."
+        )
+
+    for artifact in (paths.state, paths.events):
+        try:
+            metadata = artifact.lstat()
+        except (FileNotFoundError, OSError):
+            continue
+        if (
+            not artifact.is_symlink()
+            and not bool(getattr(metadata, "st_file_attributes", 0) & reparse)
+            and stat.S_ISREG(metadata.st_mode)
+        ):
+            return
+    raise ControllerError(
+        "PREDECESSOR_NOT_FOUND",
+        "Predecessor run has no material state or event artifact.",
+    )
+
+
 def start_successor(
     repository: Path,
     predecessor_id: str,
@@ -1150,6 +1175,7 @@ def start_successor(
     """Create an INIT successor without mutating its terminal predecessor."""
     predecessor_paths = store.resolve_run(repository, predecessor_id)
     lineage = _lineage_receipt(receipt, predecessor_id)
+    _require_material_predecessor(predecessor_paths)
     _verify_lineage_evidence(predecessor_paths, lineage)
     successor_policy = _canonical_mapping(policy)
     execution_id = successor_policy.get("execution_id")
