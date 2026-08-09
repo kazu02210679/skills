@@ -1,0 +1,4 @@
+interface:
+  display_name: "HOTL Governance"
+  short_description: "Govern evidence-gated autonomous execution"
+  default_prompt: "Use $hotl-governance to run this task through evidence-gated HOTL execution."
