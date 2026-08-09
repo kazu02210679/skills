@@ -295,6 +295,57 @@ def projection_bytes(projection: controller.Projection) -> bytes:
 
 
 class ProjectionTests(unittest.TestCase):
+    def test_offline_approval_is_gate_eligible_only_in_frozen_manual_mode(self) -> None:
+        for approval_mode, expected in (("agentic", False), ("offline_manual", True)):
+            with self.subTest(approval_mode=approval_mode):
+                projection = fixture_projection(
+                    "REQUIREMENTS", approval_mode=approval_mode
+                )
+                projection = controller.project_event(
+                    projection, fixture_node("REQ-1", "requirement")
+                )
+                projection = controller.project_event(
+                    projection,
+                    fixture_receipt(
+                        projection,
+                        "requirements",
+                        "RCP-REQ-1",
+                        receipt_digest=DIGEST_ONE,
+                    ),
+                )
+                approval = fixture_receipt(
+                    projection,
+                    "approval",
+                    "RCP-OFFLINE-1",
+                    issuer_skill="trusted-local-operator",
+                    receipt_digest=DIGEST_TWO,
+                )
+                projection = controller.project_event(projection, approval)
+                self.assertEqual(expected, controller.evaluate_gate(projection, "G1")[0])
+
+    def test_host_approval_is_a_distinct_exact_gate_authority(self) -> None:
+        projection = fixture_projection("REQUIREMENTS")
+        projection = controller.project_event(
+            projection, fixture_node("REQ-1", "requirement")
+        )
+        projection = controller.project_event(
+            projection,
+            fixture_receipt(
+                projection, "requirements", "RCP-REQ-1", receipt_digest=DIGEST_ONE
+            ),
+        )
+        projection = controller.project_event(
+            projection,
+            fixture_receipt(
+                projection,
+                "approval",
+                "RCP-HOST-1",
+                issuer_skill="hotl-host-approval",
+                receipt_digest=DIGEST_TWO,
+            ),
+        )
+        self.assertTrue(controller.evaluate_gate(projection, "G1")[0])
+
     def test_evidence_event_never_advances_state(self) -> None:
         projection = fixture_projection("REQUIREMENTS")
         event = fixture_receipt(

@@ -47,7 +47,9 @@ EVENT_TYPES = frozenset(
 )
 RECEIPT_TYPE_ISSUERS = {
     "requirements": frozenset({"gpt-pro-codex-loop"}),
-    "approval": frozenset({"gpt-pro-codex-loop"}),
+    "approval": frozenset(
+        {"gpt-pro-codex-loop", "hotl-host-approval", "trusted-local-operator"}
+    ),
     "implementation": frozenset({"codex"}),
     "verification": frozenset({"hotl-local-verifier"}),
     "semantic_review": frozenset({"gpt-pro-codex-loop"}),

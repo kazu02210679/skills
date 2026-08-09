@@ -113,6 +113,7 @@ class Projection:
     cycle_id: int
     requirements_digest: str
     authority_snapshot_digest: str
+    approval_mode: str
 
 
 def _controller_error(error: Exception) -> ControllerError:
@@ -145,6 +146,7 @@ def empty_projection(
     cycle_id: int = 0,
     requirements_digest: str | None = None,
     authority_snapshot_digest: str | None = None,
+    approval_mode: str = "agentic",
 ) -> Projection:
     """Return an empty, execution-bound projection."""
     if not isinstance(execution_id, str) or contract.EXECUTION_ID.fullmatch(execution_id) is None:
@@ -166,6 +168,8 @@ def empty_projection(
         authority_snapshot_digest = contract.canonical_digest({"authority": []})
     if contract.DIGEST.fullmatch(authority_snapshot_digest) is None:
         raise ControllerError("INVALID_DIGEST", "Invalid authority snapshot digest.")
+    if approval_mode not in {"agentic", "offline_manual"}:
+        raise ControllerError("INVALID_POLICY", "Invalid approval mode.")
     normalized_gate_evidence = {
         gate: tuple(sorted(values)) for gate, values in sorted((gate_evidence or {}).items())
     }
@@ -184,6 +188,7 @@ def empty_projection(
         cycle_id=cycle_id,
         requirements_digest=requirements_digest,
         authority_snapshot_digest=authority_snapshot_digest,
+        approval_mode=approval_mode,
     )
 
 
@@ -529,6 +534,7 @@ def replay(policy: Mapping[str, object], events: Sequence[Mapping[str, object]])
         cycle_id=normalized.get("cycle_id", 0),  # type: ignore[arg-type]
         requirements_digest=normalized.get("requirements_digest"),  # type: ignore[arg-type]
         authority_snapshot_digest=normalized.get("authority_snapshot_digest"),  # type: ignore[arg-type]
+        approval_mode=normalized.get("approval_mode", "agentic"),  # type: ignore[arg-type]
         gate_evidence=normalized.get("gate_evidence"),  # type: ignore[arg-type]
     )
     previous_hash: str | None = None
@@ -736,7 +742,13 @@ def evaluate_gate(projection: Projection, gate: str) -> tuple[bool, tuple[str, .
             errors_list.append("G1:missing_frozen_requirements")
         if not _has_current_receipt(projection, "requirements", "gpt-pro-codex-loop"):
             errors_list.append("G1:missing_requirements_receipt")
-        if not _has_current_receipt(projection, "approval", "gpt-pro-codex-loop"):
+        approval_issuers = {"gpt-pro-codex-loop", "hotl-host-approval"}
+        if projection.approval_mode == "offline_manual":
+            approval_issuers.add("trusted-local-operator")
+        if not any(
+            _has_current_receipt(projection, "approval", issuer)
+            for issuer in sorted(approval_issuers)
+        ):
             errors_list.append("G1:missing_approval_receipt")
         errors = tuple(errors_list)
     elif gate == "G2":
@@ -908,6 +920,7 @@ def _generated_event(
     input_digest: str,
     result: str = "pass",
     issuer_skill: str = "hotl-governance",
+    issuer_kind: str = "controller",
 ) -> dict[str, object]:
     seed = {
         "execution_id": execution_id,
@@ -923,7 +936,7 @@ def _generated_event(
         "sequence": sequence,
         "type": event_type,
         "payload": payload,
-        "issuer": {"kind": "controller", "id": issuer_skill, "version": "1"},
+        "issuer": {"kind": issuer_kind, "id": issuer_skill, "version": "1"},
         "subject_ids": subject_ids or [],
         "artifact_refs": [],
         "result": result,
@@ -1250,6 +1263,651 @@ def start_successor(
     }
 
 
+_INITIAL_POLICY_FIELDS = frozenset(
+    {
+        "active_snapshot_digest",
+        "approval_mode",
+        "authority_snapshot_digest",
+        "cycle_id",
+        "execution_id",
+        "host_approval_evidence_digest",
+        "receipt_nonce",
+        "schema_version",
+    }
+)
+_SOURCE_RECEIPT_FIELDS = frozenset(
+    {
+        "authority_snapshot_digest",
+        "claims",
+        "cycle_id",
+        "evidence_set_digest",
+        "execution_id",
+        "input_digest",
+        "issued_at_unix",
+        "issuer_skill",
+        "issuer_version",
+        "nonce",
+        "output_digest",
+        "receipt_id",
+        "receipt_schema_version",
+        "receipt_type",
+        "requirements_digest",
+        "snapshot_digest",
+    }
+)
+_SOURCE_ISSUERS = {
+    "requirements": "gpt-pro-codex-loop",
+    "implementation": "codex",
+    "verification": "hotl-local-verifier",
+    "semantic_review": "gpt-pro-codex-loop",
+    "final": "gpt-pro-codex-loop",
+    "material_change": "gpt-pro-codex-loop",
+    "stop": "gpt-pro-codex-loop",
+}
+
+
+def _exact_mapping(value: object, fields: frozenset[str], label: str) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ControllerError("INVALID_FIELDS", f"{label} fields must match exactly.")
+    return value
+
+
+def initialize_execution(
+    repository: Path,
+    execution_id: str,
+    policy: Mapping[str, object],
+    requirements: Mapping[str, object],
+) -> dict[str, object]:
+    """Atomically publish requirements and the explicit INIT lifecycle transition."""
+    supplied = _exact_mapping(dict(policy), _INITIAL_POLICY_FIELDS, "policy")
+    if supplied["schema_version"] != 1 or isinstance(supplied["schema_version"], bool):
+        raise ControllerError("INVALID_POLICY", "Policy schema_version must be integer 1.")
+    if supplied["execution_id"] != execution_id:
+        raise ControllerError("EXECUTION_MISMATCH", "Policy execution does not match the command.")
+    if not isinstance(supplied["approval_mode"], str) or supplied[
+        "approval_mode"
+    ] not in {"agentic", "offline_manual"}:
+        raise ControllerError("INVALID_POLICY", "Policy approval_mode is invalid.")
+    nonce = supplied["receipt_nonce"]
+    if not isinstance(nonce, str) or contract.NONCE.fullmatch(nonce) is None:
+        raise ControllerError("INVALID_NONCE", "Policy receipt_nonce is invalid.")
+    for field in ("authority_snapshot_digest", "active_snapshot_digest"):
+        value = supplied[field]
+        if not isinstance(value, str) or contract.DIGEST.fullmatch(value) is None:
+            raise ControllerError("INVALID_DIGEST", f"Policy {field} is invalid.")
+    cycle_id = supplied["cycle_id"]
+    if not isinstance(cycle_id, int) or isinstance(cycle_id, bool) or cycle_id < 1:
+        raise ControllerError("INVALID_CYCLE", "Initial cycle_id must be a positive integer.")
+    host_digest = supplied["host_approval_evidence_digest"]
+    if host_digest is not None and (
+        not isinstance(host_digest, str) or contract.DIGEST.fullmatch(host_digest) is None
+    ):
+        raise ControllerError("INVALID_DIGEST", "Host approval evidence digest is invalid.")
+    requirements_value = _exact_mapping(
+        dict(requirements), frozenset({"requirements"}), "requirements"
+    )
+    identifiers = requirements_value["requirements"]
+    if not isinstance(identifiers, list) or not identifiers:
+        raise ControllerError("INVALID_REQUIREMENTS", "At least one requirement is required.")
+    if any(
+        not isinstance(identifier, str)
+        or not identifier.startswith("REQ-")
+        or contract.NODE_ID.fullmatch(identifier) is None
+        for identifier in identifiers
+    ) or identifiers != sorted(set(identifiers)):
+        raise ControllerError(
+            "INVALID_REQUIREMENTS", "Requirement IDs must be unique and canonically sorted."
+        )
+    requirements_digest = contract.canonical_digest(requirements_value)
+    normalized_policy = dict(supplied)
+    normalized_policy.update(
+        {
+            "initial_state": State.INIT.value,
+            "requirements_digest": requirements_digest,
+        }
+    )
+    normalized_policy = _canonical_mapping(normalized_policy)
+    events: list[dict[str, object]] = []
+    projection = replay(normalized_policy, [])
+    previous: str | None = None
+    for identifier in identifiers:
+        event = _generated_event(
+            execution_id,
+            len(events) + 1,
+            previous,
+            "node_declared",
+            {"node_id": identifier, "node_type": "requirement"},
+            subject_ids=[identifier],
+            input_digest=requirements_digest,
+        )
+        projection = project_event(projection, event)
+        events.append(event)
+        previous = contract.canonical_digest(event)
+    evidence_digest = projection_evidence_set_digest(projection)
+    transition = _generated_event(
+        execution_id,
+        len(events) + 1,
+        previous,
+        "transition_committed",
+        {
+            "cycle_id": projection.cycle_id,
+            "evidence_set_digest": evidence_digest,
+            "from_state": State.INIT.value,
+            "gate": "INIT",
+            "to_state": State.REQUIREMENTS.value,
+        },
+        input_digest=evidence_digest,
+    )
+    projection = project_event(projection, transition)
+    events.append(transition)
+    head = contract.canonical_digest(transition)
+    state = _state_value(projection, normalized_policy, len(events), head)
+    artifacts = {
+        contract.canonical_digest(requirements_value): contract.canonical_json_bytes(
+            requirements_value
+        ),
+        contract.canonical_digest(normalized_policy): contract.canonical_json_bytes(
+            normalized_policy
+        ),
+    }
+    paths = store.resolve_run(repository, execution_id)
+    store.publish_initial_events(paths, state, events, artifacts)
+    return {
+        "cycle_id": projection.cycle_id,
+        "event_count": len(events),
+        "execution_id": execution_id,
+        "head_event_hash": head,
+        "state": projection.state.value,
+    }
+
+
+def project_execution(repository: Path, execution_id: str) -> dict[str, object]:
+    """Return a read-only projection reconstructed from the event log."""
+    paths = store.resolve_run(repository, execution_id)
+    recovery = store.recovery_status(paths)
+    if recovery["recovery_required"]:
+        raise store.StoreError("RECOVERY_REQUIRED", "Run requires read-only diagnosis.")
+    policy = _read_policy(paths)
+    events = store.load_events(paths)
+    return {
+        "event_count": len(events),
+        "projection": _projection_value(replay(policy, events)),
+    }
+
+
+def _canonical_source_receipt(raw: bytes) -> dict[str, object]:
+    if not isinstance(raw, bytes):
+        raise ControllerError("INVALID_RECEIPT", "Receipt source must be bytes.")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        value = contract.strict_json_loads(text)
+    except (UnicodeError, contract.ContractError) as error:
+        if isinstance(error, contract.ContractError):
+            raise _controller_error(error) from error
+        raise ControllerError("INVALID_JSON", "Receipt source must be UTF-8 JSON.") from error
+    if not isinstance(value, dict) or contract.canonical_json_bytes(value) != raw:
+        raise ControllerError("NONCANONICAL_JSON", "Receipt source must use canonical JSON.")
+    identity = {"transaction_id", "invocation_id"} & set(value)
+    if len(identity) != 1:
+        raise ControllerError(
+            "INVALID_RECEIPT_IDENTITY", "Receipt requires one transaction or invocation ID."
+        )
+    return _exact_mapping(
+        value, _SOURCE_RECEIPT_FIELDS | identity, "source receipt"
+    )
+
+
+def _validate_claim_edges(claims: dict[str, object], fields: frozenset[str]) -> None:
+    _exact_mapping(claims, fields, "receipt claims")
+    edges = claims.get("edges", [])
+    if not isinstance(edges, list):
+        raise ControllerError("INVALID_RECEIPT", "Receipt edges must be a list.")
+    for edge in edges:
+        _exact_mapping(
+            edge,
+            frozenset({"edge", "source_id", "target_id"}),
+            "receipt edge",
+        )
+
+
+def _validate_source_receipt(
+    source: dict[str, object],
+    raw: bytes,
+    policy: Mapping[str, object],
+    projection: Projection,
+    expected_type: str | None,
+) -> tuple[str, dict[str, object]]:
+    receipt_type = source.get("receipt_type")
+    if not isinstance(receipt_type, str) or receipt_type not in contract.RECEIPT_TYPE_ISSUERS:
+        raise ControllerError("UNKNOWN_RECEIPT_TYPE", "Receipt type is not supported.")
+    if receipt_type == "lineage":
+        raise ControllerError("INVALID_RECEIPT_TYPE", "Lineage uses start-successor.")
+    if expected_type is not None and receipt_type != expected_type:
+        raise ControllerError("RECEIPT_TYPE_MISMATCH", "Receipt type does not match the command.")
+    issuer = source.get("issuer_skill")
+    if receipt_type == "approval":
+        allowed = contract.RECEIPT_TYPE_ISSUERS["approval"]
+        if issuer not in allowed:
+            raise ControllerError("ISSUER_MISMATCH", "Approval issuer is not allowed.")
+    elif issuer != _SOURCE_ISSUERS.get(receipt_type):
+        raise ControllerError("ISSUER_MISMATCH", "Receipt issuer is not allowed for its type.")
+    base_fields = contract.RECEIPT_BASE_FIELDS | (
+        {"transaction_id"} if "transaction_id" in source else {"invocation_id"}
+    )
+    base = {field: source[field] for field in base_fields}
+    try:
+        contract.validate_receipt(
+            base,
+            str(issuer),
+            projection.execution_id,
+            projection.authority_snapshot_digest,
+        )
+    except contract.ContractError as error:
+        raise _controller_error(error) from error
+    if source["issuer_version"] != "1":
+        raise ControllerError(
+            "ISSUER_VERSION_MISMATCH", "Receipt issuer version is not supported."
+        )
+    if source["nonce"] != policy.get("receipt_nonce"):
+        raise ControllerError("NONCE_MISMATCH", "Receipt nonce is not bound to this execution.")
+    if source["requirements_digest"] != projection.requirements_digest:
+        raise ControllerError(
+            "REQUIREMENTS_MISMATCH", "Receipt requirements binding is stale."
+        )
+    frozen = receipt_type in {"requirements", "approval"}
+    current_digest = projection_evidence_set_digest(projection)
+    if frozen:
+        if any(source[field] is not None for field in ("snapshot_digest", "evidence_set_digest", "cycle_id")):
+            raise ControllerError("INVALID_RECEIPT_BINDING", "Frozen receipt has live bindings.")
+        if source["input_digest"] != projection.requirements_digest:
+            raise ControllerError("DIGEST_MISMATCH", "Frozen receipt target digest is wrong.")
+    elif (
+        source["snapshot_digest"] != projection.active_snapshot_digest
+        or source["evidence_set_digest"] != current_digest
+        or source["cycle_id"] != projection.cycle_id
+        or source["input_digest"] != current_digest
+    ):
+        raise ControllerError("STALE_RECEIPT", "Receipt live bindings are stale.")
+    claims = source["claims"]
+    if not isinstance(claims, dict):
+        raise ControllerError("INVALID_RECEIPT", "Receipt claims must be an object.")
+    if receipt_type in {"requirements", "final", "material_change", "stop"}:
+        _exact_mapping(claims, frozenset(), "receipt claims")
+    elif receipt_type == "approval":
+        if issuer == "gpt-pro-codex-loop":
+            _exact_mapping(claims, frozenset(), "approval claims")
+        elif issuer == "trusted-local-operator":
+            _exact_mapping(claims, frozenset({"approval_mode"}), "approval claims")
+            if (
+                claims["approval_mode"] != "offline_manual"
+                or policy.get("approval_mode") != "offline_manual"
+            ):
+                raise ControllerError(
+                    "UNTRUSTED_LOCAL_APPROVAL",
+                    "Trusted local approval requires frozen offline_manual mode.",
+                )
+        else:
+            _exact_mapping(
+                claims, frozenset({"approval_evidence"}), "approval claims"
+            )
+            evidence = _exact_mapping(
+                claims["approval_evidence"],
+                frozenset(
+                    {
+                        "approval_schema_version",
+                        "authority_snapshot_digest",
+                        "decision",
+                        "execution_id",
+                        "host_id",
+                        "target_digest",
+                    }
+                ),
+                "host approval evidence",
+            )
+            expected = policy.get("host_approval_evidence_digest")
+            if (
+                evidence["approval_schema_version"] != 1
+                or not isinstance(evidence["host_id"], str)
+                or not evidence["host_id"]
+                or evidence["decision"] != "approve"
+                or evidence["execution_id"] != projection.execution_id
+                or evidence["authority_snapshot_digest"]
+                != projection.authority_snapshot_digest
+                or evidence["target_digest"] != projection.requirements_digest
+                or expected is None
+                or contract.canonical_digest(evidence) != expected
+            ):
+                if not isinstance(evidence["host_id"], str) or not evidence["host_id"]:
+                    raise ControllerError(
+                        "INVALID_HOST_APPROVAL", "Host approval identity is invalid."
+                    )
+                raise ControllerError(
+                    "HOST_APPROVAL_MISMATCH", "Host approval is not bound to the frozen target."
+                )
+    elif receipt_type == "implementation":
+        _validate_claim_edges(claims, frozenset({"edges", "nodes"}))
+        nodes = claims["nodes"]
+        if not isinstance(nodes, list):
+            raise ControllerError("INVALID_RECEIPT", "Implementation nodes must be a list.")
+        for node in nodes:
+            _exact_mapping(node, frozenset({"node_id", "node_type"}), "receipt node")
+    elif receipt_type == "verification":
+        _validate_claim_edges(claims, frozenset({"edges"}))
+    else:
+        _validate_claim_edges(
+            claims,
+            frozenset(
+                {"edges", "findings", "review_id", "root_cause_ids", "status"}
+            ),
+        )
+        if not isinstance(claims["status"], str) or claims["status"] not in {
+            "accepted",
+            "rejected",
+        }:
+            raise ControllerError("INVALID_REVIEW", "Review status is invalid.")
+        roots = claims["root_cause_ids"]
+        findings = claims["findings"]
+        if not isinstance(roots, list) or not isinstance(findings, list):
+            raise ControllerError("INVALID_REVIEW", "Review roots and findings must be lists.")
+        if any(
+            not isinstance(root, str) or contract.STABLE_ID.fullmatch(root) is None
+            for root in roots
+        ):
+            raise ControllerError("INVALID_REVIEW", "Review roots are invalid.")
+        if roots != sorted(set(roots)) or (
+            claims["status"] == "accepted" and (roots or findings)
+        ) or (claims["status"] == "rejected" and not roots):
+            raise ControllerError("INVALID_REVIEW", "Review roots do not match its status.")
+        for finding in findings:
+            validated_finding = _exact_mapping(
+                finding,
+                frozenset({"finding_id", "root_cause_id", "status"}),
+                "review finding",
+            )
+            if (
+                not isinstance(validated_finding["finding_id"], str)
+                or contract.STABLE_ID.fullmatch(validated_finding["finding_id"])
+                is None
+                or not isinstance(validated_finding["root_cause_id"], str)
+                or contract.STABLE_ID.fullmatch(
+                    validated_finding["root_cause_id"]
+                )
+                is None
+                or not isinstance(validated_finding["status"], str)
+                or validated_finding["status"] not in {"open", "resolved"}
+            ):
+                raise ControllerError("INVALID_REVIEW", "Review finding is invalid.")
+        if claims["status"] == "rejected" and sorted(
+            {finding["root_cause_id"] for finding in findings}
+        ) != roots:
+            raise ControllerError("INVALID_REVIEW", "Findings do not match committed roots.")
+    return "sha256:" + hashlib.sha256(raw).hexdigest(), claims
+
+
+def _admitted_receipt_events(
+    projection: Projection,
+    old_events: Sequence[dict[str, object]],
+    source: Mapping[str, object],
+    receipt_digest: str,
+    claims: Mapping[str, object],
+) -> tuple[list[dict[str, object]], Projection]:
+    batch: list[dict[str, object]] = []
+    previous = contract.canonical_digest(old_events[-1])
+
+    def add(
+        event_type: str,
+        payload: dict[str, object],
+        *,
+        subjects: list[str] | None = None,
+        input_digest: str,
+        result: str = "pass",
+        issuer_kind: str = "controller",
+        issuer_skill: str = "hotl-governance",
+    ) -> None:
+        nonlocal previous, projection
+        event = _generated_event(
+            projection.execution_id,
+            len(old_events) + len(batch) + 1,
+            previous,
+            event_type,
+            payload,
+            subject_ids=subjects,
+            input_digest=input_digest,
+            result=result,
+            issuer_kind=issuer_kind,
+            issuer_skill=issuer_skill,
+        )
+        projection = project_event(projection, event)
+        batch.append(event)
+        previous = contract.canonical_digest(event)
+
+    receipt_type = str(source["receipt_type"])
+    add(
+        "receipt_imported",
+        {
+            "authority_snapshot_digest": source["authority_snapshot_digest"],
+            "cycle_id": source["cycle_id"],
+            "evidence_set_digest": source["evidence_set_digest"],
+            "issuer_skill": source["issuer_skill"],
+            "receipt_digest": receipt_digest,
+            "receipt_id": source["receipt_id"],
+            "receipt_type": receipt_type,
+            "requirements_digest": source["requirements_digest"],
+            "snapshot_digest": source["snapshot_digest"],
+        },
+        input_digest=receipt_digest,
+    )
+    if receipt_type == "implementation":
+        for node in claims["nodes"]:  # type: ignore[index]
+            add(
+                "node_declared",
+                dict(node),
+                subjects=[str(node["node_id"])],  # type: ignore[index]
+                input_digest=receipt_digest,
+            )
+    if receipt_type == "semantic_review":
+        review_id = str(claims["review_id"])
+        add(
+            "node_declared",
+            {"node_id": review_id, "node_type": "review"},
+            subjects=[review_id],
+            input_digest=receipt_digest,
+        )
+        add(
+            "review_recorded",
+            {
+                "cycle_id": source["cycle_id"],
+                "evidence_set_digest": source["evidence_set_digest"],
+                "receipt_id": source["receipt_id"],
+                "review_id": review_id,
+                "root_cause_ids": claims["root_cause_ids"],
+                "status": claims["status"],
+            },
+            subjects=[review_id],
+            input_digest=str(source["evidence_set_digest"]),
+            result="pass" if claims["status"] == "accepted" else "fail",
+            issuer_kind="skill",
+            issuer_skill=str(source["issuer_skill"]),
+        )
+        for finding in claims["findings"]:  # type: ignore[index]
+            add(
+                "finding_recorded",
+                dict(finding) | {"review_id": review_id},
+                subjects=[review_id],
+                input_digest=receipt_digest,
+                result="pass" if finding["status"] == "resolved" else "fail",  # type: ignore[index]
+                issuer_kind="skill",
+                issuer_skill=str(source["issuer_skill"]),
+            )
+    if receipt_type in {"implementation", "verification", "semantic_review"}:
+        for edge in claims["edges"]:  # type: ignore[index]
+            add(
+                "edge_declared",
+                dict(edge),
+                subjects=[str(edge["source_id"]), str(edge["target_id"])],  # type: ignore[index]
+                input_digest=receipt_digest,
+            )
+    return batch, projection
+
+
+def _import_receipt_boundary(
+    repository: Path,
+    execution_id: str,
+    source_bytes: bytes,
+    *,
+    expected_type: str | None = None,
+    approval_command: bool = False,
+) -> dict[str, object]:
+    paths = store.resolve_run(repository, execution_id)
+    with store.run_lock(paths.lock):
+        policy, old_events, projection = _load_locked(paths)
+        source = _canonical_source_receipt(source_bytes)
+        if approval_command and source.get("issuer_skill") == "gpt-pro-codex-loop":
+            raise ControllerError(
+                "APPROVAL_EVIDENCE_REQUIRED",
+                "approve accepts host evidence or explicit offline manual authority; use import-receipt for GPT Pro receipts.",
+            )
+        receipt_digest, claims = _validate_source_receipt(
+            source, source_bytes, policy, projection, expected_type
+        )
+        if any(
+            record.receipt_id == source["receipt_id"]
+            or record.receipt_digest == receipt_digest
+            for record in projection.receipt_records.values()
+        ):
+            raise ControllerError("REPLAYED_RECEIPT", "Receipt was already imported.")
+        batch, projected = _admitted_receipt_events(
+            projection, old_events, source, receipt_digest, claims
+        )
+        return _append_locked(
+            paths,
+            policy,
+            old_events,
+            projected,
+            batch,
+            {receipt_digest: source_bytes},
+        )
+
+
+def import_receipt(
+    repository: Path,
+    execution_id: str,
+    source_bytes: bytes,
+    *,
+    expected_type: str | None = None,
+) -> dict[str, object]:
+    """Validate one closed issuer source and atomically append its admitted batch."""
+    return _import_receipt_boundary(
+        repository,
+        execution_id,
+        source_bytes,
+        expected_type=expected_type,
+    )
+
+
+def approve_execution(
+    repository: Path, execution_id: str, source_bytes: bytes
+) -> dict[str, object]:
+    """Admit only host-bound or explicitly policy-bound offline approval evidence."""
+    return _import_receipt_boundary(
+        repository,
+        execution_id,
+        source_bytes,
+        expected_type="approval",
+        approval_command=True,
+    )
+
+
+def verify_execution(repository: Path, execution_id: str) -> dict[str, object]:
+    """Return separated read-only integrity and historical-observation findings."""
+    paths = store.resolve_run(repository, execution_id)
+    recovery = store.recovery_status(paths)
+    report: dict[str, object] = {
+        "current_snapshot_findings": [],
+        "current_snapshot_integrity": False,
+        "historical_observation_findings": [],
+        "historical_observations_checked": 0,
+        "immutable_evidence_findings": [],
+        "immutable_evidence_integrity": False,
+        "log_findings": list(recovery["reasons"]),
+        "log_integrity": not recovery["recovery_required"],
+        "projection_determinism": False,
+        "projection_findings": [],
+    }
+    if recovery["recovery_required"]:
+        return report
+    policy = _read_policy(paths)
+    events = store.load_events(paths)
+    left = replay(policy, events)
+    right = replay(policy, events)
+    deterministic = contract.canonical_json_bytes(_projection_value(left)) == contract.canonical_json_bytes(
+        _projection_value(right)
+    )
+    report["projection_determinism"] = deterministic
+    if not deterministic:
+        report["projection_findings"] = ["PROJECTION_MISMATCH"]
+    immutable_findings: list[str] = []
+    try:
+        evidence_objects = sorted(paths.evidence.iterdir(), key=lambda path: path.name)
+    except OSError:
+        evidence_objects = []
+        immutable_findings.append("EVIDENCE_ROOT_UNREADABLE")
+    for evidence_object in evidence_objects:
+        try:
+            content = evidence_object.read_bytes()
+        except OSError:
+            immutable_findings.append(evidence_object.name + ":UNREADABLE")
+            continue
+        if hashlib.sha256(content).hexdigest() != evidence_object.name:
+            immutable_findings.append(evidence_object.name + ":DIGEST_MISMATCH")
+    referenced_digests = {
+        record.receipt_digest for record in left.receipt_records.values()
+    }
+    referenced_digests.add(left.requirements_digest)
+    referenced_digests.add(contract.canonical_digest(policy))
+    referenced_digests.update(
+        str(ref["sha256"])
+        for event in events
+        for ref in event["artifact_refs"]
+    )
+    for digest in sorted(referenced_digests):
+        if not (paths.evidence / digest[7:]).is_file():
+            immutable_findings.append(digest + ":MISSING")
+    report["immutable_evidence_findings"] = immutable_findings
+    report["immutable_evidence_integrity"] = not immutable_findings
+    current_findings: list[str] = []
+    historical = 0
+    for event in events:
+        if event["type"] != "evidence_recorded":
+            continue
+        payload = event["payload"]
+        assert isinstance(payload, dict)
+        record = left.evidence_records.get(str(payload["evidence_id"]))
+        if record is None or record.status != "valid_current":
+            historical += len(event["artifact_refs"])
+            continue
+        for ref in event["artifact_refs"]:
+            try:
+                normalized = contract.normalize_repo_path(
+                    repository, str(ref["path"])
+                )
+            except contract.ContractError:
+                current_findings.append(str(ref["path"]) + ":UNSAFE_PATH")
+                continue
+            path = repository / Path(normalized)
+            try:
+                content = path.read_bytes()
+            except OSError:
+                current_findings.append(str(ref["path"]) + ":UNREADABLE")
+                continue
+            if "sha256:" + hashlib.sha256(content).hexdigest() != ref["sha256"]:
+                current_findings.append(str(ref["path"]) + ":DIGEST_MISMATCH")
+    report["historical_observations_checked"] = historical
+    report["current_snapshot_findings"] = current_findings
+    report["current_snapshot_integrity"] = not current_findings
+    return report
+
+
 def status_execution(repository: Path, execution_id: str) -> dict[str, object]:
     """Return deterministic status, or a read-only recovery hard stop."""
     paths = store.resolve_run(repository, execution_id)
@@ -1274,5 +1932,8 @@ def status_execution(repository: Path, execution_id: str) -> dict[str, object]:
         "active_snapshot_digest": projection.active_snapshot_digest,
         "allowed_transitions": list(allowed_transitions(projection)),
         "completion_errors": list(completion_errors(projection)),
+        "approval_mode": projection.approval_mode,
+        "host_approval_configured": policy.get("host_approval_evidence_digest")
+        is not None,
         "recovery": recovery,
     }

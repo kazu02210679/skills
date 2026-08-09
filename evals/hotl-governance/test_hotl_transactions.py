@@ -144,6 +144,36 @@ class TransactionStorageTests(unittest.TestCase):
         self.assertEqual(3, persisted["event_count"])
         self.assertEqual(event_hash(third), persisted["head_event_hash"])
 
+    def test_initial_batch_publishes_complete_chain_and_state_atomically(self) -> None:
+        first = fixture_event()
+        second = fixture_event(2, event_hash(first), "EVT-000000000002")
+
+        store.publish_initial_events(
+            self.paths,
+            fixture_state(2, event_hash(second)),
+            [first, second],
+            {},
+        )
+
+        self.assertEqual([first, second], store.load_events(self.paths))
+        persisted = json.loads(self.paths.state.read_text(encoding="utf-8"))
+        self.assertEqual(2, persisted["event_count"])
+        self.assertEqual(event_hash(second), persisted["head_event_hash"])
+
+    def test_invalid_initial_batch_leaves_no_run(self) -> None:
+        first = fixture_event()
+        broken = fixture_event(2, DIGEST_ONE, "EVT-000000000002")
+
+        with self.assertRaises(store.StoreError):
+            store.publish_initial_events(
+                self.paths,
+                fixture_state(2, event_hash(broken)),
+                [first, broken],
+                {},
+            )
+
+        self.assertFalse(self.paths.root.exists())
+
     def test_append_wrapper_publishes_one_event(self) -> None:
         first = self._publish_first()
         second = fixture_event(2, event_hash(first), "EVT-000000000002")

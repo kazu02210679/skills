@@ -645,13 +645,23 @@ def _publish_transaction(
         )
 
 
-def publish_initial_run(
-    paths: RunPaths, state: dict[str, object], first_event: dict[str, object]
+def publish_initial_events(
+    paths: RunPaths,
+    state: dict[str, object],
+    events: Sequence[dict[str, object]],
+    artifacts: Mapping[str, bytes],
 ) -> None:
-    """Publish the first event and projection, with state visible last."""
+    """Atomically publish one complete, non-empty initial event batch."""
     _validate_layout(paths)
-    event_bytes = canonical_json_bytes(first_event)
+    if not isinstance(events, Sequence) or isinstance(events, (str, bytes)) or not events:
+        raise StoreError("EMPTY_BATCH", "Initial event batch must not be empty.")
+    if not all(isinstance(event, dict) for event in events):
+        raise StoreError("INVALID_TRANSACTION", "Every initial event must be an object.")
+    event_bytes = b"".join(canonical_json_bytes(event) for event in events)
     _validate_candidate(event_bytes, state, paths.root.name)
+    validated_artifacts = _validated_artifacts(artifacts)
+    if paths.root.exists() or paths.root.is_symlink():
+        raise StoreError("RUN_EXISTS", "Execution run already exists.")
     metadata = _metadata_root(paths)
     _ensure_directory(metadata)
     _ensure_directory(metadata / "runs")
@@ -664,7 +674,14 @@ def publish_initial_run(
         raise StoreError("WRITE_FAILED", "Could not create execution run.") from error
     _require_plain_directory(paths.root)
     _ensure_directory(paths.transactions)
-    _publish_transaction(paths, "initialize", event_bytes, state, {})
+    _publish_transaction(paths, "initialize", event_bytes, state, validated_artifacts)
+
+
+def publish_initial_run(
+    paths: RunPaths, state: dict[str, object], first_event: dict[str, object]
+) -> None:
+    """Compatibility wrapper for a one-event initial publication."""
+    publish_initial_events(paths, state, [first_event], {})
 
 
 def append_events(

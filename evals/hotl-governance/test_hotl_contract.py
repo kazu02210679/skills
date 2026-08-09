@@ -347,6 +347,28 @@ class EnvelopeValidationTests(unittest.TestCase):
                 1,
             )
 
+    def test_approval_receipt_has_three_exact_admitted_issuers(self) -> None:
+        event = event_for("receipt_imported")
+        for issuer in (
+            "gpt-pro-codex-loop",
+            "hotl-host-approval",
+            "trusted-local-operator",
+        ):
+            payload = dict(event["payload"]) | {
+                "receipt_type": "approval",
+                "issuer_skill": issuer,
+            }
+            self.assertEqual(
+                event | {"payload": payload},
+                contract.validate_event(event | {"payload": payload}, None, 1),
+            )
+        payload = dict(event["payload"]) | {
+            "receipt_type": "approval",
+            "issuer_skill": "self-declared-human",
+        }
+        with self.assertRaises(contract.ContractError):
+            contract.validate_event(event | {"payload": payload}, None, 1)
+
     def test_lifecycle_transition_discriminators_are_closed(self) -> None:
         for decision in (
             "INIT",
