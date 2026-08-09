@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import stat
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -58,6 +59,7 @@ class EvidenceRecord:
 @dataclass(frozen=True)
 class ReviewRecord:
     review_id: str
+    receipt_id: str
     status: str
     evidence_set_digest: str
     cycle_id: int
@@ -82,6 +84,20 @@ class ReviewRound:
 
 
 @dataclass(frozen=True)
+class ReceiptRecord:
+    receipt_id: str
+    receipt_type: str
+    receipt_digest: str
+    issuer_skill: str
+    authority_snapshot_digest: str | None
+    requirements_digest: str | None
+    snapshot_digest: str | None
+    evidence_set_digest: str | None
+    cycle_id: int | None
+    valid: bool
+
+
+@dataclass(frozen=True)
 class Projection:
     execution_id: str
     state: State
@@ -90,11 +106,13 @@ class Projection:
     edges: tuple[tuple[str, str, str], ...]
     evidence_records: Mapping[str, EvidenceRecord]
     review_records: Mapping[str, ReviewRecord]
+    receipt_records: Mapping[str, ReceiptRecord]
     gate_evidence: Mapping[str, tuple[str, ...]]
     finding_state: Mapping[str, FindingRecord]
     valid_review_rounds: tuple[ReviewRound, ...]
     cycle_id: int
     requirements_digest: str
+    authority_snapshot_digest: str
 
 
 def _controller_error(error: Exception) -> ControllerError:
@@ -120,11 +138,13 @@ def empty_projection(
     edges: Sequence[tuple[str, str, str]] = (),
     evidence_records: Mapping[str, EvidenceRecord] | None = None,
     review_records: Mapping[str, ReviewRecord] | None = None,
+    receipt_records: Mapping[str, ReceiptRecord] | None = None,
     gate_evidence: Mapping[str, Sequence[str]] | None = None,
     finding_state: Mapping[str, FindingRecord] | None = None,
     valid_review_rounds: Sequence[ReviewRound] = (),
     cycle_id: int = 0,
     requirements_digest: str | None = None,
+    authority_snapshot_digest: str | None = None,
 ) -> Projection:
     """Return an empty, execution-bound projection."""
     if not isinstance(execution_id, str) or contract.EXECUTION_ID.fullmatch(execution_id) is None:
@@ -142,6 +162,10 @@ def empty_projection(
         requirements_digest = contract.canonical_digest({"requirements": []})
     if contract.DIGEST.fullmatch(requirements_digest) is None:
         raise ControllerError("INVALID_DIGEST", "Invalid requirements digest.")
+    if authority_snapshot_digest is None:
+        authority_snapshot_digest = contract.canonical_digest({"authority": []})
+    if contract.DIGEST.fullmatch(authority_snapshot_digest) is None:
+        raise ControllerError("INVALID_DIGEST", "Invalid authority snapshot digest.")
     normalized_gate_evidence = {
         gate: tuple(sorted(values)) for gate, values in sorted((gate_evidence or {}).items())
     }
@@ -153,11 +177,13 @@ def empty_projection(
         edges=tuple(sorted(tuple(edge) for edge in edges)),
         evidence_records=dict(sorted((evidence_records or {}).items())),
         review_records=dict(sorted((review_records or {}).items())),
+        receipt_records=dict(sorted((receipt_records or {}).items())),
         gate_evidence=normalized_gate_evidence,
         finding_state=dict(sorted((finding_state or {}).items())),
         valid_review_rounds=tuple(valid_review_rounds),
         cycle_id=cycle_id,
         requirements_digest=requirements_digest,
+        authority_snapshot_digest=authority_snapshot_digest,
     )
 
 
@@ -255,8 +281,13 @@ def _review_is_current(projection: Projection, event: Mapping[str, object]) -> b
     payload = event["payload"]
     assert isinstance(payload, dict)
     expected = projection_evidence_set_digest(projection)
+    receipt = projection.receipt_records.get(str(payload["receipt_id"]))
     return (
         projection.state == State.SEMANTIC_REVIEW
+        and receipt is not None
+        and _receipt_is_current(projection, receipt)
+        and receipt.receipt_type == "semantic_review"
+        and receipt.issuer_skill == "gpt-pro-codex-loop"
         and payload["cycle_id"] == projection.cycle_id
         and payload["evidence_set_digest"] == expected
         and event["input_digest"] == expected
@@ -272,8 +303,8 @@ def project_event(projection: Projection, event: Mapping[str, object]) -> Projec
     payload = candidate["payload"]
     assert isinstance(payload, dict)
 
-    if projection.state in TERMINAL_STATES and event_type == "transition_committed":
-        raise ControllerError("TERMINAL_STATE", "Terminal executions cannot transition.")
+    if projection.state in TERMINAL_STATES:
+        raise ControllerError("TERMINAL_STATE", "Terminal executions cannot accept later events.")
 
     if event_type == "node_declared":
         node_id = str(payload["node_id"])
@@ -350,13 +381,22 @@ def project_event(projection: Projection, event: Mapping[str, object]) -> Projec
 
     if event_type == "review_recorded":
         review_id = str(payload["review_id"])
+        receipt_id = str(payload["receipt_id"])
         if review_id not in projection.nodes:
             raise ControllerError("UNKNOWN_NODE", "Reviews must reference a declared review node.")
         if review_id in projection.review_records:
             raise ControllerError("DUPLICATE_REVIEW", "Review IDs are immutable and unique.")
+        if any(
+            review.receipt_id == receipt_id
+            for review in projection.review_records.values()
+        ):
+            raise ControllerError(
+                "REPLAYED_RECEIPT", "A semantic receipt authorizes only one review round."
+            )
         valid = _review_is_current(projection, candidate)
         review = ReviewRecord(
             review_id=review_id,
+            receipt_id=receipt_id,
             status=str(payload["status"]),
             evidence_set_digest=str(payload["evidence_set_digest"]),
             cycle_id=int(payload["cycle_id"]),
@@ -367,7 +407,15 @@ def project_event(projection: Projection, event: Mapping[str, object]) -> Projec
         reviews[review_id] = review
         rounds = projection.valid_review_rounds
         if valid:
-            rounds = (*rounds, ReviewRound(review_id, review.status, (), review.cycle_id))
+            rounds = (
+                *rounds,
+                ReviewRound(
+                    review_id,
+                    review.status,
+                    tuple(str(root) for root in payload["root_cause_ids"]),
+                    review.cycle_id,
+                ),
+            )
         return _copy_projection(
             projection,
             review_records=dict(sorted(reviews.items())),
@@ -391,31 +439,47 @@ def project_event(projection: Projection, event: Mapping[str, object]) -> Projec
             review_id,
             str(payload["status"]),
         )
-        rounds = list(projection.valid_review_rounds)
-        if review.valid:
-            for index, round_record in enumerate(rounds):
-                if round_record.review_id == review_id:
-                    roots = tuple(sorted(set((*round_record.root_cause_ids, str(payload["root_cause_id"])))))
-                    rounds[index] = replace(round_record, root_cause_ids=roots)
-                    break
         return _copy_projection(
             projection,
             finding_state=dict(sorted(findings.items())),
-            valid_review_rounds=tuple(rounds),
         )
 
     if event_type == "receipt_imported":
-        gate_evidence = {gate: tuple(values) for gate, values in projection.gate_evidence.items()}
+        receipt_id = str(payload["receipt_id"])
         digest = str(payload["receipt_digest"])
-        issuer = str(payload["issuer_skill"])
-        gates = {
-            "gpt-pro-codex-loop": ("G1", "G4"),
-            "codex": ("G2",),
-            "hotl-local-verifier": ("G3",),
-        }.get(issuer, ())
-        for gate in gates:
-            gate_evidence[gate] = tuple(sorted(set((*gate_evidence.get(gate, ()), digest))))
-        return _copy_projection(projection, gate_evidence=dict(sorted(gate_evidence.items())))
+        if receipt_id in projection.receipt_records:
+            raise ControllerError("DUPLICATE_RECEIPT", "Receipt ID was already imported.")
+        if any(record.receipt_digest == digest for record in projection.receipt_records.values()):
+            raise ControllerError("REPLAYED_RECEIPT", "Receipt digest was already imported.")
+        receipt_type = str(payload["receipt_type"])
+        current_bound = receipt_type not in {"requirements", "approval", "lineage"}
+        valid = receipt_type == "lineage" or (
+            payload["authority_snapshot_digest"] == projection.authority_snapshot_digest
+            and payload["requirements_digest"] == projection.requirements_digest
+            and (
+                not current_bound
+                or (
+                    payload["snapshot_digest"] == projection.active_snapshot_digest
+                    and payload["evidence_set_digest"]
+                    == projection_evidence_set_digest(projection)
+                    and payload["cycle_id"] == projection.cycle_id
+                )
+            )
+        )
+        receipts = dict(projection.receipt_records)
+        receipts[receipt_id] = ReceiptRecord(
+            receipt_id=receipt_id,
+            receipt_type=receipt_type,
+            receipt_digest=digest,
+            issuer_skill=str(payload["issuer_skill"]),
+            authority_snapshot_digest=payload["authority_snapshot_digest"],  # type: ignore[arg-type]
+            requirements_digest=payload["requirements_digest"],  # type: ignore[arg-type]
+            snapshot_digest=payload["snapshot_digest"],  # type: ignore[arg-type]
+            evidence_set_digest=payload["evidence_set_digest"],  # type: ignore[arg-type]
+            cycle_id=payload["cycle_id"],  # type: ignore[arg-type]
+            valid=valid,
+        )
+        return _copy_projection(projection, receipt_records=dict(sorted(receipts.items())))
 
     source = State(str(payload["from_state"]))
     target = State(str(payload["to_state"]))
@@ -464,6 +528,7 @@ def replay(policy: Mapping[str, object], events: Sequence[Mapping[str, object]])
         active_snapshot_digest=normalized.get("active_snapshot_digest"),  # type: ignore[arg-type]
         cycle_id=normalized.get("cycle_id", 0),  # type: ignore[arg-type]
         requirements_digest=normalized.get("requirements_digest"),  # type: ignore[arg-type]
+        authority_snapshot_digest=normalized.get("authority_snapshot_digest"),  # type: ignore[arg-type]
         gate_evidence=normalized.get("gate_evidence"),  # type: ignore[arg-type]
     )
     previous_hash: str | None = None
@@ -579,6 +644,66 @@ def _failed_rounds(projection: Projection) -> tuple[ReviewRound, ...]:
     return tuple(round_record for round_record in projection.valid_review_rounds if round_record.status == "rejected")
 
 
+def _receipt_is_current(projection: Projection, record: ReceiptRecord) -> bool:
+    if not record.valid:
+        return False
+    if record.receipt_type == "lineage":
+        return True
+    if (
+        record.authority_snapshot_digest != projection.authority_snapshot_digest
+        or record.requirements_digest != projection.requirements_digest
+    ):
+        return False
+    if record.receipt_type in {"requirements", "approval"}:
+        return True
+    return (
+        record.snapshot_digest == projection.active_snapshot_digest
+        and record.evidence_set_digest == projection_evidence_set_digest(projection)
+        and record.cycle_id == projection.cycle_id
+    )
+
+
+def _has_current_receipt(projection: Projection, receipt_type: str, issuer: str) -> bool:
+    return any(
+        _receipt_is_current(projection, record)
+        and record.receipt_type == receipt_type
+        and record.issuer_skill == issuer
+        for record in projection.receipt_records.values()
+    )
+
+
+def _local_evidence_errors(projection: Projection) -> tuple[str, ...]:
+    errors: list[str] = []
+    requirements = sorted(_active_nodes(projection, "requirement"))
+    tests = _active_nodes(projection, "test")
+    commands = _active_nodes(projection, "command")
+    current = {
+        evidence_id
+        for evidence_id, record in projection.evidence_records.items()
+        if record.status == "valid_current"
+        and record.cycle_id == projection.cycle_id
+        and record.snapshot_digest == projection.active_snapshot_digest
+    }
+    if not requirements:
+        errors.append("missing_active_requirement")
+    for requirement in requirements:
+        verifying = [test for test in tests if _has_edge(projection, test, "verifies", requirement)]
+        if not verifying:
+            errors.append(f"{requirement}:missing_test")
+            continue
+        if not any(
+            _has_edge(projection, command, "executes", test)
+            and _has_edge(projection, command, "produces", evidence_id)
+            and _has_edge(projection, evidence_id, "proves", test)
+            and projection.evidence_records[evidence_id].test_id == test
+            for test in verifying
+            for command in commands
+            for evidence_id in current
+        ):
+            errors.append(f"{requirement}:missing_current_evidence")
+    return tuple(errors)
+
+
 def _must_escalate(projection: Projection) -> bool:
     failed = _failed_rounds(projection)
     if len(failed) >= 3:
@@ -606,7 +731,14 @@ def evaluate_gate(projection: Projection, gate: str) -> tuple[bool, tuple[str, .
     if projection.state != expected_sources[gate]:
         return False, (f"{gate}:invalid_state",)
     if gate == "G1":
-        errors = () if projection.gate_evidence.get("G1") else ("G1:missing_requirements_receipt",)
+        errors_list: list[str] = []
+        if not _active_nodes(projection, "requirement"):
+            errors_list.append("G1:missing_frozen_requirements")
+        if not _has_current_receipt(projection, "requirements", "gpt-pro-codex-loop"):
+            errors_list.append("G1:missing_requirements_receipt")
+        if not _has_current_receipt(projection, "approval", "gpt-pro-codex-loop"):
+            errors_list.append("G1:missing_approval_receipt")
+        errors = tuple(errors_list)
     elif gate == "G2":
         requirements = _active_nodes(projection, "requirement")
         codes = _active_nodes(projection, "code")
@@ -614,18 +746,20 @@ def evaluate_gate(projection: Projection, gate: str) -> tuple[bool, tuple[str, .
             any(_has_edge(projection, code, "implements", requirement) for code in codes)
             for requirement in requirements
         )
-        errors = () if requirements and linked else ("G2:missing_implementation_links",)
+        errors_list = [] if requirements and linked else ["G2:missing_implementation_links"]
+        if not _has_current_receipt(projection, "implementation", "codex"):
+            errors_list.append("G2:missing_implementation_receipt")
+        errors = tuple(errors_list)
     elif gate == "G3":
-        current = [
-            record
-            for record in projection.evidence_records.values()
-            if record.status == "valid_current"
-            and record.cycle_id == projection.cycle_id
-            and record.snapshot_digest == projection.active_snapshot_digest
-        ]
-        errors = () if current else ("G3:missing_current_evidence",)
+        errors_list = list(_local_evidence_errors(projection))
+        if not _has_current_receipt(projection, "verification", "hotl-local-verifier"):
+            errors_list.append("G3:missing_verification_receipt")
+        errors = tuple(errors_list)
     else:
-        errors = completion_errors(projection)
+        errors_list = list(completion_errors(projection))
+        if not _has_current_receipt(projection, "final", "gpt-pro-codex-loop"):
+            errors_list.append("G4:missing_final_receipt")
+        errors = tuple(errors_list)
     return not errors, errors
 
 
@@ -636,6 +770,16 @@ def _latest_valid_round(projection: Projection) -> ReviewRound | None:
 def _transition_target(projection: Projection, gate: str) -> State:
     if projection.state in TERMINAL_STATES:
         raise ControllerError("TERMINAL_STATE", "Terminal executions cannot transition.")
+    if projection.state == State.INIT and gate == "INIT":
+        has_requirements = bool(_active_nodes(projection, "requirement"))
+        has_lineage = _has_current_receipt(
+            projection, "lineage", "hotl-governance-lineage"
+        )
+        if not (has_requirements or has_lineage):
+            raise ControllerError(
+                "GATE_FAILED", "INIT requires published requirements or valid lineage."
+            )
+        return State.REQUIREMENTS
     direct = {
         (State.REQUIREMENTS, "G1"): State.IMPLEMENT,
         (State.IMPLEMENT, "G2"): State.LOCAL_VERIFY,
@@ -646,14 +790,27 @@ def _transition_target(projection: Projection, gate: str) -> State:
         if not passed:
             raise ControllerError("GATE_FAILED", ";".join(errors))
         return direct[(projection.state, gate)]
-    if projection.state != State.SEMANTIC_REVIEW or gate != "G4":
-        raise ControllerError("INVALID_TRANSITION", "Gate is not valid from the current state.")
+    if gate in {"MATERIAL_CHANGE", "STOP"}:
+        receipt_type = "material_change" if gate == "MATERIAL_CHANGE" else "stop"
+        if not _has_current_receipt(projection, receipt_type, "gpt-pro-codex-loop"):
+            raise ControllerError("GATE_FAILED", f"{gate} requires bound authority.")
+        return State.STOPPED
+    if projection.state != State.SEMANTIC_REVIEW:
+        raise ControllerError("INVALID_TRANSITION", "Decision is not valid from the current state.")
     latest = _latest_valid_round(projection)
     if latest is None:
-        raise ControllerError("GATE_FAILED", "G4 requires a valid current semantic review.")
-    if latest.status == "rejected":
-        return State.ESCALATED if _must_escalate(projection) else State.IMPLEMENT
-    passed, errors = evaluate_gate(projection, gate)
+        raise ControllerError("GATE_FAILED", "Semantic decision requires a valid current review.")
+    if gate == "CORRECTIVE":
+        if latest.status != "rejected" or _must_escalate(projection):
+            raise ControllerError("INVALID_TRANSITION", "Corrective decision is not permitted.")
+        return State.IMPLEMENT
+    if gate == "ESCALATION":
+        if latest.status != "rejected" or not _must_escalate(projection):
+            raise ControllerError("INVALID_TRANSITION", "Escalation decision is not required.")
+        return State.ESCALATED
+    if gate != "G4" or latest.status != "accepted":
+        raise ControllerError("GATE_FAILED", "G4 requires an accepted current review.")
+    passed, errors = evaluate_gate(projection, "G4")
     if not passed:
         raise ControllerError("GATE_FAILED", ";".join(errors))
     return State.COMPLETE
@@ -664,7 +821,20 @@ def allowed_transitions(projection: Projection) -> tuple[str, ...]:
     if projection.state in TERMINAL_STATES:
         return ()
     if projection.state == State.INIT:
-        return (State.REQUIREMENTS.value,)
+        try:
+            return (_transition_target(projection, "INIT").value,)
+        except ControllerError:
+            return ()
+    for decision in ("STOP", "MATERIAL_CHANGE"):
+        try:
+            return (_transition_target(projection, decision).value,)
+        except ControllerError:
+            pass
+    if projection.state == State.SEMANTIC_REVIEW:
+        latest = _latest_valid_round(projection)
+        if latest is not None and latest.status == "rejected":
+            decision = "ESCALATION" if _must_escalate(projection) else "CORRECTIVE"
+            return (_transition_target(projection, decision).value,)
     gate = {
         State.REQUIREMENTS: "G1",
         State.IMPLEMENT: "G2",
@@ -806,35 +976,59 @@ def record_event(
         if projection.state in TERMINAL_STATES:
             raise ControllerError("TERMINAL_STATE", "Terminal executions cannot accept more events.")
         candidate = dict(event)
-        if candidate.get("type") == "transition_committed":
-            raise ControllerError("TRANSITION_REQUIRES_EVALUATE", "Use commit_transition for state changes.")
+        issuer = candidate.get("issuer")
+        if (
+            candidate.get("type") != "evidence_recorded"
+            or not isinstance(issuer, dict)
+            or issuer.get("kind") != "tool"
+        ):
+            raise ControllerError(
+                "PRIVILEGED_EVENT",
+                "Generic record accepts only unprivileged tool evidence.",
+            )
         projected = project_event(projection, candidate)
-        if candidate.get("type") == "review_recorded":
-            review_id = candidate.get("payload", {}).get("review_id") if isinstance(candidate.get("payload"), dict) else None
-            review = projected.review_records.get(str(review_id))
-            if review is None or not review.valid:
-                raise ControllerError("STALE_REVIEW_BINDING", "Review is not bound to current evidence.")
-        batch = [candidate]
-        if candidate.get("type") == "snapshot_activated":
-            previous = contract.canonical_digest(candidate)
-            sequence = int(candidate["sequence"])
-            for evidence_id in sorted(
-                key for key, value in projection.evidence_records.items() if value.status == "valid_current"
-            ):
-                sequence += 1
-                invalidated = _generated_event(
-                    execution_id,
-                    sequence,
-                    previous,
-                    "evidence_invalidated",
-                    {"evidence_id": evidence_id, "cycle_id": projected.cycle_id},
-                    subject_ids=[evidence_id],
-                    input_digest=projection.evidence_records[evidence_id].artifact_digest,
-                )
-                projected = project_event(projected, invalidated)
-                batch.append(invalidated)
-                previous = contract.canonical_digest(invalidated)
-        return _append_locked(paths, policy, old_events, projected, batch, artifacts)
+        return _append_locked(paths, policy, old_events, projected, [candidate], artifacts)
+
+
+def activate_snapshot(
+    repository: Path, execution_id: str, snapshot_digest: str
+) -> dict[str, object]:
+    """Activate one snapshot and invalidate all current evidence atomically."""
+    if not isinstance(snapshot_digest, str) or contract.DIGEST.fullmatch(snapshot_digest) is None:
+        raise ControllerError("INVALID_DIGEST", "Snapshot digest is invalid.")
+    paths = store.resolve_run(repository, execution_id)
+    with store.run_lock(paths.lock):
+        policy, old_events, projection = _load_locked(paths)
+        if projection.state in TERMINAL_STATES:
+            raise ControllerError("TERMINAL_STATE", "Terminal executions cannot activate snapshots.")
+        previous = contract.canonical_digest(old_events[-1])
+        activation = _generated_event(
+            execution_id,
+            len(old_events) + 1,
+            previous,
+            "snapshot_activated",
+            {"snapshot_digest": snapshot_digest, "cycle_id": projection.cycle_id + 1},
+            input_digest=projection_evidence_set_digest(projection),
+        )
+        projected = project_event(projection, activation)
+        batch = [activation]
+        previous = contract.canonical_digest(activation)
+        for evidence_id in sorted(
+            key for key, value in projection.evidence_records.items() if value.status == "valid_current"
+        ):
+            invalidated = _generated_event(
+                execution_id,
+                len(old_events) + len(batch) + 1,
+                previous,
+                "evidence_invalidated",
+                {"evidence_id": evidence_id, "cycle_id": projected.cycle_id},
+                subject_ids=[evidence_id],
+                input_digest=projection.evidence_records[evidence_id].artifact_digest,
+            )
+            projected = project_event(projected, invalidated)
+            batch.append(invalidated)
+            previous = contract.canonical_digest(invalidated)
+        return _append_locked(paths, policy, old_events, projected, batch, {})
 
 
 def commit_transition(repository: Path, execution_id: str, gate: str) -> dict[str, object]:
@@ -903,6 +1097,50 @@ def _lineage_receipt(value: Mapping[str, object], predecessor_id: str) -> dict[s
     return receipt
 
 
+def _lineage_binding_bytes(lineage: Mapping[str, object]) -> bytes:
+    return contract.canonical_json_bytes(
+        {
+            "predecessor_execution_id": lineage["predecessor_execution_id"],
+            "supersedes": lineage["supersedes"],
+        }
+    )
+
+
+def _verify_lineage_evidence(paths: store.RunPaths, lineage: Mapping[str, object]) -> None:
+    digest = str(lineage["lineage_receipt_digest"])
+    evidence = paths.evidence / digest[7:]
+    try:
+        metadata = evidence.lstat()
+    except FileNotFoundError as error:
+        raise ControllerError(
+            "LINEAGE_EVIDENCE_MISSING", "Lineage receipt evidence object is missing."
+        ) from error
+    except OSError as error:
+        raise ControllerError(
+            "LINEAGE_EVIDENCE_CORRUPT", "Lineage receipt evidence cannot be inspected."
+        ) from error
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    if (
+        evidence.is_symlink()
+        or bool(getattr(metadata, "st_file_attributes", 0) & reparse)
+        or not evidence.is_file()
+    ):
+        raise ControllerError(
+            "LINEAGE_EVIDENCE_CORRUPT", "Lineage receipt evidence is not a plain file."
+        )
+    try:
+        content = evidence.read_bytes()
+    except OSError as error:
+        raise ControllerError(
+            "LINEAGE_EVIDENCE_CORRUPT", "Lineage receipt evidence cannot be read."
+        ) from error
+    actual = "sha256:" + hashlib.sha256(content).hexdigest()
+    if actual != digest or content != _lineage_binding_bytes(lineage):
+        raise ControllerError(
+            "LINEAGE_EVIDENCE_CORRUPT", "Lineage receipt evidence does not match its binding."
+        )
+
+
 def start_successor(
     repository: Path,
     predecessor_id: str,
@@ -912,6 +1150,7 @@ def start_successor(
     """Create an INIT successor without mutating its terminal predecessor."""
     predecessor_paths = store.resolve_run(repository, predecessor_id)
     lineage = _lineage_receipt(receipt, predecessor_id)
+    _verify_lineage_evidence(predecessor_paths, lineage)
     successor_policy = _canonical_mapping(policy)
     execution_id = successor_policy.get("execution_id")
     if (
@@ -922,6 +1161,12 @@ def start_successor(
         raise ControllerError("INVALID_EXECUTION_ID", "Successor execution ID is invalid.")
     if successor_policy.get("initial_state", State.INIT.value) != State.INIT.value:
         raise ControllerError("INVALID_POLICY", "A successor must start in INIT.")
+    for binding in ("requirements_digest", "authority_snapshot_digest"):
+        value = successor_policy.get(binding)
+        if not isinstance(value, str) or contract.DIGEST.fullmatch(value) is None:
+            raise ControllerError(
+                "INVALID_POLICY", f"A successor requires a canonical {binding}."
+            )
     successor_policy.update(
         {
             "initial_state": State.INIT.value,
@@ -933,14 +1178,17 @@ def start_successor(
     successor_policy = _canonical_mapping(successor_policy)
     successor_paths = store.resolve_run(repository, execution_id)
 
-    with store.run_lock(predecessor_paths.lock):
-        _, _, predecessor = _load_locked(predecessor_paths)
-        if predecessor.state not in TERMINAL_STATES:
-            raise ControllerError("PREDECESSOR_NOT_TERMINAL", "Successor requires a terminal predecessor.")
+    def publish() -> None:
         payload = {
             "receipt_id": "RCP-" + str(lineage["lineage_receipt_digest"])[7:19].upper(),
+            "receipt_type": "lineage",
             "receipt_digest": lineage["lineage_receipt_digest"],
             "issuer_skill": "hotl-governance-lineage",
+            "authority_snapshot_digest": None,
+            "requirements_digest": None,
+            "snapshot_digest": None,
+            "evidence_set_digest": None,
+            "cycle_id": None,
         }
         first_event = _generated_event(
             execution_id,
@@ -955,6 +1203,18 @@ def start_successor(
             projection, successor_policy, 1, contract.canonical_digest(first_event)
         )
         store.publish_initial_run(successor_paths, state, first_event)
+
+    recovery = store.recovery_status(predecessor_paths)
+    if recovery["recovery_required"]:
+        publish()
+    else:
+        with store.run_lock(predecessor_paths.lock):
+            _, _, predecessor = _load_locked(predecessor_paths)
+            if predecessor.state not in TERMINAL_STATES:
+                raise ControllerError(
+                    "PREDECESSOR_NOT_TERMINAL", "Successor requires a terminal predecessor."
+                )
+            publish()
     return {
         "execution_id": execution_id,
         "predecessor_execution_id": predecessor_id,

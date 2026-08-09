@@ -92,9 +92,11 @@ def event_for(event_type: str) -> dict[str, object]:
         "review_recorded": {
             "payload": {
                 "review_id": "REV-42",
+                "receipt_id": "RCP-REVIEW-42",
                 "status": "accepted",
                 "evidence_set_digest": DIGEST_ONE,
                 "cycle_id": 1,
+                "root_cause_ids": [],
             },
             "issuer": {"kind": "skill", "id": "gpt-pro-codex-loop", "version": "1"},
             "subject_ids": ["REV-42"],
@@ -116,13 +118,20 @@ def event_for(event_type: str) -> dict[str, object]:
         "receipt_imported": {
             "payload": {
                 "receipt_id": "RCP-42",
+                "receipt_type": "requirements",
                 "receipt_digest": DIGEST_ONE,
                 "issuer_skill": "gpt-pro-codex-loop",
+                "authority_snapshot_digest": DIGEST_THREE,
+                "requirements_digest": DIGEST_TWO,
+                "snapshot_digest": None,
+                "evidence_set_digest": None,
+                "cycle_id": None,
             },
             "issuer": {"kind": "controller", "id": "hotl-governance", "version": "1"},
             "subject_ids": [],
             "artifact_refs": [],
             "result": "pass",
+            "input_digest": DIGEST_ONE,
         },
         "transition_committed": {
             "payload": {
@@ -306,6 +315,78 @@ class EnvelopeValidationTests(unittest.TestCase):
                 payload[field] = malformed
                 with self.assertRaises(contract.ContractError):
                     contract.validate_event(event | {"payload": payload}, None, 1)
+
+    def test_receipt_import_event_has_closed_type_issuer_and_binding_contract(self) -> None:
+        event = event_for("receipt_imported")
+        self.assertEqual(event, contract.validate_event(event, None, 1))
+
+        for changed in (
+            {"receipt_type": "implementation", "issuer_skill": "gpt-pro-codex-loop"},
+            {"receipt_type": "unknown"},
+            {"authority_snapshot_digest": None},
+            {"snapshot_digest": DIGEST_ONE},
+            {"unknown": True},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(contract.ContractError):
+                payload = dict(event["payload"])
+                payload.update(changed)
+                contract.validate_event(event | {"payload": payload}, None, 1)
+
+        stop_payload = dict(event["payload"]) | {
+            "receipt_type": "stop",
+            "snapshot_digest": None,
+            "evidence_set_digest": DIGEST_ONE,
+            "cycle_id": 0,
+        }
+        stop = event | {"payload": stop_payload}
+        self.assertEqual(stop, contract.validate_event(stop, None, 1))
+        with self.assertRaises(contract.ContractError):
+            contract.validate_event(
+                stop | {"payload": stop_payload | {"evidence_set_digest": None}},
+                None,
+                1,
+            )
+
+    def test_lifecycle_transition_discriminators_are_closed(self) -> None:
+        for decision in (
+            "INIT",
+            "G1",
+            "G2",
+            "G3",
+            "G4",
+            "CORRECTIVE",
+            "ESCALATION",
+            "MATERIAL_CHANGE",
+            "STOP",
+        ):
+            with self.subTest(decision=decision):
+                event = event_for("transition_committed")
+                payload = dict(event["payload"])
+                payload["gate"] = decision
+                self.assertEqual(
+                    event | {"payload": payload},
+                    contract.validate_event(event | {"payload": payload}, None, 1),
+                )
+        event = event_for("transition_committed")
+        payload = dict(event["payload"])
+        payload["gate"] = "REPAIR"
+        with self.assertRaises(contract.ContractError):
+            contract.validate_event(event | {"payload": payload}, None, 1)
+
+    def test_rejected_review_commits_stable_roots_atomically(self) -> None:
+        accepted = event_for("review_recorded")
+        self.assertEqual(accepted, contract.validate_event(accepted, None, 1))
+        rejected = accepted | {
+            "payload": dict(accepted["payload"])
+            | {"status": "rejected", "root_cause_ids": ["ROOT-1", "ROOT-2"]},
+            "result": "fail",
+        }
+        self.assertEqual(rejected, contract.validate_event(rejected, None, 1))
+        for roots in ([], ["ROOT-2", "ROOT-1"], ["ROOT-1", "ROOT-1"], ["bad root"]):
+            with self.subTest(roots=roots), self.assertRaises(contract.ContractError):
+                payload = dict(rejected["payload"])
+                payload["root_cause_ids"] = roots
+                contract.validate_event(rejected | {"payload": payload}, None, 1)
 
     def test_receipt_is_closed_and_bound_to_issuer_execution_and_authority(self) -> None:
         receipt = valid_receipt()

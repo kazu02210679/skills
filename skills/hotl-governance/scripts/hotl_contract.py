@@ -45,6 +45,30 @@ EVENT_TYPES = frozenset(
         "transition_committed",
     }
 )
+RECEIPT_TYPE_ISSUERS = {
+    "requirements": frozenset({"gpt-pro-codex-loop"}),
+    "approval": frozenset({"gpt-pro-codex-loop"}),
+    "implementation": frozenset({"codex"}),
+    "verification": frozenset({"hotl-local-verifier"}),
+    "semantic_review": frozenset({"gpt-pro-codex-loop"}),
+    "final": frozenset({"gpt-pro-codex-loop"}),
+    "material_change": frozenset({"gpt-pro-codex-loop"}),
+    "stop": frozenset({"gpt-pro-codex-loop"}),
+    "lineage": frozenset({"hotl-governance-lineage"}),
+}
+TRANSITION_DECISIONS = frozenset(
+    {
+        "INIT",
+        "G1",
+        "G2",
+        "G3",
+        "G4",
+        "CORRECTIVE",
+        "ESCALATION",
+        "MATERIAL_CHANGE",
+        "STOP",
+    }
+)
 STATES = frozenset(
     {
         "INIT",
@@ -288,6 +312,18 @@ def _require_nonnegative_integer(value: object, label: str) -> int:
     return value
 
 
+def _require_optional_digest(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    return _require_digest(value, label)
+
+
+def _require_optional_nonnegative_integer(value: object, label: str) -> int | None:
+    if value is None:
+        return None
+    return _require_nonnegative_integer(value, label)
+
+
 def _require_enum(value: object, allowed: frozenset[str], label: str) -> str:
     result = _require_string(value, label)
     if result not in allowed:
@@ -405,15 +441,42 @@ def _validate_event_contract(event: dict[str, object]) -> None:
 
     if event_type == "review_recorded":
         payload = _require_payload(
-            event["payload"], frozenset({"review_id", "status", "evidence_set_digest", "cycle_id"}), event_type
+            event["payload"],
+            frozenset(
+                {
+                    "review_id",
+                    "receipt_id",
+                    "status",
+                    "evidence_set_digest",
+                    "cycle_id",
+                    "root_cause_ids",
+                }
+            ),
+            event_type,
         )
         if _node_type_for_id(payload["review_id"], "review_id") != "review":
             raise ContractError("NODE_TYPE_MISMATCH", "review_id must use the REV- prefix.")
         status = _require_enum(
             payload["status"], frozenset({"accepted", "rejected"}), "review status"
         )
+        _require_string(payload["receipt_id"], "receipt_id")
         _require_digest(payload["evidence_set_digest"], "evidence_set_digest")
         _require_nonnegative_integer(payload["cycle_id"], "cycle_id")
+        roots = payload["root_cause_ids"]
+        if not isinstance(roots, list):
+            raise ContractError("INVALID_SCHEMA", "root_cause_ids must be a list.")
+        for root in roots:
+            if not isinstance(root, str) or STABLE_ID.fullmatch(root) is None:
+                raise ContractError("INVALID_FINDING_ID", "root_cause_ids must be stable IDs.")
+        if roots != sorted(set(roots)):
+            raise ContractError(
+                "INVALID_REVIEW_ROOTS", "root_cause_ids must be unique and canonically sorted."
+            )
+        if (status == "accepted" and roots) or (status == "rejected" and not roots):
+            raise ContractError(
+                "INVALID_REVIEW_ROOTS",
+                "Accepted reviews have no roots; rejected reviews require fixed roots.",
+            )
         _require_subjects(event["subject_ids"], [payload["review_id"]])
         _require_event_issuer(event, "skill")
         _require_event_result(event, "pass" if status == "accepted" else "fail")
@@ -441,11 +504,66 @@ def _validate_event_contract(event: dict[str, object]) -> None:
 
     if event_type == "receipt_imported":
         payload = _require_payload(
-            event["payload"], frozenset({"receipt_id", "receipt_digest", "issuer_skill"}), event_type
+            event["payload"],
+            frozenset(
+                {
+                    "receipt_id",
+                    "receipt_type",
+                    "receipt_digest",
+                    "issuer_skill",
+                    "authority_snapshot_digest",
+                    "requirements_digest",
+                    "snapshot_digest",
+                    "evidence_set_digest",
+                    "cycle_id",
+                }
+            ),
+            event_type,
         )
         for field in ("receipt_id", "issuer_skill"):
             _require_string(payload[field], field)
+        receipt_type = _require_enum(
+            payload["receipt_type"], frozenset(RECEIPT_TYPE_ISSUERS), "receipt_type"
+        )
+        if payload["issuer_skill"] not in RECEIPT_TYPE_ISSUERS[receipt_type]:
+            raise ContractError(
+                "ISSUER_MISMATCH", "Receipt type is not allowed from the declared issuer."
+            )
         _require_digest(payload["receipt_digest"], "receipt_digest")
+        authority = _require_optional_digest(
+            payload["authority_snapshot_digest"], "authority_snapshot_digest"
+        )
+        requirements = _require_optional_digest(
+            payload["requirements_digest"], "requirements_digest"
+        )
+        snapshot = _require_optional_digest(payload["snapshot_digest"], "snapshot_digest")
+        evidence_set = _require_optional_digest(
+            payload["evidence_set_digest"], "evidence_set_digest"
+        )
+        cycle = _require_optional_nonnegative_integer(payload["cycle_id"], "cycle_id")
+        if receipt_type == "lineage":
+            if any(value is not None for value in (authority, requirements, snapshot, evidence_set, cycle)):
+                raise ContractError("INVALID_RECEIPT_BINDING", "Lineage receipt bindings must be null.")
+        elif receipt_type in {"requirements", "approval"}:
+            if authority is None or requirements is None or any(
+                value is not None for value in (snapshot, evidence_set, cycle)
+            ):
+                raise ContractError(
+                    "INVALID_RECEIPT_BINDING",
+                    "Requirements and approval receipts bind authority and requirements only.",
+                )
+        elif receipt_type in {"material_change", "stop"}:
+            if any(value is None for value in (authority, requirements, evidence_set, cycle)):
+                raise ContractError(
+                    "INVALID_RECEIPT_BINDING",
+                    "Terminal authority receipts bind authority, requirements, evidence, and cycle.",
+                )
+        elif any(value is None for value in (authority, requirements, snapshot, evidence_set, cycle)):
+            raise ContractError(
+                "INVALID_RECEIPT_BINDING", "Current lifecycle receipts require every binding."
+            )
+        if event["input_digest"] != payload["receipt_digest"]:
+            raise ContractError("DIGEST_MISMATCH", "Receipt event input must bind its receipt digest.")
         _require_subjects(event["subject_ids"], [])
         _require_event_issuer(event, "controller", "hotl-governance")
         _require_event_result(event, "pass")
@@ -457,7 +575,7 @@ def _validate_event_contract(event: dict[str, object]) -> None:
         frozenset({"gate", "from_state", "to_state", "evidence_set_digest", "cycle_id"}),
         event_type,
     )
-    gate = _require_enum(payload["gate"], frozenset({"G1", "G2", "G3", "G4"}), "transition gate")
+    gate = _require_enum(payload["gate"], TRANSITION_DECISIONS, "transition decision")
     from_state = _require_enum(payload["from_state"], STATES, "transition from_state")
     to_state = _require_enum(payload["to_state"], STATES, "transition to_state")
     if from_state == to_state:

@@ -18,42 +18,69 @@ INIT | REQUIREMENTS | IMPLEMENT | LOCAL_VERIFY | SEMANTIC_REVIEW
 
 | From | Condition | To |
 | --- | --- | --- |
-| none | valid `init` input, policy snapshot, and execution identity | `INIT` |
-| `INIT` | initial artifact publication succeeds | `REQUIREMENTS` |
-| `REQUIREMENTS` | G1 `requirements_frozen` | `IMPLEMENT` |
-| `IMPLEMENT` | G2 `implementation_recorded` | `LOCAL_VERIFY` |
-| `LOCAL_VERIFY` | G3 `local_verified` | `SEMANTIC_REVIEW` |
-| `SEMANTIC_REVIEW` | correctable findings within the retry budget | `IMPLEMENT` |
-| `SEMANTIC_REVIEW` | G4 `semantically_accepted` | `COMPLETE` |
-| mutable state | escalation condition | `ESCALATED` |
+| none | valid policy snapshot and execution identity are published | `INIT` |
+| `INIT` | `INIT`: requirements are published, or a successor has validated lineage | `REQUIREMENTS` |
+| `REQUIREMENTS` | G1 passes | `IMPLEMENT` |
+| `IMPLEMENT` | G2 passes | `LOCAL_VERIFY` |
+| `LOCAL_VERIFY` | G3 passes | `SEMANTIC_REVIEW` |
+| `SEMANTIC_REVIEW` | `CORRECTIVE`: current rejected review is correctable | `IMPLEMENT` |
+| `SEMANTIC_REVIEW` | `ESCALATION`: stable-root or round limit is reached | `ESCALATED` |
+| `SEMANTIC_REVIEW` | G4 passes for the current accepted review | `COMPLETE` |
+| mutable state | `MATERIAL_CHANGE`: current bound authority requires replacement | `STOPPED` |
+| mutable state | `STOP`: current bound stop authority explicitly stops | `STOPPED` |
 | mutable state | transaction or integrity ambiguity | `RECOVERY_REQUIRED` |
-| mutable state | trusted operator explicitly stops | `STOPPED` |
 
 Reject every transition not listed in this table.
+
+`transition_committed.gate` is a compatibility name for a closed lifecycle
+decision discriminator. Its values are `INIT`, `G1`, `G2`, `G3`, `G4`,
+`CORRECTIVE`, `ESCALATION`, `MATERIAL_CHANGE`, and `STOP`. Only G1 through G4
+are gates. Evidence events never advance state. A failed gate or lifecycle
+predicate emits no transition.
 
 ## Gate table
 
 | Gate | From | Required predicate | To |
 | --- | --- | --- | --- |
-| G1 | REQUIREMENTS | requirements are frozen, approved, and bound to scope/policy/authority and GPT Pro packet identity | IMPLEMENT |
-| G2 | IMPLEMENT | implementation receipt binds the change manifest, links, worker report, base snapshot, and input/output digests | LOCAL_VERIFY |
-| G3 | LOCAL_VERIFY | current-cycle local evidence binds exact commands, exit status, hashes, test links, and snapshot digest | SEMANTIC_REVIEW |
-| G4 | SEMANTIC_REVIEW | accepted semantic receipt and all active requirements satisfy the completion predicate | COMPLETE |
+| G1 | REQUIREMENTS | active frozen requirements plus current `requirements` and `approval` receipts from `gpt-pro-codex-loop`, bound to the policy authority and requirements digest | IMPLEMENT |
+| G2 | IMPLEMENT | implementation links exist and a current `implementation` receipt from `codex` binds authority, requirements, snapshot, evidence set, and cycle | LOCAL_VERIFY |
+| G3 | LOCAL_VERIFY | exact typed current-cycle local evidence exists and a current `verification` receipt from `hotl-local-verifier` binds the same authority, requirements, snapshot, evidence set, and cycle | SEMANTIC_REVIEW |
+| G4 | SEMANTIC_REVIEW | a current accepted review backed by a current `semantic_review` receipt, a current `final` receipt from `gpt-pro-codex-loop`, and complete active-requirement coverage | COMPLETE |
 
 Only `evaluate` may advance a gate. `record` and `import-receipt` append validated evidence but leave state unchanged. A failed predicate emits no transition; it never creates an implicit repair path.
 
 ## Receipt contract
 
-Each privileged receipt is issuer-specific and closed-schema. It includes at least:
+Each privileged source receipt is issuer-specific and closed-schema. After its
+issuer-specific validator admits it, `receipt_imported` records this exact
+closed projection:
 
-- `receipt_schema_version`, `receipt_id`, `issuer_skill`, and `issuer_version`;
-- `execution_id`, `transaction_id` or `invocation_id`, nonce, and `issued_at_unix`;
-- `input_digest`, `output_digest`, and authority snapshot digest; and
-- the issuer's required subject, attestation, and artifact bindings.
+- `receipt_id`, `receipt_type`, `receipt_digest`, and `issuer_skill`;
+- `authority_snapshot_digest` and `requirements_digest`;
+- `snapshot_digest`, `evidence_set_digest`, and `cycle_id` when the receipt is
+  current-cycle authority.
 
-Human approvals, GPT Pro requirement/review/final receipts, Sol advice, completion, and stop receipts cannot be produced through generic `record`. In agentic mode, accept only a bound user-approval receipt or worker-inaccessible host/tool provenance; `trusted_local_operator` is limited to an explicit policy-bound offline/manual mode. Reject self-declared human approval.
+The type-to-issuer allowlist is exact: `requirements`, `approval`,
+`semantic_review`, `final`, `material_change`, and `stop` are issued by
+`gpt-pro-codex-loop`; `implementation` by `codex`; `verification` by
+`hotl-local-verifier`; and `lineage` by `hotl-governance-lineage`.
+Requirements and approval receipts bind authority and requirements only.
+Implementation, verification, review, and final receipts bind authority,
+requirements, snapshot, evidence set, and cycle. Material-change and stop
+receipts also bind the evidence set and cycle, while their snapshot is optional
+so they can terminate an execution before snapshot activation. Lineage uses
+null lifecycle bindings because its immutable evidence object carries the
+predecessor and supersedes bindings.
 
-Semantic review findings use stable `finding_id` and `root_cause_id`; the controller never compares finding prose. Receipts must match the execution, current snapshot, current evidence-set digest, issuer schema, and replay protections. Malformed, mismatched, stale, or replayed receipts fail closed and do not consume a valid review round.
+Generic `record` accepts only `evidence_recorded` from a tool issuer. It rejects
+all receipts, reviews, findings, transitions, snapshot changes, invalidations,
+nodes, and edges as privileged/controller-authored events. Task 4 deliberately
+exposes no generic receipt-import boundary: an issuer-specific importer must
+validate the complete source receipt before constructing the closed admitted
+projection. Replay accepts already-admitted events and never treats a caller's
+issuer label as proof of authority.
+
+Semantic review findings use stable `finding_id` and `root_cause_id`; the controller never compares finding prose. A rejected `review_recorded` atomically commits its unique, sorted, non-empty `root_cause_ids`; an accepted review commits an empty set. Later `finding_recorded` events cannot alter a counted round. Each review binds a current authorized semantic-review receipt. Receipts must match the execution, authority, requirements, current snapshot, current evidence-set digest, cycle, issuer schema, and replay protections as applicable. Malformed, mismatched, stale, wrong-issuer, duplicate-ID, or duplicate-digest receipts fail closed and do not consume a valid review round.
 
 ## Typed provenance triples
 
@@ -90,7 +117,7 @@ For a bound outer protocol, run the GPT Pro controller's `final-verify`, export 
 
 ## Evidence lifecycle
 
-Store immutable events, receipts, and command outputs content-addressably at `.hotl/evidence/<sha256>`. An event is append-only and includes schema version, event ID, execution ID, sequence, type, closed payload, issuer, subject IDs, artifact references, result, input/output digests, previous event hash, and timestamp.
+Store immutable events, receipts, and command outputs content-addressably at `.hotl/evidence/<sha256>`. An event is append-only and includes schema version, event ID, execution ID, sequence, type, closed payload, issuer, subject IDs, artifact references, result, input/output digests, previous event hash, and timestamp. Replay rejects every event after a terminal transition, including evidence-only events.
 
 Canonical event bytes, `execution_id + sequence + previous_event_hash`, and the state witness (`event_count`, `head_event_hash`) make replay deterministic and detect truncation. Publish an atomic batch only after validating the complete candidate log; `verify-log` checks the chain, witness, projection, and artifact integrity.
 
@@ -112,4 +139,11 @@ Do not treat an LLM response, generic event, local CLI assertion, mutable workin
 
 On transaction or integrity ambiguity, enter `RECOVERY_REQUIRED` and stop the same execution. Do not delete, rewrite, reparent, or otherwise repair the event chain. Preserve all artifacts and perform read-only diagnosis of the state witness, event head, orphan transaction, and logs.
 
-v1 has no repair command. An authorized operator may establish a known-good source outside the controller and start a new successor that records lineage to the terminal predecessor. The successor, not the compromised execution, receives any further state transitions.
+v1 has no repair command. An authorized operator may establish a known-good source outside the controller and start a new successor that records lineage to the terminal predecessor. A `RECOVERY_REQUIRED` predecessor is classified read-only and is never repaired or rewritten. The successor, not the compromised execution, receives any further state transitions.
+
+The lineage digest must identify an existing immutable evidence object whose
+bytes are exactly the canonical predecessor/supersedes binding. Missing,
+corrupt, symlink/reparse, self-referential, duplicate, wrong-predecessor, and
+nonterminal lineage fail closed. Valid branches may share one predecessor. The
+successor begins with one validated `receipt_imported` lineage event at `INIT`;
+an explicit `INIT` lifecycle transition then advances it to `REQUIREMENTS`.
