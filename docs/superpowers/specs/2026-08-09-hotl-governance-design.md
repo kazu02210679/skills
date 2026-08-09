@@ -216,6 +216,7 @@ JSONL event を append-only の正本とする。projection や status file を�
   "execution_id": "EXEC-...",
   "sequence": 17,
   "type": "test_verified",
+  "payload": {"closed_fields_depend_on_type": true},
   "issuer": {"kind": "tool", "id": "pytest", "version": "..."},
   "subject_ids": ["REQ-017", "TEST-042"],
   "artifact_refs": [{"path": "relative/path", "sha256": "..."}],
@@ -241,11 +242,11 @@ privileged event は generic `record` から作成できない。human approval�
 - `input_digest` と `output_digest`
 - nonce
 - authority snapshot digest
-- `issued_at`
+- `issued_at_unix`（整数。authoritative mutation 時に一度だけ確定し、再 export で現在時刻を読まない）
 
 既存 `gpt-pro-codex-loop` の Browser identity、conversation identity、nonce、model attestation、snapshot、transaction を信頼の根として保持する。`hotl-governance` が独自認証へ置き換えない。
 
-初版では、ローカル CLI を操作できるユーザーを trusted operator とする。ただし、`record --actor human` のような自己申告は認めず、承認対象 digest に bind された専用 approval receipt だけを privileged event に変換する。host が chat approval または tool approval の provenance を提供する場合は、その identity と nonce を receipt に含める。提供しない host では trusted operator assertion であり、人間の存在を暗号学的に証明するものではない。
+agentic mode では、worker が書き込めるローカル CLI operator assertion を human approval として扱わない。G1 の privileged approval は、既存 GPT Pro protocol が発行する bound user-approval receipt、または worker が書き込めない host/tool approval provenance のどちらかに限る。`trusted_local_operator` は明示的な offline/manual mode だけで許可し、その mode 自体を policy snapshot に bind する。`record --actor human` のような自己申告は全 mode で拒否する。
 
 ### 整合性
 
@@ -354,7 +355,7 @@ code、test、または active snapshot が変わった場合、`evidence_invali
 - `init`: execution と policy snapshot を初期化する。
 - `status`: 現在 state、満たされた gate、missing evidence、許可された次 command を表示する。
 - `record`: closed event type と検証済み subject/artifact を追記する。
-- `approve`: trusted operator に承認対象 digest を提示し、専用 human approval receipt を生成する。
+- `approve`: offline/manual policy mode でだけ trusted local operator に承認対象 digest を提示し、専用 approval receipt を生成する。agentic mode では bound GPT Pro または host/tool approval の import だけを許可する。
 - `import-receipt`: GPT Pro、Sol Advisor、または検証 tool の receipt を issuer ごとの closed schema で検証して event に変換する。
 - `evaluate`: gate を評価し、許可された state transition だけを実行する。
 - `project`: execution/provenance projection を再生成する。
@@ -471,6 +472,69 @@ v1 は repair command を実装しない。`RECOVERY_REQUIRED` に入った exec
 - growth がある場合は file/byte 単位で内容を確認し、HOTL に必要な増加だけを明示承認して baseline を更新する。その後、同じ `--max-growth-bytes 0` command を再実行する。失敗だけを理由に baseline を更新しない。
 - GPT Pro controller の `final-verify` が成功する。
 - fresh repository diff inspection で対象外変更がない。
+
+## Normative controller semantics
+
+この節は event、projection、gate、adapter の実装契約を固定する。本文中の例と衝突する場合はこの節を優先する。
+
+### Evidence plane と transition plane
+
+`record` と `import-receipt` は検証済み evidence event を追記するだけで、execution state を変更しない。状態を進められるのは明示的な `evaluate` だけである。
+
+```text
+record / import-receipt
+  -> evidence event append
+  -> replay (state unchanged)
+  -> evaluate Gx
+  -> predicate PASS
+  -> transition_committed append
+  -> replay (state advanced)
+```
+
+FAIL は missing/invalid evidence を返し、`transition_committed` を作らない。Replay が状態を変更するのは schema-valid な `transition_committed` event を読む時だけであり、evidence event は直接遷移を起こさない。
+
+### Closed payload と node identity
+
+event envelope は必須の `payload` object を持ち、`type` ごとに必須 field、許可 field、型を closed schema で固定する。未知 field は拒否する。v1 の production event type は少なくとも `node_declared`、`edge_declared`、`snapshot_activated`、`evidence_recorded`、`evidence_invalidated`、`review_recorded`、`finding_recorded`、`receipt_imported`、`transition_committed` を含む。
+
+| Prefix | Node type |
+|---|---|
+| `REQ-` | requirement |
+| `CODE-` | code |
+| `TEST-` | test |
+| `CMD-` | command |
+| `EVID-` | evidence |
+| `REV-` | review |
+| `CHG-` | change |
+| `FAIL-` | failure |
+| `POL-` | policy |
+
+`transition_committed.payload` は `gate`、`from_state`、`to_state`、`evidence_set_digest`、`cycle_id` を必須とする。Projection は最低限、typed `nodes`、typed `edges`、`evidence_records`、`review_records`、`active_snapshot_digest`、`gate_evidence`、`finding_state`、`valid_review_rounds`、`cycle_id`、execution state を保持する。
+
+### Canonical evidence set と review cycle
+
+public contract function `evidence_set_digest(requirements_digest, snapshot_digest, evidence_records)` を定義する。canonical input は requirements digest、snapshot digest、そして `(evidence_id, artifact_digest, test_id)` で整列した current-cycle の valid evidence records である。自由文、timestamp、配列入力順は digest に含めない。
+
+corrective edge または新 snapshot の activation は `cycle_id` を増やす。G2/G3/G4 の receipt と evidence は current cycle に bind し、旧 cycle の証拠を再利用しない。valid review round は schema、execution、current snapshot、current evidence-set binding が有効で semantic review が commit された review だけである。malformed/stale receipt は round を消費しない。同じ stable `root_cause_id` が連続する二つの valid failed review に現れるか、三回目の valid failed review に達した時点で `ESCALATED` へ遷移する。
+
+### Atomic append と truncation witness
+
+storage mutation primitive は `append_events(...)` とし、`append_event(...)` は一件用 wrapper とする。candidate log が旧 `events.jsonl` bytes を完全な prefix として保持し、event count が batch 件数だけ増えたことを publication 前に検証する。state witness に `event_count` と `head_event_hash` を永続化し、全 write 前と `verify-log` で照合する。snapshot activation と関連する全 `evidence_invalidated` は一つの atomic batch で追記する。
+
+同じ terminal predecessor から複数 successor が分岐してよい。v1 は repository-global lineage registry を持たないため、predecessor の一回限り利用を要求しない。
+
+### Adapter issuer と最終順序
+
+Sol receipt の実 issuer は `skills/orchestrate-gpt-pro-sol-advisor/scripts/governance_receipt.py` とする。eval policy は production exporter を検証する側であり、eval-only 実装を正本にしない。`ADVISOR_UNAVAILABLE` は standalone policy では明示的に許容できるが、combined mode では receipt に downgrade せず hard stop とする。
+
+combined outer protocol の G4 は次の順序を固定する。
+
+1. requirements、review、必要な Sol receipt を import する。
+2. GPT Pro controller の `final-verify` を実行する。
+3. GPT Pro final governance receipt を export する。
+4. final receipt を HOTL に import する。
+5. G4 を `evaluate` し、`transition_committed` により `COMPLETE` へ進める。
+6. `verify-log` で event chain、witness、projection、artifact integrity を再検証する。
 
 ## Current implementation-session prerequisite
 

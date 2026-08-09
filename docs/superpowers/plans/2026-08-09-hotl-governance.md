@@ -10,6 +10,19 @@
 
 ## Global Constraints
 
+The following review corrections govern every task and supersede any older example below that conflicts with them:
+
+- Keep evidence ingestion and state transition separate. `record` and `import-receipt` append evidence only; explicit `evaluate` appends `transition_committed` after a gate passes. No other event advances state.
+- Give every event a type-specific closed `payload`. Enforce node prefixes `REQ-`, `CODE-`, `TEST-`, `CMD-`, `EVID-`, `REV-`, `CHG-`, `FAIL-`, and `POL-` against node types.
+- Maintain a rich projection with typed nodes/edges, evidence and review records, active snapshot, gate evidence, finding state, valid review rounds, and `cycle_id`; do not decide gates from envelope reachability alone.
+- In agentic mode accept privileged approval only from a bound GPT Pro user-approval receipt or host/tool provenance the worker cannot write. Permit `trusted_local_operator` only in an explicit offline/manual policy mode.
+- Use `append_events(...)` as the mutation primitive. Prove old log bytes are an exact prefix, count increases by batch size, and persisted `event_count`/`head_event_hash` witnesses match before every write and during `verify-log`.
+- Advance `cycle_id` on correction or snapshot activation; never reuse old-cycle G2/G3/G4 evidence. Count only fully bound, committed semantic reviews toward escalation.
+- Treat `skills/orchestrate-gpt-pro-sol-advisor/scripts/governance_receipt.py` as the Sol receipt issuer. Eval code tests production behavior rather than becoming production behavior.
+- Use `issued_at_unix` consistently. Permit `ADVISOR_UNAVAILABLE` only in explicit standalone policy; combined mode remains fail closed.
+- Allow branching successors from one terminal predecessor. A single-use rule requires a future repository-global lineage registry and is out of scope for v1.
+- Import the final GPT receipt only after successful GPT Pro `final-verify`; then evaluate G4 and finally run `verify-log`.
+
 - The controller must not call an LLM or infer meaning from free text.
 - Only closed enums, stable IDs, canonical digests, event sequence, active status, and a frozen policy snapshot may affect transitions.
 - `COMPLETE`, `ESCALATED`, `RECOVERY_REQUIRED`, and `STOPPED` are terminal for one execution.
@@ -59,7 +72,8 @@
 
 ### Existing Sol Composition Adapter
 
-- `evals/orchestrate-gpt-pro-sol-advisor/policy.py` — normalize consultation/no-consultation receipts from already-admitted policy outcomes.
+- `skills/orchestrate-gpt-pro-sol-advisor/scripts/governance_receipt.py` — production issuer for consultation/no-consultation receipts from already-admitted policy outcomes.
+- `evals/orchestrate-gpt-pro-sol-advisor/policy.py` — routing policy whose outcomes are passed to and tested against the production receipt issuer.
 - `evals/orchestrate-gpt-pro-sol-advisor/cases.json` — receipt cases for consultation, no-consultation, and fail-closed attestation.
 - `evals/orchestrate-gpt-pro-sol-advisor/test_contract.py` — receipt schema/binding tests.
 - `skills/orchestrate-gpt-pro-sol-advisor/SKILL.md` and `README.md` — require bounded receipt recording while preserving advisory authority.
@@ -348,7 +362,8 @@ git commit -m "feat: add strict HOTL contracts"
   - `resolve_run(repository: Path, execution_id: str) -> RunPaths`
   - `run_lock(path: Path) -> Iterator[None]`
   - `publish_initial_run(paths: RunPaths, state: dict[str, object], first_event: dict[str, object]) -> None`
-  - `append_event(paths: RunPaths, event: dict[str, object], state: dict[str, object], artifacts: Mapping[str, bytes]) -> None`
+  - `append_events(paths: RunPaths, events: Sequence[dict[str, object]], state: dict[str, object], artifacts: Mapping[str, bytes]) -> None`
+  - `append_event(...) -> None` as the one-item wrapper around `append_events`
   - `load_events(paths: RunPaths) -> list[dict[str, object]]`
   - `store_evidence(paths: RunPaths, content: bytes) -> str`
   - `recovery_status(paths: RunPaths) -> dict[str, object]`
@@ -432,29 +447,23 @@ git commit -m "feat: persist HOTL events atomically"
 - Produces:
   - `State(str, Enum)` values from the approved state set.
   - `replay(policy: Mapping[str, object], events: Sequence[Mapping[str, object]]) -> Projection`
-  - `apply_event(projection: Projection, event: Mapping[str, object]) -> Projection`
+  - `project_event(projection: Projection, event: Mapping[str, object]) -> Projection` (evidence projection only; evidence events never advance state)
   - `allowed_transitions(projection: Projection) -> tuple[str, ...]`
   - `evaluate_gate(projection: Projection, gate: str) -> tuple[bool, tuple[str, ...]]`
+  - `commit_transition(repository: Path, execution_id: str, gate: str) -> dict[str, object]` (the only normal state-advance path)
   - `record_event(repository: Path, execution_id: str, event: Mapping[str, object], artifacts: Mapping[str, bytes]) -> dict[str, object]`
   - `start_successor(repository: Path, predecessor_id: str, receipt: Mapping[str, object], policy: Mapping[str, object]) -> dict[str, object]`
   - `status_execution(repository: Path, execution_id: str) -> dict[str, object]`
 
 - [ ] **Step 1: Write failing transition and completion tests**
 
-Use a table-driven test:
+Use a table-driven test proving ingestion and transition evaluation are separate:
 
 ```python
 def fixture_projection(state: str) -> controller.Projection:
-    return controller.Projection(
+    return controller.empty_projection(
         execution_id="EXEC-123456789ABC",
         state=controller.State(state),
-        active_snapshot_digest=None,
-        active_nodes=frozenset(),
-        invalid_evidence=frozenset(),
-        edges=(),
-        unresolved_finding_ids=(),
-        unresolved_root_cause_ids=(),
-        review_round=0,
     )
 
 
@@ -465,6 +474,7 @@ def fixture_event(event_type: str) -> dict[str, object]:
         "execution_id": "EXEC-123456789ABC",
         "sequence": 1,
         "type": event_type,
+        "payload": valid_payload_for(event_type),
         "issuer": {"kind": "controller", "id": "hotl-governance", "version": "1"},
         "subject_ids": [],
         "artifact_refs": [],
@@ -476,27 +486,28 @@ def fixture_event(event_type: str) -> dict[str, object]:
     }
 
 
-TRANSITIONS = (
-    ("REQUIREMENTS", "requirements_frozen", "IMPLEMENT"),
-    ("IMPLEMENT", "implementation_recorded", "LOCAL_VERIFY"),
-    ("LOCAL_VERIFY", "local_verified", "SEMANTIC_REVIEW"),
-    ("SEMANTIC_REVIEW", "semantically_accepted", "COMPLETE"),
-)
+def test_evidence_event_never_advances_state(self) -> None:
+    projection = fixture_projection("REQUIREMENTS")
+    result = controller.project_event(
+        projection, fixture_event("receipt_imported")
+    )
+    self.assertEqual("REQUIREMENTS", result.state.value)
 
-def test_only_formal_transitions_are_allowed(self) -> None:
-    for source, event_type, target in TRANSITIONS:
-        with self.subTest(source=source):
-            projection = fixture_projection(source)
-            result = controller.apply_event(projection, fixture_event(event_type))
-            self.assertEqual(target, result.state.value)
-    with self.assertRaises(controller.GovernanceError):
-        controller.apply_event(fixture_projection("IMPLEMENT"), fixture_event("semantically_accepted"))
+
+def test_only_transition_committed_advances_state(self) -> None:
+    projection = fixture_projection("REQUIREMENTS")
+    result = controller.project_event(
+        projection,
+        fixture_transition(gate="G1", source="REQUIREMENTS", target="IMPLEMENT"),
+    )
+    self.assertEqual("IMPLEMENT", result.state.value)
 ```
 
 Add tests proving:
 
 - same policy + same events yields byte-identical projection;
-- repeated stable `root_cause_id` escalates on the second unresolved review;
+- repeated stable `root_cause_id` escalates on the second consecutive valid failed review;
+- a malformed or stale review does not consume a review round;
 - different free text with identical IDs produces the same transition;
 - any frozen scope/policy/authority change terminates the predecessor;
 - successor requires terminal predecessor and lineage receipt;
@@ -536,21 +547,27 @@ class Projection:
     execution_id: str
     state: State
     active_snapshot_digest: str | None
-    active_nodes: frozenset[str]
-    invalid_evidence: frozenset[str]
+    nodes: Mapping[str, NodeRecord]
     edges: tuple[tuple[str, str, str], ...]
-    unresolved_finding_ids: tuple[str, ...]
-    unresolved_root_cause_ids: tuple[str, ...]
-    review_round: int
+    evidence_records: Mapping[str, EvidenceRecord]
+    review_records: Mapping[str, ReviewRecord]
+    gate_evidence: Mapping[str, tuple[str, ...]]
+    finding_state: Mapping[str, FindingRecord]
+    valid_review_rounds: tuple[ReviewRound, ...]
+    cycle_id: int
 ```
 
 `replay` must be pure: no filesystem, clock, random, or environment access.
+
+`project_event` must reject any state-changing evidence event. Only a closed-schema `transition_committed` payload whose from-state, gate, evidence-set digest, and cycle match the projection may advance state.
 
 - [ ] **Step 4: Implement typed completion and evidence invalidation**
 
 Implement `completion_errors(projection) -> tuple[str, ...]` that checks, per active requirement, code implementation, test verification, command execution, evidence production/proof/current snapshot, accepted review input digest, and change inclusion.
 
-On `snapshot_activated`, invalidate prior `valid_current` evidence through explicit `evidence_invalidated` events. Keep historical evidence in projection but exclude it from G3/G4.
+On `snapshot_activated`, increment `cycle_id` and append the activation plus all required `evidence_invalidated` events in one `append_events(...)` transaction. Keep historical evidence in projection but exclude prior-cycle evidence from G2/G3/G4. Implement the public `evidence_set_digest(requirements_digest, snapshot_digest, evidence_records)` contract using sorted `(evidence_id, artifact_digest, test_id)` records.
+
+Count a review round only when its schema, execution, current snapshot, current evidence-set binding, and semantic-review commit are valid. Malformed or stale receipts consume no round. Escalate when the same stable root-cause ID appears in two consecutive valid failed reviews, or on the third valid failed review.
 
 - [ ] **Step 5: Implement terminal and successor behavior**
 
@@ -564,7 +581,7 @@ On `snapshot_activated`, invalidate prior `valid_current` evidence through expli
 }
 ```
 
-Reject a nonterminal predecessor, missing lineage digest, predecessor reuse, or mutation of the predecessor log.
+Reject a nonterminal predecessor, missing lineage digest, or mutation of the predecessor log. Allow multiple successors to branch from one terminal predecessor; v1 has no repository-global lineage registry.
 
 - [ ] **Step 6: Run focused controller tests**
 
@@ -740,7 +757,7 @@ Expected: FAIL because the export function and command do not exist.
 
 - [ ] **Step 3: Publish receipts inside the authoritative transitions**
 
-Create the requirements receipt when requirements become frozen, the review receipt when an accepted review is committed, and the final receipt in the same `_commit_artifacts_then_state` transaction that publishes `final-gate.json`. Set `issued_at_unix` once from `int(time.time())` during that authoritative mutation and persist it in the immutable receipt artifact.
+Create the requirements receipt when requirements become frozen and the review receipt when an accepted review is committed. Create the final receipt only after the controller's successful `final-verify`, in the authoritative transaction that publishes `final-gate.json`. Set `issued_at_unix` once from `int(time.time())` during each authoritative mutation and persist it in the immutable receipt artifact.
 
 Build each receipt from the candidate state and the exact artifacts already validated for that transition. Do not add a second state transition or a best-effort receipt write.
 
@@ -800,6 +817,7 @@ git commit -m "feat: export GPT Pro governance receipts"
 ### Task 7: Normalize Bounded Sol Consultation Receipts
 
 **Files:**
+- Create: `skills/orchestrate-gpt-pro-sol-advisor/scripts/governance_receipt.py`
 - Modify: `evals/orchestrate-gpt-pro-sol-advisor/policy.py`
 - Modify: `evals/orchestrate-gpt-pro-sol-advisor/cases.json`
 - Modify: `evals/orchestrate-gpt-pro-sol-advisor/test_contract.py`
@@ -809,7 +827,7 @@ git commit -m "feat: export GPT Pro governance receipts"
 **Interfaces:**
 - Consumes: already-attested `route()` result and Codex disposition.
 - Produces:
-  - `governance_receipt(scenario: dict[str, Any], route_result: dict[str, Any], disposition: dict[str, str] | None) -> dict[str, Any]`
+  - production `governance_receipt(scenario: dict[str, Any], route_result: dict[str, Any], disposition: dict[str, str] | None) -> dict[str, Any]`
   - `consultation` receipt or `no-consultation` receipt with a closed reason.
 
 - [ ] **Step 1: Write failing policy receipt tests**
@@ -860,7 +878,7 @@ Expected: FAIL because `governance_receipt` does not exist.
 
 - [ ] **Step 3: Implement closed receipt normalization**
 
-`governance_receipt` may emit consultation only when `advice_admitted == 1`, runtime observations are trusted, and disposition is one of `accept`, `reject`, `partially accept`.
+Implement `governance_receipt` in the production script; eval policy imports or invokes that issuer instead of owning an eval-only implementation. It may emit consultation only when `advice_admitted == 1`, runtime observations are trusted, and disposition is one of `accept`, `reject`, `partially accept`.
 
 It may emit no-consultation only for:
 
@@ -869,10 +887,11 @@ NO_CONSULTATION_REASONS = {
     "NOT_APPLICABLE",
     "NO_MATERIAL_UNCERTAINTY",
     "POLICY_NOT_REQUIRED",
+    "ADVISOR_UNAVAILABLE",
 }
 ```
 
-Do not emit `ADVISOR_UNAVAILABLE` for combined-mode preflight, invocation, or attestation failure; those remain hard stops.
+Allow `ADVISOR_UNAVAILABLE` only when an explicit standalone policy says advisor availability is not a runtime dependency. Do not emit it for combined-mode preflight, invocation, or attestation failure; those remain hard stops.
 
 - [ ] **Step 4: Update Skill and cases**
 
@@ -1089,13 +1108,21 @@ Expected: every command PASS; `git diff --check` produces no output.
 
 Run:
 
+Capture the comparison base during implementation preflight:
+
 ```powershell
-git status --short
-git diff --stat 60fa856...HEAD
-git diff 60fa856...HEAD -- skills/hotl-governance skills/gpt-pro-codex-loop skills/orchestrate-gpt-pro-sol-advisor evals/hotl-governance evals/gpt-pro-codex-loop evals/orchestrate-gpt-pro-sol-advisor tests/test_hotl_governance.py .github/workflows/validate-skills.yml README.md
+$BASE_SHA = git rev-parse HEAD
 ```
 
-Success: no files outside the approved plan changed; no automatic commit, push, PR, or deploy occurred.
+Then use the captured value:
+
+```powershell
+git status --short
+git diff --stat "$BASE_SHA...HEAD"
+git diff "$BASE_SHA...HEAD" -- skills/hotl-governance skills/gpt-pro-codex-loop skills/orchestrate-gpt-pro-sol-advisor evals/hotl-governance evals/gpt-pro-codex-loop evals/orchestrate-gpt-pro-sol-advisor tests/test_hotl_governance.py .github/workflows/validate-skills.yml README.md
+```
+
+Success: no files outside the approved plan changed. The HOTL runtime performed no commit, push, PR, or deploy; the development plan's explicit checkpoint commits are intentional and separate from runtime behavior.
 
 - [ ] **Step 7: Commit generated integration changes**
 
@@ -1116,7 +1143,8 @@ Before implementation in combined mode:
 2. Stop before GPT Pro initialization if any combined-mode preflight fails.
 3. Run `gpt-pro-codex-loop` as the outer protocol.
 4. Use one bounded Sol consultation only at a real Codex commitment boundary; never invoke `sol-advisor:orchestration` inside combined mode.
-5. After local verification, export bound GPT Pro and optional Sol receipts into HOTL.
-6. Require the GPT Pro controller's successful `final-verify`.
-7. Run HOTL `verify-log` and require all integrity dimensions and G4 to pass.
-8. Inspect the complete diff and rerun the verification commands from the primary session before accepting completion.
+5. Import bound requirements, review, and applicable Sol receipts into HOTL; ingestion must not advance state.
+6. Require the GPT Pro controller's successful `final-verify`, then export its final receipt.
+7. Import the final receipt, explicitly evaluate G4, and require a valid `transition_committed` event to reach `COMPLETE`.
+8. Run HOTL `verify-log` and require the hash-chain witness, projection, artifacts, and G4 integrity to pass.
+9. Inspect the complete diff and rerun the verification commands from the primary session before accepting completion.
