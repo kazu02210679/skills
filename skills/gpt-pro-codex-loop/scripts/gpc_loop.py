@@ -23,6 +23,7 @@ COMMANDS = frozenset(
         "prepare-review",
         "accept-review",
         "final-verify",
+        "export-governance-receipt",
         "status",
         "abandon-attempt",
     }
@@ -93,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     accept_review.add_argument("--observed-plan-label")
 
     _command_parser(subparsers, "final-verify")
+    export_receipt = _command_parser(subparsers, "export-governance-receipt")
+    export_receipt.add_argument(
+        "--type", required=True, choices=("requirements", "review", "final")
+    )
     _command_parser(subparsers, "status")
 
     abandon = _command_parser(subparsers, "abandon-attempt")
@@ -148,6 +153,8 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
         )
     if args.command == "final-verify":
         return controller.final_verify(args.repo, args.task)
+    if args.command == "export-governance-receipt":
+        return controller.export_governance_receipt(args.repo, args.task, args.type)
     if args.command == "status":
         return controller.status_run(args.repo, args.task)
     if args.command == "abandon-attempt":

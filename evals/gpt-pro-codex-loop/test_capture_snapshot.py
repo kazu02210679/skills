@@ -134,6 +134,31 @@ class CaptureSnapshotTests(unittest.TestCase):
         with self.assertRaises(SnapshotError):
             capture(self.repo, self.baseline)
 
+    def test_untracked_hotl_metadata_is_excluded(self) -> None:
+        metadata = self.repo / ".hotl" / "EXEC-123456789ABC" / "state.json"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("{}\n", encoding="utf-8")
+
+        snapshot = capture(self.repo, self.baseline)
+
+        self.assertNotIn(
+            ".hotl/EXEC-123456789ABC/state.json",
+            [item["path"] for item in snapshot["changed_files"]],
+        )
+        self.assertNotIn(
+            ".hotl/EXEC-123456789ABC/state.json",
+            [item["path"] for item in snapshot["untracked_files"]],
+        )
+
+    def test_tracked_or_staged_hotl_metadata_is_rejected(self) -> None:
+        metadata = self.repo / ".hotl" / "EXEC-123456789ABC" / "state.json"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("{}\n", encoding="utf-8")
+        run_git(self.repo, "add", "-f", str(metadata))
+
+        with self.assertRaises(SnapshotError):
+            capture(self.repo, self.baseline)
+
     def test_staged_case_variant_metadata_follows_filesystem_case_rules(self) -> None:
         metadata = self.repo / ".AI-PRO-LOOP" / "task" / "state.json"
         metadata.parent.mkdir(parents=True)

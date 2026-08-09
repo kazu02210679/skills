@@ -49,6 +49,26 @@ predicate emits no transition.
 
 Only `evaluate` may advance a gate. `record` and `import-receipt` append validated evidence but leave state unchanged. A failed predicate emits no transition; it never creates an implicit repair path.
 
+## Requirements input binding
+
+Initialization and successor creation accept two exact closed requirements
+inputs. The legacy form, `{requirements: [sorted IDs]}`, preserves the digest
+of that canonical ID manifest. The external-bound form is exactly
+`{requirements: [sorted IDs], source_digest: "sha256:...", source_artifact:
+VALUE}`. HOTL must canonicalize `source_artifact`, prove its SHA-256 equals
+`source_digest`, store those exact canonical bytes content-addressed, and use
+`source_digest` as the projection requirements digest before publishing the
+run. The ID manifest remains independently stored for typed requirement-node
+audit. A missing counterpart, unknown field, unrepresentable value, or digest
+mismatch fails before run creation.
+
+For GPT Pro requirements, the external artifact is the exact persisted
+canonical `requirements.json` value. Its artifact `requirements_digest` is
+intentionally distinct from the receipt's semantic-transition `output_digest`
+(`active_requirements_digest`). The receipt's `input_digest` independently
+binds the GPT pre-transition input; HOTL does not reinterpret it as its own
+requirements or evidence digest.
+
 ## Receipt contract
 
 Each privileged source receipt is issuer-specific and closed-schema. After its
@@ -71,6 +91,19 @@ receipts also bind the evidence set and cycle, while their snapshot is optional
 so they can terminate an execution before snapshot activation. Lineage uses
 null lifecycle bindings because its immutable evidence object carries the
 predecessor and supersedes bindings.
+
+An external `gpt-pro-codex-loop` source receipt also has an exact issuer
+provenance binding: task slug, deterministic run ID, attested conversation URL,
+model label, reasoning label, and plan label. That source binding is distinct
+from the outer controller's live lifecycle binding. GPT requirements receipts
+arrive with null snapshot/evidence/cycle fields and remain frozen-null after
+admission. GPT semantic-review and final receipts arrive with the GPT-reviewed
+snapshot but null external evidence/cycle fields; after validating issuer
+provenance and current execution, authority, requirements, and snapshot, HOTL
+stamps the admitted event with its current evidence-set digest and cycle under
+the caller-held lock. Later lifecycle changes still make that admitted receipt
+non-current. Other issuers retain their existing closed schemas and binding
+rules.
 
 Generic `record` accepts only `evidence_recorded` from a tool issuer. It rejects
 all receipts, reviews, findings, transitions, snapshot changes, invalidations,

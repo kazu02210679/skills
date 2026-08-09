@@ -22,9 +22,17 @@ import hotl_store as store
 
 
 EXECUTION = "EXEC-123456789ABC"
-AUTHORITY = "sha256:" + "a" * 64
 SNAPSHOT = "sha256:" + "b" * 64
 NONCE = "c" * 32
+GPT_BINDING = {
+    "conversation_url": "https://chatgpt.com/c/hotl-fixture",
+    "model_label": "GPT-5.6 Sol",
+    "plan_label": "Pro",
+    "reasoning_label": "Pro",
+    "run_id": "gpc-loop-hotl-fixture",
+    "task_slug": "hotl-fixture",
+}
+AUTHORITY = contract.canonical_digest(GPT_BINDING)
 
 
 def snapshot_tree(root: Path) -> dict[str, bytes]:
@@ -125,22 +133,28 @@ class HotlCliTests(unittest.TestCase):
             "stop": "gpt-pro-codex-loop",
         }
         frozen = receipt_type in {"requirements", "approval"}
+        receipt_issuer = issuer or issuer_by_type[receipt_type]
+        gpt_external = receipt_issuer == "gpt-pro-codex-loop" and receipt_type in {
+            "requirements",
+            "semantic_review",
+            "final",
+        }
         evidence_digest = controller.evidence_set_digest(
             str(projection["requirements_digest"]),
             projection["active_snapshot_digest"],
             projection["evidence_records"],
         )
-        return {
+        receipt = {
             "authority_snapshot_digest": AUTHORITY,
             "claims": claims or {},
-            "cycle_id": None if frozen else projection["cycle_id"],
-            "evidence_set_digest": None if frozen else evidence_digest,
+            "cycle_id": None if frozen or gpt_external else projection["cycle_id"],
+            "evidence_set_digest": None if frozen or gpt_external else evidence_digest,
             "execution_id": self.execution,
             "input_digest": str(projection["requirements_digest"])
             if frozen
             else evidence_digest,
             "issued_at_unix": 1,
-            "issuer_skill": issuer or issuer_by_type[receipt_type],
+            "issuer_skill": receipt_issuer,
             "issuer_version": "1",
             "nonce": NONCE,
             "output_digest": "sha256:" + hashlib.sha256(receipt_id.encode()).hexdigest(),
@@ -151,6 +165,9 @@ class HotlCliTests(unittest.TestCase):
             "snapshot_digest": None if frozen else projection["active_snapshot_digest"],
             "transaction_id": "TXN-" + receipt_id,
         }
+        if receipt["issuer_skill"] == "gpt-pro-codex-loop":
+            receipt["binding"] = dict(GPT_BINDING)
+        return receipt
 
     def _import(self, receipt: dict[str, object], name: str = "receipt.json") -> dict[str, object]:
         path = self._write(name, receipt)
@@ -376,6 +393,113 @@ class HotlCliTests(unittest.TestCase):
             [event["type"] for event in events],
         )
 
+    def test_init_accepts_exact_external_requirements_artifact_binding(self) -> None:
+        source_artifact = {
+            "acceptance_criteria": [{"id": "AC-1", "criterion": "Pass."}],
+            "requirements": [{"id": "REQ-1", "statement": "Bound."}],
+            "schema_version": 1,
+        }
+        source_bytes = contract.canonical_json_bytes(source_artifact)
+        source_digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+        requirements = self._write(
+            "external-requirements.json",
+            {
+                "requirements": ["REQ-1"],
+                "source_artifact": source_artifact,
+                "source_digest": source_digest,
+            },
+        )
+        policy = self._write(
+            "external-policy.json",
+            {
+                "active_snapshot_digest": SNAPSHOT,
+                "approval_mode": "agentic",
+                "authority_snapshot_digest": AUTHORITY,
+                "cycle_id": 1,
+                "execution_id": self.execution,
+                "host_approval_evidence_digest": None,
+                "receipt_nonce": NONCE,
+                "schema_version": 1,
+            },
+        )
+
+        result = cli.main_json(
+            [
+                "init",
+                "--repo",
+                str(self.repository),
+                "--execution",
+                self.execution,
+                "--policy",
+                str(policy),
+                "--requirements",
+                str(requirements),
+            ]
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(source_digest, self._projection()["requirements_digest"])
+        self.assertEqual(
+            source_bytes,
+            (
+                store.resolve_run(self.repository, self.execution).evidence
+                / source_digest[7:]
+            ).read_bytes(),
+        )
+
+    def test_init_rejects_incomplete_or_mismatched_external_requirements(self) -> None:
+        source = {"requirements": [{"id": "REQ-1"}], "schema_version": 1}
+        digest = contract.canonical_digest(source)
+        cases = (
+            {"requirements": ["REQ-1"], "source_digest": digest},
+            {"requirements": ["REQ-1"], "source_artifact": source},
+            {
+                "requirements": ["REQ-1"],
+                "source_artifact": source,
+                "source_digest": "sha256:" + "d" * 64,
+            },
+            {
+                "requirements": ["REQ-1"],
+                "source_artifact": source,
+                "source_digest": digest,
+                "unknown": True,
+            },
+        )
+        for index, value in enumerate(cases, 1):
+            with self.subTest(index=index):
+                execution = f"EXEC-0000000002{index:02d}"
+                requirements = self._write(f"external-bad-{index}.json", value)
+                policy = self._write(
+                    f"external-bad-policy-{index}.json",
+                    {
+                        "active_snapshot_digest": SNAPSHOT,
+                        "approval_mode": "agentic",
+                        "authority_snapshot_digest": AUTHORITY,
+                        "cycle_id": 1,
+                        "execution_id": execution,
+                        "host_approval_evidence_digest": None,
+                        "receipt_nonce": NONCE,
+                        "schema_version": 1,
+                    },
+                )
+                result = cli.main_json(
+                    [
+                        "init",
+                        "--repo",
+                        str(self.repository),
+                        "--execution",
+                        execution,
+                        "--policy",
+                        str(policy),
+                        "--requirements",
+                        str(requirements),
+                    ]
+                )
+                self.assertFalse(result["ok"], result)
+                self.assertFalse(
+                    store.resolve_run(self.repository, execution).root.exists()
+                )
+
     def test_status_is_read_only_and_lists_only_executable_safe_commands(self) -> None:
         self._init()
         before = snapshot_tree(self.repository / ".hotl")
@@ -472,6 +596,73 @@ class HotlCliTests(unittest.TestCase):
         result = self._import(receipt, "req-1-replay.json")
         self.assertFalse(result["ok"])
         self.assertEqual("REPLAYED_RECEIPT", result["error"]["code"])
+
+    def test_gpt_receipt_binding_is_closed_and_required(self) -> None:
+        self._init()
+        receipt = self._receipt("requirements", "RCP-GPT-BINDING")
+
+        missing = dict(receipt)
+        del missing["binding"]
+        self.assertEqual(
+            "INVALID_RECEIPT_BINDING",
+            self._import(missing, "gpt-binding-missing.json")["error"]["code"],
+        )
+
+        wrong_run = dict(receipt)
+        wrong_run["binding"] = dict(receipt["binding"], run_id="gpc-loop-other")
+        self.assertEqual(
+            "INVALID_RECEIPT_BINDING",
+            self._import(wrong_run, "gpt-binding-wrong-run.json")["error"]["code"],
+        )
+
+        unknown = dict(receipt)
+        unknown["binding"] = dict(receipt["binding"], model_policy="PRO_CLASS")
+        self.assertEqual(
+            "INVALID_FIELDS",
+            self._import(unknown, "gpt-binding-unknown.json")["error"]["code"],
+        )
+
+    def test_gpt_requirements_receipt_keeps_frozen_null_admission_bindings(self) -> None:
+        self._init()
+        requirements = self._receipt("requirements", "RCP-GPT-REQ-LIVE")
+        self.assertIsNone(requirements["evidence_set_digest"])
+        self.assertIsNone(requirements["cycle_id"])
+        self.assertTrue(self._import(requirements, "gpt-req-live.json")["ok"])
+        frozen_record = self._projection()["receipt_records"]["RCP-GPT-REQ-LIVE"]
+        self.assertIsNone(frozen_record["snapshot_digest"])
+        self.assertIsNone(frozen_record["evidence_set_digest"])
+        self.assertIsNone(frozen_record["cycle_id"])
+
+    def test_gpt_review_and_final_receipts_receive_current_live_admission_bindings(self) -> None:
+        self._reach_semantic_review()
+        before = self._projection()
+        current_evidence = controller.evidence_set_digest(
+            str(before["requirements_digest"]),
+            before["active_snapshot_digest"],
+            before["evidence_records"],
+        )
+        review = self._receipt(
+            "semantic_review",
+            "RCP-GPT-REV-LIVE",
+            claims={
+                "edges": [],
+                "findings": [],
+                "review_id": "REV-GPT-LIVE",
+                "root_cause_ids": [],
+                "status": "accepted",
+            },
+        )
+        self.assertIsNone(review["evidence_set_digest"])
+        self.assertIsNone(review["cycle_id"])
+        self.assertTrue(self._import(review, "gpt-rev-live.json")["ok"])
+        final = self._receipt("final", "RCP-GPT-FINAL-LIVE")
+        self.assertTrue(self._import(final, "gpt-final-live.json")["ok"])
+        records = self._projection()["receipt_records"]
+        for receipt_id in ("RCP-GPT-REV-LIVE", "RCP-GPT-FINAL-LIVE"):
+            self.assertEqual(before["cycle_id"], records[receipt_id]["cycle_id"])
+            self.assertEqual(
+                current_evidence, records[receipt_id]["evidence_set_digest"]
+            )
 
     def test_privileged_receipt_validation_and_append_share_one_run_lock(self) -> None:
         self._init()

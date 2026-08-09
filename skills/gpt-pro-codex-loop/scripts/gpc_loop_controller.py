@@ -25,6 +25,40 @@ import validate_packet
 
 
 SCHEMA_VERSION = 1
+GOVERNANCE_RECEIPT_SCHEMA_VERSION = 1
+GOVERNANCE_RECEIPT_TYPES = {
+    "requirements": "requirements",
+    "review": "semantic_review",
+    "final": "final",
+}
+GOVERNANCE_BINDING_FIELDS = {
+    "task_slug",
+    "run_id",
+    "conversation_url",
+    "model_label",
+    "reasoning_label",
+    "plan_label",
+}
+GOVERNANCE_RECEIPT_FIELDS = {
+    "authority_snapshot_digest",
+    "binding",
+    "claims",
+    "cycle_id",
+    "evidence_set_digest",
+    "execution_id",
+    "input_digest",
+    "issued_at_unix",
+    "issuer_skill",
+    "issuer_version",
+    "nonce",
+    "output_digest",
+    "receipt_id",
+    "receipt_schema_version",
+    "receipt_type",
+    "requirements_digest",
+    "snapshot_digest",
+    "transaction_id",
+}
 TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
 TEMPLATE_TOKEN = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 ATTEMPT_NAME = re.compile(r"(?:expected|abandoned|consumed)-attempt-(\d+)\.json\Z")
@@ -358,6 +392,121 @@ def _normalize_prompt(value: str) -> str:
 
 def sha256_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def governance_execution_id(task_slug: str) -> str:
+    """Map one validated GPT Pro run identity to the closed HOTL execution shape."""
+    if not isinstance(task_slug, str) or TASK_SLUG.fullmatch(task_slug) is None:
+        raise ControllerError("INVALID_TASK_SLUG", "Invalid task slug.")
+    identity = _canonical_json_bytes(
+        {
+            "issuer_skill": "gpt-pro-codex-loop",
+            "run_id": f"gpc-loop-{task_slug}",
+            "task_slug": task_slug,
+        }
+    )
+    return "EXEC-" + hashlib.sha256(identity).hexdigest()[:12].upper()
+
+
+def governance_receipt_nonce(binding: Mapping[str, object]) -> str:
+    """Derive the stable outer receipt nonce without exposing the attempt nonce key."""
+    return hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "binding": dict(binding),
+                "purpose": "gpt-pro-governance-receipt-nonce-v1",
+            }
+        )
+    ).hexdigest()[:32]
+
+
+def _governance_binding(
+    paths: RunPaths, state: Mapping[str, object]
+) -> dict[str, object]:
+    binding = {
+        "task_slug": paths.task_slug,
+        "run_id": f"gpc-loop-{paths.task_slug}",
+        "conversation_url": state.get("bound_conversation_url"),
+        "model_label": state.get("visible_model_label"),
+        "reasoning_label": state.get("visible_reasoning_label"),
+        "plan_label": state.get("visible_plan_label"),
+    }
+    if state.get("conversation_binding_state") != "CONVERSATION_BOUND":
+        raise ControllerError(
+            "INVALID_STATE", "Governance receipt requires a bound Browser conversation."
+        )
+    if any(
+        not isinstance(binding[field], str) or not str(binding[field]).strip()
+        for field in ("conversation_url", "model_label")
+    ):
+        raise ControllerError(
+            "INVALID_STATE", "Governance receipt Browser provenance is incomplete."
+        )
+    for field in ("reasoning_label", "plan_label"):
+        value = binding[field]
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ControllerError(
+                "INVALID_STATE", "Governance receipt model attestation is invalid."
+            )
+    return binding
+
+
+def _governance_authority_digest(binding: Mapping[str, object]) -> str:
+    return sha256_bytes(_canonical_json_bytes(dict(binding)))
+
+
+def _governance_receipt(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    receipt_type: str,
+    *,
+    input_digest: str,
+    output_digest: str,
+    requirements_digest: str,
+    transaction_id: str,
+    snapshot_digest: object,
+    claims: Mapping[str, object],
+    issued_at_unix: int,
+) -> dict[str, object]:
+    binding = _governance_binding(paths, state)
+    authority_digest = _governance_authority_digest(binding)
+    nonce = governance_receipt_nonce(binding)
+    receipt_id_seed = _canonical_json_bytes(
+        {
+            "authority_snapshot_digest": authority_digest,
+            "binding": binding,
+            "claims": dict(claims),
+            "execution_id": governance_execution_id(paths.task_slug),
+            "input_digest": input_digest,
+            "issued_at_unix": issued_at_unix,
+            "nonce": nonce,
+            "output_digest": output_digest,
+            "receipt_type": receipt_type,
+            "requirements_digest": requirements_digest,
+            "snapshot_digest": snapshot_digest,
+            "transaction_id": transaction_id,
+        }
+    )
+    return {
+        "authority_snapshot_digest": authority_digest,
+        "binding": binding,
+        "claims": dict(claims),
+        "cycle_id": None,
+        "evidence_set_digest": None,
+        "execution_id": governance_execution_id(paths.task_slug),
+        "input_digest": input_digest,
+        "issued_at_unix": issued_at_unix,
+        "issuer_skill": "gpt-pro-codex-loop",
+        "issuer_version": "1",
+        "nonce": nonce,
+        "output_digest": output_digest,
+        "receipt_id": "RCP-GPC-" + hashlib.sha256(receipt_id_seed).hexdigest()[:20].upper(),
+        "receipt_schema_version": GOVERNANCE_RECEIPT_SCHEMA_VERSION,
+        "receipt_type": receipt_type,
+        "requirements_digest": requirements_digest,
+        "snapshot_digest": snapshot_digest,
+        "transaction_id": transaction_id,
+    }
 
 
 def _parse_template(
@@ -3014,16 +3163,43 @@ def accept_requirements(
             (paths.run / f"envelope-{revision:02d}.json", envelope),
             (_requirements_revision_path(paths, revision), requirements),
         ]
+        replaceable = (
+            {paths.run / "requirements.json"}
+            if target == "REQUIREMENTS_FROZEN"
+            else set()
+        )
         if target == "REQUIREMENTS_FROZEN":
             artifacts.append((paths.run / "requirements.json", requirements))
+            receipt_path = paths.run / "governance-receipt-requirements.json"
+            artifacts.append(
+                (
+                    receipt_path,
+                    _governance_receipt(
+                        paths,
+                        candidate,
+                        "requirements",
+                        input_digest=validate_packet.canonical_digest(expected),
+                        output_digest=requirements_digest,
+                        requirements_digest=sha256_bytes(
+                            _canonical_json_bytes(requirements)
+                        ),
+                        transaction_id=(
+                            f"gpc-loop-{task_slug}:requirements-{revision:02d}"
+                        ),
+                        snapshot_digest=None,
+                        claims={},
+                        issued_at_unix=int(time.time()),
+                    ),
+                )
+            )
+            if receipt_path.exists():
+                replaceable.add(receipt_path)
         _commit_artifacts_then_state(
             paths,
             artifacts,
             candidate,
             expected_path,
-            frozenset({paths.run / "requirements.json"})
-            if target == "REQUIREMENTS_FROZEN"
-            else frozenset(),
+            frozenset(replaceable),
             expected_state_digest=loaded_state_digest,
         )
         _record_events_best_effort(paths, [{
@@ -3324,13 +3500,53 @@ def accept_review(
         turn_id = expected.get("turn_id")
         if not isinstance(turn_id, str):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding review attempt is invalid.")
+        artifacts: list[tuple[Path, str | dict[str, object]]] = [
+            (paths.run / "responses" / f"{turn_id}.raw.md", raw),
+            (paths.run / f"review-envelope-{review_round + 1:02d}.json", envelope),
+            (paths.run / "review.json", review),
+        ]
+        if decision == "PASS":
+            review_id = "REV-GPC-" + review_digest[7:19].upper()
+            requirements_ids = [
+                item["id"]
+                for item in requirements.get("requirements", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+            artifacts.append(
+                (
+                    paths.run / "governance-receipt-review.json",
+                    _governance_receipt(
+                        paths,
+                        candidate,
+                        "semantic_review",
+                        input_digest=str(state["active_report_digest"]),
+                        output_digest=review_digest,
+                        requirements_digest=sha256_bytes(
+                            _canonical_json_bytes(requirements)
+                        ),
+                        transaction_id=f"gpc-loop-{task_slug}:{turn_id}",
+                        snapshot_digest=review["reviewed_snapshot_digest"],
+                        claims={
+                            "edges": [
+                                {
+                                    "edge": "reviews",
+                                    "source_id": review_id,
+                                    "target_id": requirement_id,
+                                }
+                                for requirement_id in sorted(requirements_ids)
+                            ],
+                            "findings": [],
+                            "review_id": review_id,
+                            "root_cause_ids": [],
+                            "status": "accepted",
+                        },
+                        issued_at_unix=int(time.time()),
+                    ),
+                )
+            )
         _commit_artifacts_then_state(
             paths,
-            [
-                (paths.run / "responses" / f"{turn_id}.raw.md", raw),
-                (paths.run / f"review-envelope-{review_round + 1:02d}.json", envelope),
-                (paths.run / "review.json", review),
-            ],
+            artifacts,
             candidate,
             expected_path,
             frozenset({paths.run / "review.json"}),
@@ -3347,19 +3563,290 @@ def accept_review(
     return status_run(paths.repository, task_slug)
 
 
+def _receipt_path(paths: RunPaths, receipt_type: str) -> Path:
+    if receipt_type not in GOVERNANCE_RECEIPT_TYPES:
+        raise ControllerError(
+            "INVALID_RECEIPT_TYPE",
+            "Governance receipt type must be requirements, review, or final.",
+        )
+    return paths.run / f"governance-receipt-{receipt_type}.json"
+
+
+def _requirements_receipt_input(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    requirements: Mapping[str, object],
+) -> tuple[str, str]:
+    revision = state.get("active_requirements_revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise ControllerError("INVALID_STATE", "Active requirements revision is invalid.")
+    envelope = load_json(paths.run / f"envelope-{revision:02d}.json")
+    if envelope.get("payload") != requirements:
+        raise ControllerError(
+            "INVALID_STATE", "Requirements envelope does not match active requirements."
+        )
+    if requirements.get("decision") == "NEED_USER_INPUT":
+        stop_sequence = state.get("resolution_stop_sequence")
+        if not isinstance(stop_sequence, int) or isinstance(stop_sequence, bool):
+            raise ControllerError(
+                "INVALID_STATE", "Approved requirements lack stop provenance."
+            )
+        return (
+            validate_packet.canonical_digest(envelope),
+            f"gpc-loop-{paths.task_slug}:approval-stop-{stop_sequence:02d}",
+        )
+    expected = {field: envelope.get(field) for field in EXPECTED_HEADER_FIELDS}
+    return (
+        validate_packet.canonical_digest(expected),
+        f"gpc-loop-{paths.task_slug}:requirements-{revision:02d}",
+    )
+
+
+def _review_receipt_claims(
+    requirements: Mapping[str, object], review_digest: str
+) -> dict[str, object]:
+    review_id = "REV-GPC-" + review_digest[7:19].upper()
+    identifiers = sorted(
+        item["id"]
+        for item in requirements.get("requirements", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    )
+    return {
+        "edges": [
+            {"edge": "reviews", "source_id": review_id, "target_id": identifier}
+            for identifier in identifiers
+        ],
+        "findings": [],
+        "review_id": review_id,
+        "root_cause_ids": [],
+        "status": "accepted",
+    }
+
+
+def _expected_governance_receipt(
+    receipt: Mapping[str, object],
+    state: Mapping[str, object],
+    paths: RunPaths,
+    receipt_type: str,
+) -> dict[str, object]:
+    issued_at = receipt.get("issued_at_unix")
+    if not isinstance(issued_at, int) or isinstance(issued_at, bool) or issued_at < 0:
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt timestamp is invalid."
+        )
+    requirements = _active_requirements(paths, state)
+    if receipt_type == "requirements":
+        input_digest, transaction_id = _requirements_receipt_input(
+            paths, state, requirements
+        )
+        return _governance_receipt(
+            paths,
+            state,
+            "requirements",
+            input_digest=input_digest,
+            output_digest=str(state["active_requirements_digest"]),
+            requirements_digest=sha256_bytes(_canonical_json_bytes(requirements)),
+            transaction_id=transaction_id,
+            snapshot_digest=None,
+            claims={},
+            issued_at_unix=issued_at,
+        )
+    report = load_json(paths.run / "implementation-report.json")
+    report_errors = validate_packet.validate_report(report, requirements)
+    _raise_validation(
+        "INVALID_STATE", "Stored implementation report is invalid.", report_errors
+    )
+    report_digest = validate_packet.canonical_digest(report)
+    if report_digest != state.get("active_report_digest"):
+        raise ControllerError(
+            "INVALID_STATE", "Stored implementation report does not match trusted state."
+        )
+    review = load_json(paths.run / "review.json")
+    review_errors = validate_packet.validate_review(review, requirements, report)
+    _raise_validation("INVALID_STATE", "Stored review is invalid.", review_errors)
+    review_digest = validate_packet.canonical_digest(review)
+    if (
+        review_digest != state.get("active_review_packet_digest")
+        or review.get("decision") != "PASS"
+        or review.get("reviewed_snapshot_digest")
+        != state.get("reviewed_snapshot_digest")
+    ):
+        raise ControllerError(
+            "INVALID_STATE", "Stored accepted review does not match trusted state."
+        )
+    review_round = state.get("review_round")
+    if not isinstance(review_round, int) or isinstance(review_round, bool) or review_round < 1:
+        raise ControllerError("INVALID_STATE", "Trusted review round is invalid.")
+    if receipt_type == "review":
+        if state.get("phase") not in {"FINAL_VERIFICATION", "COMPLETE"}:
+            raise ControllerError(
+                "RECEIPT_WRONG_STATE", "Review receipt is not valid in the current state."
+            )
+        return _governance_receipt(
+            paths,
+            state,
+            "semantic_review",
+            input_digest=report_digest,
+            output_digest=review_digest,
+            requirements_digest=sha256_bytes(_canonical_json_bytes(requirements)),
+            transaction_id=f"gpc-loop-{paths.task_slug}:review-{review_round:02d}",
+            snapshot_digest=review["reviewed_snapshot_digest"],
+            claims=_review_receipt_claims(requirements, review_digest),
+            issued_at_unix=issued_at,
+        )
+    if state.get("phase") != "COMPLETE":
+        raise ControllerError(
+            "RECEIPT_WRONG_STATE", "Final receipt requires successful final verification."
+        )
+    snapshot = load_json(paths.run / "snapshot.json")
+    snapshot_digest = snapshot.get("snapshot_digest")
+    if snapshot_digest != state.get("current_snapshot_digest"):
+        raise ControllerError(
+            "INVALID_STATE", "Stored final snapshot does not match trusted state."
+        )
+    gate = load_json(paths.run / "final-gate.json")
+    final_validation_state = dict(state)
+    final_validation_state["phase"] = "FINAL_VERIFICATION"
+    gate_errors = validate_packet.validate_final_gate(
+        gate, final_validation_state, report, requirements
+    )
+    _raise_validation("INVALID_STATE", "Stored final gate is invalid.", gate_errors)
+    final_input_digest = validate_packet.canonical_digest(
+        {
+            "current_snapshot_digest": snapshot_digest,
+            "report_digest": report_digest,
+            "requirements_digest": state["active_requirements_digest"],
+            "review_digest": review_digest,
+            "reviewed_snapshot_digest": state["reviewed_snapshot_digest"],
+        }
+    )
+    return _governance_receipt(
+        paths,
+        state,
+        "final",
+        input_digest=final_input_digest,
+        output_digest=validate_packet.canonical_digest(gate),
+        requirements_digest=sha256_bytes(_canonical_json_bytes(requirements)),
+        transaction_id=f"gpc-loop-{paths.task_slug}:final-verify-{review_round:02d}",
+        snapshot_digest=snapshot_digest,
+        claims={},
+        issued_at_unix=issued_at,
+    )
+
+
+def _validate_governance_receipt(
+    receipt: dict[str, object],
+    state: Mapping[str, object],
+    paths: RunPaths,
+    receipt_type: str,
+) -> dict[str, object]:
+    if set(receipt) != GOVERNANCE_RECEIPT_FIELDS:
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt fields are invalid."
+        )
+    binding = receipt.get("binding")
+    if not isinstance(binding, dict) or set(binding) != GOVERNANCE_BINDING_FIELDS:
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt binding is invalid."
+        )
+    expected = _expected_governance_receipt(receipt, state, paths, receipt_type)
+    provenance_fields = {
+        "authority_snapshot_digest",
+        "binding",
+        "execution_id",
+        "issuer_skill",
+        "issuer_version",
+        "nonce",
+        "receipt_id",
+        "receipt_schema_version",
+        "receipt_type",
+        "transaction_id",
+    }
+    if any(receipt.get(field) != expected.get(field) for field in provenance_fields):
+        raise ControllerError(
+            "GOVERNANCE_RECEIPT_PROVENANCE_MISMATCH",
+            "Governance receipt provenance does not match the authoritative run.",
+        )
+    if receipt != expected:
+        raise ControllerError(
+            "STALE_GOVERNANCE_RECEIPT",
+            "Governance receipt does not match current trusted state and artifacts.",
+        )
+    return dict(receipt)
+
+
+def export_governance_receipt(
+    repository: Path, task_slug: str, receipt_type: str
+) -> dict[str, object]:
+    """Return one persisted canonical receipt after read-only authoritative validation."""
+    paths = resolve_run(repository, task_slug)
+    receipt_path = _receipt_path(paths, receipt_type)
+    if not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    if not receipt_path.is_file():
+        raise ControllerError(
+            "RECEIPT_NOT_AVAILABLE", "Governance receipt is not available."
+        )
+    try:
+        state_bytes = paths.state.read_bytes()
+        raw = receipt_path.read_bytes()
+    except OSError as exc:
+        raise ControllerError(
+            "READ_FAILED", "Could not read governance receipt artifacts."
+        ) from exc
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        value = validate_packet.strict_json_loads(text)
+    except (UnicodeError, ValueError) as exc:
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt is invalid JSON."
+        ) from exc
+    if not isinstance(value, dict):
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt must be an object."
+        )
+    if _canonical_json_bytes(value) != raw:
+        raise ControllerError(
+            "NONCANONICAL_GOVERNANCE_RECEIPT",
+            "Governance receipt must use canonical JSON bytes.",
+        )
+    state = load_json(paths.state)
+    validated = _validate_governance_receipt(value, state, paths, receipt_type)
+    try:
+        if paths.state.read_bytes() != state_bytes:
+            raise ControllerError(
+                "STATE_CHANGED", "Trusted state changed while exporting the receipt."
+            )
+    except OSError as exc:
+        raise ControllerError("READ_FAILED", "Could not recheck trusted state.") from exc
+    return validated
+
+
 def metadata_hygiene_is_clean(repository: Path) -> bool:
     """Return whether controller metadata is neither tracked nor staged by Git."""
-    for command in (
-        ["git", "-C", str(repository), "ls-files", "--", ".ai-pro-loop"],
-        ["git", "-C", str(repository), "diff", "--cached", "--name-only", "--", ".ai-pro-loop"],
-    ):
-        completed = subprocess.run(
-            command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        if completed.returncode:
-            raise ControllerError("GIT_CHECK_FAILED", "Could not verify controller metadata hygiene.")
-        if completed.stdout.strip():
-            return False
+    for metadata_root in (".ai-pro-loop", ".hotl"):
+        for command in (
+            ["git", "-C", str(repository), "ls-files", "--", metadata_root],
+            [
+                "git",
+                "-C",
+                str(repository),
+                "diff",
+                "--cached",
+                "--name-only",
+                "--",
+                metadata_root,
+            ],
+        ):
+            completed = subprocess.run(
+                command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            if completed.returncode:
+                raise ControllerError(
+                    "GIT_CHECK_FAILED", "Could not verify controller metadata hygiene."
+                )
+            if completed.stdout.strip():
+                return False
     return True
 
 
@@ -3427,11 +3914,36 @@ def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
                 final_gate_requirements=requirements,
             ),
         )
+        final_input_digest = validate_packet.canonical_digest(
+            {
+                "current_snapshot_digest": current_snapshot["snapshot_digest"],
+                "report_digest": state["active_report_digest"],
+                "requirements_digest": state["active_requirements_digest"],
+                "review_digest": state["active_review_packet_digest"],
+                "reviewed_snapshot_digest": state["reviewed_snapshot_digest"],
+            }
+        )
+        final_gate_digest = validate_packet.canonical_digest(gate)
+        final_receipt = _governance_receipt(
+            paths,
+            candidate,
+            "final",
+            input_digest=final_input_digest,
+            output_digest=final_gate_digest,
+            requirements_digest=sha256_bytes(_canonical_json_bytes(requirements)),
+            transaction_id=(
+                f"gpc-loop-{task_slug}:final-verify-{state['review_round']:02d}"
+            ),
+            snapshot_digest=current_snapshot["snapshot_digest"],
+            claims={},
+            issued_at_unix=int(time.time()),
+        )
         _commit_artifacts_then_state(
             paths,
             [
                 (paths.run / "snapshot.json", current_snapshot),
                 (paths.run / "final-gate.json", gate),
+                (paths.run / "governance-receipt-final.json", final_receipt),
             ],
             candidate,
             replaceable_artifacts=frozenset({paths.run / "snapshot.json"}),
@@ -3440,7 +3952,7 @@ def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
         _record_events_best_effort(paths, [{
             "schema_version": SCHEMA_VERSION,
             "event": "FINAL_VERIFIED",
-            "final_gate_digest": validate_packet.canonical_digest(gate),
+            "final_gate_digest": final_gate_digest,
             "snapshot_digest": current_snapshot["snapshot_digest"],
         }])
     return status_run(paths.repository, task_slug)
@@ -3528,9 +4040,34 @@ def approve_requirements(
             [
                 (paths.run / f"approval-stop-{state['stop_sequence']:02d}.txt", evidence),
                 (paths.run / "requirements.json", proposal),
+                (
+                    paths.run / "governance-receipt-requirements.json",
+                    _governance_receipt(
+                        paths,
+                        candidate,
+                        "requirements",
+                        input_digest=validate_packet.canonical_digest(envelope),
+                        output_digest=digest,
+                        requirements_digest=sha256_bytes(
+                            _canonical_json_bytes(proposal)
+                        ),
+                        transaction_id=(
+                            f"gpc-loop-{task_slug}:approval-stop-"
+                            f"{state['stop_sequence']:02d}"
+                        ),
+                        snapshot_digest=None,
+                        claims={},
+                        issued_at_unix=int(time.time()),
+                    ),
+                ),
             ],
             candidate,
-            replaceable_artifacts=frozenset({paths.run / "requirements.json"}),
+            replaceable_artifacts=frozenset(
+                {
+                    paths.run / "requirements.json",
+                    paths.run / "governance-receipt-requirements.json",
+                }
+            ),
             expected_state_digest=loaded_state_digest,
         )
         _record_events_best_effort(paths, [{
@@ -3725,6 +4262,9 @@ def _unreachable_artifacts(
         INITIALIZATION_MARKER_NAME,
         "prompts",
         "responses",
+        "governance-receipt-requirements.json",
+        "governance-receipt-review.json",
+        "governance-receipt-final.json",
     }
     reachable_digests = {
         value

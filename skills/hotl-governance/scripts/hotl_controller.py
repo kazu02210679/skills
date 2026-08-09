@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import stat
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Mapping, Sequence
+from urllib.parse import urlparse
 
 import hotl_contract as contract
 import hotl_store as store
@@ -1231,7 +1233,9 @@ def start_successor(
         raise
     if successor_policy["initial_state"] != State.INIT.value:
         raise ControllerError("INVALID_POLICY", "A successor must start in INIT.")
-    requirements_value, identifiers, requirements_digest = _validated_requirements(requirements)
+    requirements_value, identifiers, requirements_digest, requirement_artifacts = (
+        _validated_requirements(requirements)
+    )
     if successor_policy["requirements_digest"] != requirements_digest:
         raise ControllerError(
             "REQUIREMENTS_MISMATCH",
@@ -1305,7 +1309,7 @@ def start_successor(
         head = contract.canonical_digest(transition)
         state = _state_value(projection, successor_policy, len(events), head)
         artifacts = {
-            requirements_digest: contract.canonical_json_bytes(requirements_value),
+            **requirement_artifacts,
             contract.canonical_digest(successor_policy): contract.canonical_json_bytes(
                 successor_policy
             ),
@@ -1367,6 +1371,17 @@ _SOURCE_RECEIPT_FIELDS = frozenset(
         "snapshot_digest",
     }
 )
+_GPT_BINDING_FIELDS = frozenset(
+    {
+        "conversation_url",
+        "model_label",
+        "plan_label",
+        "reasoning_label",
+        "run_id",
+        "task_slug",
+    }
+)
+_GPT_TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
 def _exact_mapping(value: object, fields: frozenset[str], label: str) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != fields:
         raise ControllerError("INVALID_FIELDS", f"{label} fields must match exactly.")
@@ -1405,10 +1420,17 @@ def _validated_base_policy(
 
 def _validated_requirements(
     requirements: Mapping[str, object],
-) -> tuple[dict[str, object], list[str], str]:
-    requirements_value = _exact_mapping(
-        dict(requirements), frozenset({"requirements"}), "requirements"
+) -> tuple[dict[str, object], list[str], str, dict[str, bytes]]:
+    requirements_value = dict(requirements)
+    fields = frozenset(requirements_value)
+    legacy_fields = frozenset({"requirements"})
+    external_fields = frozenset(
+        {"requirements", "source_artifact", "source_digest"}
     )
+    if fields not in {legacy_fields, external_fields}:
+        raise ControllerError(
+            "INVALID_FIELDS", "requirements fields must match a closed schema."
+        )
     identifiers = requirements_value["requirements"]
     if not isinstance(identifiers, list) or not identifiers:
         raise ControllerError("INVALID_REQUIREMENTS", "At least one requirement is required.")
@@ -1421,7 +1443,33 @@ def _validated_requirements(
         raise ControllerError(
             "INVALID_REQUIREMENTS", "Requirement IDs must be unique and canonically sorted."
         )
-    return requirements_value, identifiers, contract.canonical_digest(requirements_value)
+    identifier_manifest = {"requirements": identifiers}
+    identifier_bytes = contract.canonical_json_bytes(identifier_manifest)
+    identifier_digest = "sha256:" + hashlib.sha256(identifier_bytes).hexdigest()
+    if fields == legacy_fields:
+        return identifier_manifest, identifiers, identifier_digest, {
+            identifier_digest: identifier_bytes
+        }
+    source_digest = requirements_value["source_digest"]
+    if not isinstance(source_digest, str) or contract.DIGEST.fullmatch(source_digest) is None:
+        raise ControllerError(
+            "INVALID_DIGEST", "External requirements source_digest is invalid."
+        )
+    try:
+        source_bytes = contract.canonical_json_bytes(requirements_value["source_artifact"])
+    except contract.ContractError as error:
+        raise ControllerError(
+            "INVALID_REQUIREMENTS", "External requirements artifact is not canonical JSON."
+        ) from error
+    actual_digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+    if actual_digest != source_digest:
+        raise ControllerError(
+            "DIGEST_MISMATCH", "External requirements artifact does not match source_digest."
+        )
+    return requirements_value, identifiers, source_digest, {
+        identifier_digest: identifier_bytes,
+        source_digest: source_bytes,
+    }
 
 
 def initialize_execution(
@@ -1432,7 +1480,9 @@ def initialize_execution(
 ) -> dict[str, object]:
     """Atomically publish requirements and the explicit INIT lifecycle transition."""
     supplied = _validated_base_policy(policy, execution_id, _INITIAL_POLICY_FIELDS)
-    requirements_value, identifiers, requirements_digest = _validated_requirements(requirements)
+    requirements_value, identifiers, requirements_digest, requirement_artifacts = (
+        _validated_requirements(requirements)
+    )
     normalized_policy = dict(supplied)
     normalized_policy.update(
         {
@@ -1477,9 +1527,7 @@ def initialize_execution(
     head = contract.canonical_digest(transition)
     state = _state_value(projection, normalized_policy, len(events), head)
     artifacts = {
-        contract.canonical_digest(requirements_value): contract.canonical_json_bytes(
-            requirements_value
-        ),
+        **requirement_artifacts,
         contract.canonical_digest(normalized_policy): contract.canonical_json_bytes(
             normalized_policy
         ),
@@ -1526,9 +1574,71 @@ def _canonical_source_receipt(raw: bytes) -> dict[str, object]:
         raise ControllerError(
             "INVALID_RECEIPT_IDENTITY", "Receipt requires one transaction or invocation ID."
         )
+    optional_binding = {"binding"} if "binding" in value else set()
     return _exact_mapping(
-        value, _SOURCE_RECEIPT_FIELDS | identity, "source receipt"
+        value, _SOURCE_RECEIPT_FIELDS | identity | optional_binding, "source receipt"
     )
+
+
+def _validate_gpt_binding(source: Mapping[str, object]) -> None:
+    binding = source.get("binding")
+    if not isinstance(binding, dict):
+        raise ControllerError(
+            "INVALID_RECEIPT_BINDING", "GPT Pro receipt requires a provenance binding."
+        )
+    _exact_mapping(binding, _GPT_BINDING_FIELDS, "GPT Pro receipt binding")
+    task_slug = binding.get("task_slug")
+    run_id = binding.get("run_id")
+    if (
+        not isinstance(task_slug, str)
+        or _GPT_TASK_SLUG.fullmatch(task_slug) is None
+        or run_id != f"gpc-loop-{task_slug}"
+    ):
+        raise ControllerError(
+            "INVALID_RECEIPT_BINDING", "GPT Pro receipt run/task binding is invalid."
+        )
+    conversation_url = binding.get("conversation_url")
+    parsed = urlparse(conversation_url) if isinstance(conversation_url, str) else None
+    if (
+        parsed is None
+        or parsed.scheme != "https"
+        or parsed.netloc != "chatgpt.com"
+        or not parsed.path.startswith("/c/")
+        or parsed.path == "/c/"
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is not None
+    ):
+        raise ControllerError(
+            "INVALID_RECEIPT_BINDING", "GPT Pro conversation binding is invalid."
+        )
+    model = binding.get("model_label")
+    reasoning = binding.get("reasoning_label")
+    plan = binding.get("plan_label")
+    if not isinstance(model, str) or not model.strip():
+        raise ControllerError(
+            "INVALID_RECEIPT_BINDING", "GPT Pro model binding is invalid."
+        )
+    if any(
+        value is not None and (not isinstance(value, str) or not value.strip())
+        for value in (reasoning, plan)
+    ):
+        raise ControllerError(
+            "INVALID_RECEIPT_BINDING", "GPT Pro model attestation binding is invalid."
+        )
+    if model == "GPT-5.6 Sol" and (
+        reasoning != "Pro" or plan not in {"Pro", "Business", "Enterprise"}
+    ):
+        raise ControllerError(
+            "INVALID_RECEIPT_BINDING", "GPT Pro model attestation is not canonical."
+        )
+    if contract.canonical_digest(binding) != source.get("authority_snapshot_digest"):
+        raise ControllerError(
+            "AUTHORITY_MISMATCH", "GPT Pro provenance does not match its authority digest."
+        )
 
 
 def _validate_claim_edges(claims: dict[str, object], fields: frozenset[str]) -> None:
@@ -1566,6 +1676,13 @@ def _validate_source_receipt(
     allowed = contract.RECEIPT_TYPE_ISSUERS[receipt_type]
     if issuer not in allowed:
         raise ControllerError("ISSUER_MISMATCH", "Receipt issuer is not allowed for its type.")
+    if issuer == "gpt-pro-codex-loop":
+        _validate_gpt_binding(source)
+    elif "binding" in source:
+        raise ControllerError(
+            "INVALID_RECEIPT_BINDING",
+            "Receipt binding is not defined for this issuer.",
+        )
     base_fields = contract.RECEIPT_BASE_FIELDS | (
         {"transaction_id"} if "transaction_id" in source else {"invocation_id"}
     )
@@ -1591,7 +1708,30 @@ def _validate_source_receipt(
         )
     frozen = receipt_type in {"requirements", "approval"}
     current_digest = projection_evidence_set_digest(projection)
-    if frozen:
+    gpt_external = issuer == "gpt-pro-codex-loop" and receipt_type in {
+        "requirements",
+        "semantic_review",
+        "final",
+    }
+    if gpt_external and receipt_type == "requirements":
+        if any(
+            source[field] is not None
+            for field in ("snapshot_digest", "evidence_set_digest", "cycle_id")
+        ):
+            raise ControllerError(
+                "INVALID_RECEIPT_BINDING",
+                "GPT Pro requirements receipt has live HOTL bindings.",
+            )
+    elif gpt_external:
+        if (
+            source["snapshot_digest"] != projection.active_snapshot_digest
+            or source["evidence_set_digest"] is not None
+            or source["cycle_id"] is not None
+        ):
+            raise ControllerError(
+                "STALE_RECEIPT", "GPT Pro receipt snapshot binding is stale."
+            )
+    elif frozen:
         if any(source[field] is not None for field in ("snapshot_digest", "evidence_set_digest", "cycle_id")):
             raise ControllerError("INVALID_RECEIPT_BINDING", "Frozen receipt has live bindings.")
         if source["input_digest"] != projection.requirements_digest:
@@ -1761,12 +1901,24 @@ def _admitted_receipt_events(
         previous = contract.canonical_digest(event)
 
     receipt_type = str(source["receipt_type"])
+    bind_live_on_admission = (
+        source["issuer_skill"] == "gpt-pro-codex-loop"
+        and receipt_type in {"semantic_review", "final"}
+    )
+    admitted_evidence_digest = (
+        projection_evidence_set_digest(projection)
+        if bind_live_on_admission
+        else source["evidence_set_digest"]
+    )
+    admitted_cycle_id = (
+        projection.cycle_id if bind_live_on_admission else source["cycle_id"]
+    )
     add(
         "receipt_imported",
         {
             "authority_snapshot_digest": source["authority_snapshot_digest"],
-            "cycle_id": source["cycle_id"],
-            "evidence_set_digest": source["evidence_set_digest"],
+            "cycle_id": admitted_cycle_id,
+            "evidence_set_digest": admitted_evidence_digest,
             "issuer_skill": source["issuer_skill"],
             "receipt_digest": receipt_digest,
             "receipt_id": source["receipt_id"],
@@ -1795,15 +1947,15 @@ def _admitted_receipt_events(
         add(
             "review_recorded",
             {
-                "cycle_id": source["cycle_id"],
-                "evidence_set_digest": source["evidence_set_digest"],
+                "cycle_id": admitted_cycle_id,
+                "evidence_set_digest": admitted_evidence_digest,
                 "receipt_id": source["receipt_id"],
                 "review_id": review_id,
                 "root_cause_ids": claims["root_cause_ids"],
                 "status": claims["status"],
             },
             subjects=[review_id],
-            input_digest=str(source["evidence_set_digest"]),
+            input_digest=str(admitted_evidence_digest),
             result="pass" if claims["status"] == "accepted" else "fail",
             issuer_kind="skill",
             issuer_skill=str(source["issuer_skill"]),

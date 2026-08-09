@@ -1,5 +1,25 @@
 # GPT Pro Codex Loop
 
+## Governance receipt export
+
+Authoritative requirements-freeze, accepted-review, and successful
+`final-verify` transactions publish canonical immutable receipt artifacts.
+Use the read-only `export-governance-receipt --type requirements|review|final`
+command to export and revalidate the persisted bytes. Repeated export is
+byte-stable and does not read the clock or modify the run.
+
+The requirements receipt's `output_digest` is the semantic GPT Pro transition
+output (`active_requirements_digest`). Its `requirements_digest` is instead the
+SHA-256 digest of the exact canonical persisted `requirements.json` bytes,
+including the terminal LF. HOTL can initialize from that exact artifact while
+retaining its closed list of typed requirement IDs.
+
+For HOTL-bound completion, preserve this exact ordering:
+`final-verify` -> export the final receipt -> import the receipt into HOTL ->
+evaluate G4. Receipt export does not authorize commits, pushes, pull requests,
+deployments, requirements changes, or other external actions. Standalone use
+of the GPT Pro controller remains unchanged.
+
 ## GPT-5.6 Sol Pro の確認
 
 `PRO_CLASS` は単一のモデル名 `Pro` を探しません。ChatGPT画面で、契約プランが `Pro`・`Business`・`Enterprise` のいずれか、モデル系統が `GPT-5.6 Sol`、推論レベルが `Pro` であることを別々に確認します。`非常に高い`（`Extra High` / `Very High`）はPro推論ではないため拒否します。

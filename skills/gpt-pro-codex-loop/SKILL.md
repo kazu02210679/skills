@@ -51,6 +51,32 @@ Browser waiting is quality-first. While the expected Pro turn is visibly reasoni
 4. When status permits `prepare-review`, run it (with `--supplemental-evidence FILE` only for a `PROVIDE_EVIDENCE` route). Use Browser only after that prepared prompt exists. Save the raw response, run status, then use `accept-review --raw-response FILE --observed-conversation-url URL --observed-model-label LABEL --observed-reasoning-label LABEL --observed-plan-label LABEL` when listed.
 5. When status permits `final-verify`, run it. Only its successful result completes the controller run. `abandon-attempt` is allowed only when status lists it and a prompt is proven unsent; it requires exactly `--send-status NOT_SENT --not-sent-evidence FILE`. Ambiguous Browser send status is a hard stop governed by the recovery contract.
 
+## Governance receipts
+
+The authoritative requirements-freeze, accepted-review, and successful
+`final-verify` transactions publish immutable canonical governance receipts.
+Export reads and revalidates those persisted bytes; it does not regenerate a
+receipt, read the clock, or mutate run state:
+
+```powershell
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py export-governance-receipt --repo REPOSITORY --task TASK --type requirements
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py export-governance-receipt --repo REPOSITORY --task TASK --type review
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py export-governance-receipt --repo REPOSITORY --task TASK --type final
+```
+
+The requirements receipt deliberately carries two distinct digests.
+`output_digest` identifies the semantic requirements transition output
+(`active_requirements_digest`); `requirements_digest` identifies the exact
+canonical `requirements.json` artifact bytes, including their terminal LF.
+An outer HOTL run can bind that artifact digest while preserving the GPT Pro
+transition provenance. This export interface is optional: standalone GPT Pro
+controller behavior is unchanged.
+
+For a HOTL-bound completion, the exact order is: run GPT Pro `final-verify`,
+export the final receipt, import it into HOTL, then evaluate G4. A receipt is
+evidence only; it does not authorize commit, push, pull request, deployment,
+requirements changes, or any other external action.
+
 ## Context budget
 
 The controller enforces UTF-8 byte limits before publishing a prepared prompt:
