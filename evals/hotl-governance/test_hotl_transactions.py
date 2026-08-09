@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -212,6 +213,114 @@ class TransactionStorageTests(unittest.TestCase):
         )
 
         self.assertEqual(content, (self.paths.evidence / digest[7:]).read_bytes())
+
+    def test_directory_open_failure_aborts_append_as_write_failed(self) -> None:
+        first = self._publish_first()
+        prior_state = self.paths.state.read_bytes()
+        second = fixture_event(2, event_hash(first), "EVT-000000000002")
+        open_file = os.open
+
+        def fail_directory_open(
+            path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            if Path(path).is_dir():
+                raise OSError(errno.EIO, "injected directory open failure")
+            if dir_fd is None:
+                return open_file(path, flags, mode)
+            return open_file(path, flags, mode, dir_fd=dir_fd)
+
+        with patch.object(store.os, "open", side_effect=fail_directory_open):
+            with self.assertRaises(store.StoreError) as raised:
+                store.append_event(
+                    self.paths,
+                    second,
+                    fixture_state(2, event_hash(second)),
+                    {},
+                )
+
+        self.assertEqual("WRITE_FAILED", raised.exception.code)
+        self.assertEqual(prior_state, self.paths.state.read_bytes())
+        self.assertNotEqual([], list(self.paths.transactions.iterdir()))
+
+    def test_directory_fsync_failure_aborts_append_as_write_failed(self) -> None:
+        first = self._publish_first()
+        prior_state = self.paths.state.read_bytes()
+        second = fixture_event(2, event_hash(first), "EVT-000000000002")
+        surrogate = self.repository / "directory-sync-handle"
+        surrogate.write_bytes(b"")
+        open_file = os.open
+        sync_file = os.fsync
+        directory_descriptors: set[int] = set()
+
+        def open_directory_as_file(
+            path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            if Path(path).is_dir():
+                descriptor = open_file(surrogate, os.O_RDONLY)
+                directory_descriptors.add(descriptor)
+                return descriptor
+            if dir_fd is None:
+                return open_file(path, flags, mode)
+            return open_file(path, flags, mode, dir_fd=dir_fd)
+
+        def fail_directory_fsync(descriptor: int) -> None:
+            if descriptor in directory_descriptors:
+                raise OSError(errno.EIO, "injected directory fsync failure")
+            sync_file(descriptor)
+
+        with (
+            patch.object(store.os, "open", side_effect=open_directory_as_file),
+            patch.object(store.os, "fsync", side_effect=fail_directory_fsync),
+        ):
+            with self.assertRaises(store.StoreError) as raised:
+                store.append_event(
+                    self.paths,
+                    second,
+                    fixture_state(2, event_hash(second)),
+                    {},
+                )
+
+        self.assertEqual("WRITE_FAILED", raised.exception.code)
+        self.assertEqual(prior_state, self.paths.state.read_bytes())
+        self.assertNotEqual([], list(self.paths.transactions.iterdir()))
+
+    def test_staged_evidence_directory_is_synced_before_publication(self) -> None:
+        first = self._publish_first()
+        prior_state = self.paths.state.read_bytes()
+        content = b"nested evidence\n"
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        second = fixture_event(2, event_hash(first), "EVT-000000000002")
+        open_file = os.open
+
+        def fail_nested_evidence_directory_open(
+            path: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            candidate = Path(path)
+            if (
+                candidate.is_dir()
+                and candidate.name == "evidence"
+                and candidate.parent.parent == self.paths.transactions
+            ):
+                raise OSError(errno.EIO, "injected staged evidence directory failure")
+            if dir_fd is None:
+                return open_file(path, flags, mode)
+            return open_file(path, flags, mode, dir_fd=dir_fd)
+
+        with patch.object(
+            store.os, "open", side_effect=fail_nested_evidence_directory_open
+        ):
+            with self.assertRaises(store.StoreError) as raised:
+                store.append_event(
+                    self.paths,
+                    second,
+                    fixture_state(2, event_hash(second)),
+                    {digest: content},
+                )
+
+        self.assertEqual("WRITE_FAILED", raised.exception.code)
+        self.assertEqual(prior_state, self.paths.state.read_bytes())
+        self.assertFalse((self.paths.evidence / digest[7:]).exists())
+        self.assertNotEqual([], list(self.paths.transactions.iterdir()))
 
     def test_hash_chain_truncation_is_recovery_required(self) -> None:
         first = self._publish_first()

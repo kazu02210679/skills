@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -129,13 +130,17 @@ def _fsync_directory(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
         descriptor = os.open(path, flags)
-    except OSError:
-        return
+    except OSError as error:
+        windows_directory_open_unsupported = (
+            os.name == "nt"
+            and error.errno == errno.EACCES
+            and getattr(error, "winerror", None) in (None, 5)
+        )
+        if windows_directory_open_unsupported:
+            return
+        raise
     try:
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
+        os.fsync(descriptor)
     finally:
         os.close(descriptor)
 
@@ -537,6 +542,7 @@ def _stage_transaction(
             for digest, content in artifacts.items():
                 staged = directory / digest[7:]
                 owned_files.append((staged, _create_owned_file(staged, content)))
+            _fsync_directory(directory)
         _fsync_directory(transaction)
     except OSError as error:
         raise StoreError("WRITE_FAILED", "Could not stage transaction files.") from error
