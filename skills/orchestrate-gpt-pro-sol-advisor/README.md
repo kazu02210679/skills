@@ -1,5 +1,11 @@
 # GPT Pro + Sol Advisor composition
 
+> Runtime inspector は、信頼済み Codex Skill catalog が選択した単一の
+> Sol Advisor orchestration `SKILL.md` からだけ解決します。別の cached
+> version、caller 指定の plugin root、repo-local の同名 script、symlink
+> escape は拒否します。catalog の選択値は advisor/scenario data と別の
+> trusted host input として渡します。
+
 `gpt-pro-codex-loop` と Sol Advisor を、それぞれ単独利用できる状態を保ちながら明示的に併用するためのルーティング Skill です。
 
 ## 3つのモード
@@ -14,7 +20,9 @@ GPT Pro の初期化より先に Sol Advisor の setup status と preferences �
 
 新しいタスクではCodex runtimeから現在のworkspaceをcanonical pathに解決し、`get_preferences` が返す上流で検証済みのactive preferences objectについて、`client=codex` とworkspace identityの一致を要求します。workspace identityは双方をcanonicalizeして比較しますが、`profileKey` は別runtimeのcanonical pathから再生成せず、上流が保存したraw `preferences.workspace` を使った `codex:<scope>:<raw preferences.workspace>` と厳密比較します。別client・別workspace・不一致のprofileは使用しません。併用設定の助言ロールは `sol_advisor_advisor` だけです。旧互換のTerra / Sol reviewerへ自動フォールバックしません。
 
-Solを起動した後、助言を読む・採否判断する前に、まずpublic native spawn/details metadataを確認し、そこに実際の `sol_advisor_advisor` roleが含まれることを必須とします。public detailsがrole以外のmodel、reasoning effort、sandbox mode、permission profileを省略した場合だけ、インストール済みSol Advisor packageの `scripts/inspect-agent-runtime.sh` をskill-relative pathから解決し、同じnative advisor thread IDに対して1回実行します。inspectorは一意のrolloutを読み、同じthreadを識別し、必要項目をすべて返し、public detailsと重複する値が一致しなければなりません。
+Solを起動した後、助言を読む・採否判断する前にpublic native spawn/details metadataを確認します。details取得時のquery targetまたは返却されたthread IDをspawnで得たadvisor thread IDと完全一致させ、実際の `sol_advisor_advisor` roleも必須とします。public detailsがrole以外を省略した場合だけ、Codex Skill catalogから解決したインストール済みSol Advisorのorchestration `SKILL.md` を起点に `../../scripts/inspect-agent-runtime.sh` をcanonical resolutionし、その正規ファイルを同じadvisor thread IDに対して1回実行します。repo-localの同名script、存在しないplugin風path、canonical plugin cache/version root外へ逃げるsymlinkは認めません。
+
+inspectorの証拠はprocess exit code 0と完全一致する10項目JSONです。script自身がrolloutの一意性と完了を検査して成功時だけJSONを返すため、`status=complete` や `rollout_count=1` を外部入力のtrust signalとして要求しません。成功時の監査記録では、この事実からstatusとrollout countを導出します。inspector JSONは同じthreadを識別し、public detailsとの重複値も一致しなければなりません。
 
 各項目の出所を `public-native-details` または `local-runtime-inspector` として記録します。role/model/effortはbound profileと一致し、sandboxは厳密に `read-only` でなければなりません。permission profileはpreferencesに保存されないため一致比較やallowlist判定をせず、空でない観測値をそのまま監査記録へ残します。public role欠落、inspector失敗・曖昧・別thread・不正形式・競合、呼び出し失敗なら助言本文を下流へ渡さず破棄し、advisor再試行・role fallback・GPT Pro続行をせず併用モードを停止します。自己申告、caller-supplied Boolean、role manifest、要求設定は実行時attestationの代用になりません。
 

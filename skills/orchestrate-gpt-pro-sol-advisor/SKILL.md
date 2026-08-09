@@ -5,8 +5,7 @@ description: Use when the user explicitly requests combined GPT Pro Codex Loop a
 
 # GPT Pro + Sol Advisor composition
 
-Use only for explicit combined mode. GPT Pro alone and Sol Advisor alone remain
-standalone.
+Use only in explicit combined mode; other modes remain standalone.
 
 **REQUIRED SUB-SKILL:** Use `gpt-pro-codex-loop` as the outer protocol.
 
@@ -15,13 +14,13 @@ standalone.
 
 ## Preflight
 
-Combine only on an explicit request for both; clarify ambiguity.
+Clarify ambiguity.
 
 Before GPT Pro `inspect-init` or `init`:
 
 1. Call `get_setup_status`. Invalid setup runs `sol-advisor:setup` alone
    and stops before Pro.
-2. Adapter changes require a fresh Codex task.
+2. Adapter changes require a fresh task.
 3. From trusted context, derive the canonical workspace and call
    `get_preferences`. `preferences.client` must equal `codex`. Compare
    identity by canonicalizing `preferences.workspace` and the current
@@ -52,12 +51,12 @@ uncertain/risky, valuable question without equivalent prior advice. Send only
 relevant frozen constraints, evidence, alternatives, risks, and the question;
 exclude transcripts, unrelated material, and secrets.
 
-After spawn, public details must identify `sol_advisor_advisor`. For
-omitted non-role fields only, resolve and run the installed
-`scripts/inspect-agent-runtime.sh` once for that thread. Require one rollout,
-complete allowlisted output, and matching overlaps; fill omissions only.
-Missing public role, inspector failure/ambiguity, bad output, wrong thread, or
-conflict fails closed.
+After spawn, bind the public-details query/returned thread ID to the spawned
+advisor ID and require `sol_advisor_advisor`. For omitted non-role fields,
+use only the inspector derived from the exact trusted-catalog `SKILL.md` passed
+outside advisor/scenario data; origin must match. Reject other versions/roots.
+Trust exit 0 + exact 10-field JSON; derive rollout/completion. Any identity,
+path, output, or overlap failure stops.
 
 Record each field as `public-native-details` or `local-runtime-inspector`.
 Only these paths are trusted; self-claims, Booleans, manifests, and requested

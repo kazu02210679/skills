@@ -16,13 +16,13 @@
   ],
   "provenance_hardening": {
     "baseline": [
-      {"sample":"provenance-red-public","contract_violation":true,"violations":["source-not-recorded"],"response_excerpt":"Matching values plus a Boolean trusted flag are accepted, but public native provenance is not observable."},
-      {"sample":"provenance-red-inspector","contract_violation":true,"violations":["inspector-path-not-representable"],"response_excerpt":"Inspector evidence is either flattened into the same Boolean path or rejected as missing metadata."},
+      {"sample":"provenance-red-public","contract_violation":true,"violations":["public-thread-unbound"],"response_excerpt":"Complete public details are accepted without binding them to the spawned advisor thread."},
+      {"sample":"provenance-red-inspector","contract_violation":true,"violations":["inspector-path-and-success-self-claimed"],"response_excerpt":"A relative script string plus caller status/count can establish inspector success."},
       {"sample":"provenance-red-selfclaim","contract_violation":true,"violations":["self-claim-promoted-by-boolean"],"response_excerpt":"Matching self-claims are admitted when a caller labels the same values trusted."}
     ],
     "with_skill": [
-      {"sample":"provenance-green-public","contract_violation":false,"advice_admitted":1,"advice_discarded":false,"terminal":"primary-disposition","runtime_attestation_source":"public-native-details","response_excerpt":"Use complete public native details and record public provenance for every field."},
-      {"sample":"provenance-green-inspector","contract_violation":false,"advice_admitted":1,"advice_discarded":false,"terminal":"primary-disposition","runtime_attestation_source":"public-native-details+local-runtime-inspector","response_excerpt":"Keep public role identity, fill only omitted fields from the exact-thread inspector, and record mixed provenance."},
+      {"sample":"provenance-green-public","contract_violation":false,"advice_admitted":1,"advice_discarded":false,"terminal":"primary-disposition","runtime_attestation_source":"public-native-details","response_excerpt":"Bind complete public details to the spawned thread and record public provenance."},
+      {"sample":"provenance-green-inspector","contract_violation":false,"advice_admitted":1,"advice_discarded":false,"terminal":"primary-disposition","runtime_attestation_source":"public-native-details+local-runtime-inspector","response_excerpt":"Run the canonical skill-relative inspector; exit zero plus exact JSON proves one complete exact-thread result."},
       {"sample":"provenance-green-selfclaim","contract_violation":false,"advice_admitted":0,"advice_discarded":true,"terminal":"advisor-attestation-provenance-invalid","response_excerpt":"Discard matching self-claims because they have no allowed runtime provenance."}
     ]
   }
