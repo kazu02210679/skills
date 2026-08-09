@@ -1,7 +1,6 @@
 [
   {"id":"standalone-gpt-pro-remains-standalone","scenario":{"intent":"gpt-pro-only"},"expect":{"selected_mode":"gpt-pro-only","gpt_pro_calls":1,"sol_calls":0,"terminal":"continue-outer-loop"}},
   {"id":"standalone-sol-remains-standalone","scenario":{"intent":"sol-only"},"expect":{"selected_mode":"sol-only","gpt_pro_calls":0,"sol_calls":1,"terminal":"continue-sol-standalone"}},
-  {"id":"standalone-codex-remains-standalone","scenario":{"intent":"standalone"},"expect":{"selected_mode":"standalone","gpt_pro_calls":0,"sol_calls":0,"terminal":"continue-codex-standalone"}},
   {"id":"ambiguous-installation-does-not-compose","scenario":{"intent":"ambiguous"},"expect":{"selected_mode":"unselected","composition_active":false,"sol_calls":0,"terminal":"clarify"}},
   {"id":"missing-setup-stops-before-gpc","scenario":{"intent":"combined","setup_status":"missing","preferences_loaded":false,"available_roles":[]},"expect":{"selected_mode":"combined-unavailable","gpc_started":false,"sol_calls":0,"terminal":"setup-required-before-gpc"}},
   {"id":"setup-change-requires-fresh-task","scenario":{"intent":"combined","setup_status":"ready","preferences_loaded":true,"setup_changed_this_task":true,"configured_advisor_role":"sol_advisor_advisor","available_roles":["sol_advisor_advisor"]},"expect":{"gpc_started":false,"sol_calls":0,"terminal":"fresh-task-required"}},

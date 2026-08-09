@@ -72,10 +72,13 @@ or `partially accept`.
 After routing and Codex disposition, normalize the outcome with the production
 issuer at `scripts/governance_receipt.py`. A `consultation` receipt is valid
 only for advice already admitted by `route()`, after explicit invocation
-success and trusted runtime attestation. The route binds the exact canonical
-scenario with the domain-separated v1 `scenario_digest`; the issuer requires
-that binding and all execution/invocation identity fields. The receipt binds
-the scenario digest, execution and invocation, nonce, input/output/authority
+success and trusted runtime attestation. That production module is the single
+source of truth for routing and receipt admission. Before issuing anything, it
+replays `route(scenario)` and requires the supplied route result to be the exact
+same closed canonical object: missing, extra, or changed fields fail closed.
+Ordinary route results keep their original contract and do not carry receipt
+identity or provenance fields. The receipt itself binds the domain-separated
+v1 scenario digest, execution and invocation, nonce, input/output/authority
 digests, the actual advisor role/model/effort, the exact opaque permission
 observation, the `read-only` sandbox, and Codex's closed `accept`, `reject`, or
 `partially accept` disposition. Free-text rationale is not an authority or

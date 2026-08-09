@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import importlib.util
 from copy import deepcopy
@@ -43,6 +44,44 @@ CONSULTATION_BINDING_FIELDS = {
     "runtime_attested",
     "runtime_observation_trusted",
     "sandbox",
+}
+PRE_TASK7_ROUTE_SHA256 = {
+    "advisor-invocation-failure-stops": "9f5086c2888fcbc6d833531f53e444e0762529b308445d1ed8224cebb1b61f34",
+    "advisor-requested-reentry-is-suppressed": "479bf85d3e4043225b95c60b30be2dece49017a6113492399b7a0e574b293c68",
+    "ambiguous-installation-does-not-compose": "0952c9dc8b835d42cdd7af14f9de32ae0ce13644eb143bb7d0c33972f1909a26",
+    "attestation-failure-emits-no-receipt": "dd70651953d29ae425c663665f2c9c57aec24370cf4a48fba50b850a6d77606f",
+    "attested-advice-emits-bound-receipt": "aee11d894191bcf4905358bde86c5f13db0a589e3238d2e7522929791c53d28b",
+    "authority-escalation-is-rejected": "abdd9d8f9841c90c601de1d18c6793d2b005c4d2b1b493ec5420a230e09bb687",
+    "conflicting-advice-is-rejected": "38d9febc2bf1d4c91521bd4b944e876dd1f821abcb94574c5ae0548182c7f2c0",
+    "explicit-combined-low-risk-skips-sol": "ab8182d5c8b1a090c949981d4a00082247ae1ddc74b08162476e5ce566358762",
+    "implementer-role-is-rejected": "5ba80eb0bb874387902ed25091b1b3b5b4c12533aa1d690bd01b9a6380851d4c",
+    "invocation-failure-emits-no-receipt": "9f5086c2888fcbc6d833531f53e444e0762529b308445d1ed8224cebb1b61f34",
+    "legacy-only-does-not-fallback": "93a6b58a6afbc2cfb4916f4b983e7182a7e154038e878b22c7d1bb1f352cf7de",
+    "legacy-reviewer-config-is-rejected": "4670e777eb7b2f933b2942308581858cca850886a4016d4df34ae764a5e71e90",
+    "low-risk-emits-no-consultation": "ab8182d5c8b1a090c949981d4a00082247ae1ddc74b08162476e5ce566358762",
+    "mandatory-final-sol-review-is-suppressed": "ab8182d5c8b1a090c949981d4a00082247ae1ddc74b08162476e5ce566358762",
+    "material-follow-up-is-bounded": "8366ab5a7fe58dfa7dc19940ed143b05e7365e5ec1121b475aa38684deda0571",
+    "missing-client-profile-is-rejected": "4a0ebfdd7ddc9842f1385e7e57231908388c439b32e8cda4c768ec7988e7ef62",
+    "missing-profile-key-is-rejected": "45d8c43236e7349c4cc57c12e90e3f0937acd0dfad47e30abfe9bcb644dcf2d3",
+    "missing-setup-stops-before-gpc": "1d27d4d0b7cf9223d1111486b8f597a3b6a46730584dfccab6e31a476bf1da06",
+    "nested-orchestration-is-rejected": "6d3ae0e935a6176898996e7e0c79fe33bd6a85569495dc72dd2032f9638eadf0",
+    "pro-correction-does-not-force-sol-loop": "c225a87c516a45d32c433a4792950d79d9185c7103ab62efe9ade4282b7078de",
+    "retained-implementer-config-is-rejected": "15b7aa3483f34fcb8e9d58b17f6d84ec098b80c132b6b1f745d127c1f904f3e0",
+    "runtime-attestation-unavailable": "ff81d63e3c59310a0f67829593a0eda9bd9648e4491e718124f19ca642c9fce2",
+    "runtime-effort-mismatch-is-rejected": "1aa1c86b23cad445ed6420ecd6eef522bc7c5b5dde2403a2b9f11f7c9a57cd21",
+    "runtime-model-mismatch-is-rejected": "72164b32fce49437a05436d06c30e77fae13d14166b1f01b9460bc6c0985d1c7",
+    "runtime-permission-blank-is-rejected": "2b28de7652b095a6ec65448177d9d14257915494c81a440a0ad455a39d873ec9",
+    "runtime-permission-missing-is-rejected": "dc186995b116ed23892d41a6e6262ff52c6c09772c1c3dc68ea319b3904a4519",
+    "runtime-role-mismatch-is-rejected": "ff3ee2078d70747972fdba3713650418403d709a359b58888507a7d79d592d43",
+    "runtime-writable-sandbox-is-rejected": "a4eca2d6f1b1ee374a38d4b8441c0584165ddb956e2705c1e0cb9339018c83ae",
+    "setup-change-requires-fresh-task": "7f6a88947cb5f0c309ed3075857cab3dd1ae49c280f01d70d3266fa55120d714",
+    "standalone-gpt-pro-remains-standalone": "09a224eb831fb2ddbcc1b9ef8904ea6ec60d4ad1b02e865ba88e65f203ca3034",
+    "standalone-sol-remains-standalone": "c570d052e99979d760de1698347601db203f3e962e71355fde7c350995506820",
+    "technical-question-selects-configured-advisor": "aee11d894191bcf4905358bde86c5f13db0a589e3238d2e7522929791c53d28b",
+    "unchanged-follow-up-is-suppressed": "4cf4f7bbf11923b178470e5a33da16b4ac679de585a88d01348ccda86dd9c3ae",
+    "wrong-client-profile-is-rejected": "4a0ebfdd7ddc9842f1385e7e57231908388c439b32e8cda4c768ec7988e7ef62",
+    "wrong-profile-key-is-rejected": "45d8c43236e7349c4cc57c12e90e3f0937acd0dfad47e30abfe9bcb644dcf2d3",
+    "wrong-workspace-profile-is-rejected": "82b26c14cd3b43d1dda67e7f0320352fb499c6153447a2b4f2594c253e36d917",
 }
 
 SPEC = importlib.util.spec_from_file_location("composition_policy", POLICY_PATH)
@@ -302,7 +341,9 @@ class CompositionContractTests(unittest.TestCase):
     def test_canonicalization_exception_fails_closed(self) -> None:
         workspace = r"C:\repo\current"
         with patch.object(
-            POLICY.os.path, "normpath", side_effect=ValueError("invalid path")
+            POLICY.RECEIPT_ISSUER.os.path,
+            "normpath",
+            side_effect=ValueError("invalid path"),
         ):
             result = POLICY.route(
                 valid_combined(
@@ -674,23 +715,41 @@ class CompositionContractTests(unittest.TestCase):
             POLICY.governance_receipt,
             POLICY.RECEIPT_ISSUER.governance_receipt,
         )
+        self.assertIs(POLICY.route, POLICY.RECEIPT_ISSUER.route)
 
-    def test_route_binds_the_exact_domain_separated_scenario_digest(self) -> None:
-        scenario = {"intent": "standalone"}
-        routed = POLICY.route(scenario)
+    def test_route_preserves_the_pre_task7_closed_output_contract(self) -> None:
+        scenarios = {
+            "gpt-pro-only": {
+                **receipt_identity(),
+                "intent": "gpt-pro-only",
+            },
+            "sol-only": {"intent": "sol-only"},
+            "standalone": {"intent": "standalone"},
+        }
+        expected = {
+            "gpt-pro-only": {
+                "selected_mode": "gpt-pro-only",
+                "gpt_pro_calls": 1,
+                "sol_calls": 0,
+                "terminal": "continue-outer-loop",
+            },
+            "sol-only": {
+                "selected_mode": "sol-only",
+                "gpt_pro_calls": 0,
+                "sol_calls": 1,
+                "terminal": "continue-sol-standalone",
+            },
+            "standalone": {
+                "selected_mode": "unselected",
+                "composition_active": False,
+                "sol_calls": 0,
+                "terminal": "clarify",
+            },
+        }
 
-        self.assertEqual(
-            "sha256:7592f8b459f31994b753f73f5870fa0fc2de1e0c083122aaa5f1cd585cb9600b",
-            routed.get("scenario_digest"),
-        )
-        self.assertEqual("standalone", routed["selected_mode"])
-        self.assertEqual("continue-codex-standalone", routed["terminal"])
-        self.assertNotEqual(
-            routed["scenario_digest"],
-            POLICY.route({"intent": "standalone", "policy": None})[
-                "scenario_digest"
-            ],
-        )
+        for name, scenario in scenarios.items():
+            with self.subTest(name=name):
+                self.assertEqual(expected[name], POLICY.route(scenario))
 
     def test_attested_consultation_receipt_is_bound_and_dispositioned(self) -> None:
         scenario = admitted_scenario(issued_at_unix=1_723_000_000)
@@ -713,7 +772,10 @@ class CompositionContractTests(unittest.TestCase):
         self.assertIs(True, receipt["binding"]["runtime_attested"])
         self.assertEqual("accept", receipt["disposition"])
         self.assertEqual(1_723_000_000, receipt["issued_at_unix"])
-        self.assertEqual(routed["scenario_digest"], receipt["scenario_digest"])
+        self.assertEqual(
+            POLICY.RECEIPT_ISSUER.scenario_digest(scenario),
+            receipt["scenario_digest"],
+        )
 
     def test_receipt_is_deterministic_and_rationale_has_no_authority(self) -> None:
         scenario = admitted_scenario()
@@ -798,10 +860,8 @@ class CompositionContractTests(unittest.TestCase):
             "advisor_availability_is_runtime_dependency": False,
         }
         unavailable_route = POLICY.route(unavailable)
-        self.assertEqual("standalone", unavailable_route["selected_mode"])
-        self.assertEqual(
-            "continue-codex-standalone", unavailable_route["terminal"]
-        )
+        self.assertEqual("unselected", unavailable_route["selected_mode"])
+        self.assertEqual("clarify", unavailable_route["terminal"])
         self.assertEqual(
             "ADVISOR_UNAVAILABLE",
             POLICY.governance_receipt(
@@ -829,38 +889,20 @@ class CompositionContractTests(unittest.TestCase):
                         scenario, POLICY.route(scenario), None
                     )
 
-    def test_receipt_requires_exact_scenario_and_route_identity_binding(self) -> None:
-        scenario = admitted_scenario()
+    def test_receipt_requires_valid_scenario_identity(self) -> None:
         disposition = {"disposition": "accept", "rationale": "Bound."}
-        routed = POLICY.route(scenario)
-
-        missing_digest = dict(routed)
-        missing_digest.pop("scenario_digest", None)
-        wrong_digest = routed | {"scenario_digest": DIGEST_FOUR}
-        fully_bound = routed | {
-            field: scenario[field]
-            for field in (
-                "execution_id",
-                "invocation_id",
-                "input_digest",
-                "output_digest",
-                "authority_snapshot_digest",
-                "nonce",
-            )
-        }
-        missing_identity = dict(fully_bound)
-        missing_identity.pop("invocation_id")
-        wrong_identity = fully_bound | {"execution_id": "EXEC-FFFFFFFFFFFF"}
-        for route_result in (
-            missing_digest,
-            wrong_digest,
-            missing_identity,
-            wrong_identity,
-        ):
-            with self.subTest(route_result=route_result):
+        malformed_scenarios = (
+            admitted_scenario(invocation_id=None),
+            admitted_scenario(execution_id="not-an-execution"),
+            admitted_scenario(input_digest=DIGEST_FOUR[:-1]),
+        )
+        for malformed_scenario in malformed_scenarios:
+            with self.subTest(scenario=malformed_scenario):
                 with self.assertRaises(POLICY.ReceiptError):
                     POLICY.governance_receipt(
-                        scenario, route_result, disposition
+                        malformed_scenario,
+                        POLICY.route(malformed_scenario),
+                        disposition,
                     )
 
     def test_receipt_rejects_consultation_and_no_consultation_scenario_substitution(self) -> None:
@@ -906,6 +948,15 @@ class CompositionContractTests(unittest.TestCase):
                 scenario,
                 routed,
                 {"disposition": "accept", "rationale": "Contradiction."},
+            )
+
+        missing_routed_disposition = dict(routed)
+        missing_routed_disposition.pop("disposition")
+        with self.assertRaises(POLICY.ReceiptError):
+            POLICY.governance_receipt(
+                scenario,
+                missing_routed_disposition,
+                {"disposition": "accept", "rationale": "Deleted contradiction."},
             )
 
     def test_receipt_malformed_membership_values_raise_stable_receipt_error(self) -> None:
@@ -999,6 +1050,57 @@ class CompositionContractTests(unittest.TestCase):
                         {"disposition": "accept", "rationale": "Forged."},
                     )
 
+    def test_receipt_rejects_same_scenario_forged_consultation(self) -> None:
+        scenario = admitted_scenario(setup_status="missing")
+        hard_stop_route = POLICY.route(scenario)
+        forged_admission = POLICY.route(admitted_scenario())
+        for field in (
+            "scenario_digest",
+            "execution_id",
+            "invocation_id",
+            "input_digest",
+            "output_digest",
+            "authority_snapshot_digest",
+            "nonce",
+        ):
+            if field in hard_stop_route:
+                forged_admission[field] = hard_stop_route[field]
+
+        with self.assertRaises(POLICY.ReceiptError):
+            POLICY.governance_receipt(
+                scenario,
+                forged_admission,
+                {"disposition": "accept", "rationale": "Forged admission."},
+            )
+
+    def test_receipt_rejects_same_scenario_forged_no_consultation(self) -> None:
+        scenario = admitted_scenario(
+            setup_status="missing",
+            material_risk=False,
+            no_consultation_reason="NO_MATERIAL_UNCERTAINTY",
+        )
+        hard_stop_route = POLICY.route(scenario)
+        forged_no_consultation = POLICY.route(
+            admitted_scenario(
+                material_risk=False,
+                no_consultation_reason="NO_MATERIAL_UNCERTAINTY",
+            )
+        )
+        for field in (
+            "scenario_digest",
+            "execution_id",
+            "invocation_id",
+            "input_digest",
+            "output_digest",
+            "authority_snapshot_digest",
+            "nonce",
+        ):
+            if field in hard_stop_route:
+                forged_no_consultation[field] = hard_stop_route[field]
+
+        with self.assertRaises(POLICY.ReceiptError):
+            POLICY.governance_receipt(scenario, forged_no_consultation, None)
+
     def test_consultation_receipt_rejects_invalid_disposition_or_unknown_field(self) -> None:
         scenario = admitted_scenario()
         routed = POLICY.route(scenario)
@@ -1062,7 +1164,6 @@ class CompositionContractTests(unittest.TestCase):
             {
                 "standalone-gpt-pro-remains-standalone",
                 "standalone-sol-remains-standalone",
-                "standalone-codex-remains-standalone",
                 "ambiguous-installation-does-not-compose",
                 "missing-setup-stops-before-gpc",
                 "setup-change-requires-fresh-task",
@@ -1109,6 +1210,18 @@ class CompositionContractTests(unittest.TestCase):
                 actual = POLICY.route(scenario)
                 for key, value in case["expect"].items():
                     self.assertEqual(value, actual.get(key), key)
+                canonical_route = json.dumps(
+                    actual,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                self.assertEqual(
+                    PRE_TASK7_ROUTE_SHA256[case_id],
+                    hashlib.sha256(canonical_route).hexdigest(),
+                    "exact pre-Task7 route keys/values changed",
+                )
                 receipt_case = case.get("receipt")
                 if receipt_case is not None:
                     disposition = (
