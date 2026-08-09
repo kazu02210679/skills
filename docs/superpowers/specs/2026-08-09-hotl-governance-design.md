@@ -19,6 +19,7 @@
 4. event replay から同じ execution state と provenance projection を再生成できる。
 5. `gpt-pro-codex-loop` と Sol Advisor の既存安全契約および standalone 利用を壊さない。
 6. trigger、non-trigger、controller、adapter、回帰の focused eval/test を持つ。
+7. controller は LLM を呼ばず、自由文を意味解釈せず、同じ event log から常に同じ state、projection、transition 判定を得る。
 
 ## 非対象
 
@@ -27,6 +28,16 @@
 - Graph DB、Web UI、汎用 agent runtime
 - SkillOpt による Skill の自動更新
 - 既存 Skill の全面的な書き換え
+- repository への write 権限を持つ悪意ある主体に対する暗号学的な改ざん防止
+
+## Activation Policy
+
+`hotl-governance` は、次のいずれかを満たす場合だけ起動する。
+
+1. ユーザーが HOTL または governed execution を明示的に要求する。
+2. outer controller が schema と binding を検証可能な governance context を渡す。
+
+通常の `gpt-pro-codex-loop`、Sol Advisor、その他の standalone Skill を暗黙に wrap しない。無効または不完全な governance context は、暗黙起動の根拠にせず拒否する。
 
 ## アーキテクチャ
 
@@ -47,6 +58,8 @@
 - event replay から execution state と provenance graph を生成する。
 - retry budget と escalation 条件を強制する。
 - 外部 Skill の receipt を検証して正規化する。
+- LLM を呼ばず、自由文の同義性、finding の類似性、root cause の意味を推測しない。
+- closed enum、stable ID、digest、sequence、明示された policy だけを判定に使う。
 
 #### GPT Pro Codex Loop
 
@@ -63,7 +76,9 @@
 
 ## Execution Graph
 
-通常経路を次の状態で表す。
+### State
+
+正式な state set は次のとおりとする。
 
 ```text
 INIT
@@ -72,16 +87,62 @@ INIT
   -> LOCAL_VERIFY
   -> SEMANTIC_REVIEW
   -> COMPLETE
+
+from INIT, REQUIREMENTS, IMPLEMENT, LOCAL_VERIFY, SEMANTIC_REVIEW:
+  -> ESCALATED
+  -> RECOVERY_REQUIRED
+  -> STOPPED
+
+SEMANTIC_REVIEW
+  -> IMPLEMENT
 ```
 
-review failure は `IMPLEMENT` への corrective edge を開く。次の条件では corrective edge を開かず `ESCALATED` に移る。
+`COMPLETE`、`ESCALATED`、`RECOVERY_REQUIRED`、`STOPPED` は同一 execution では terminal state とする。`SEMANTIC_REVIEW -> IMPLEMENT` だけが corrective edge である。
+
+### Immutable execution boundary
+
+scope、policy、authority snapshot、frozen requirements のいずれかを変更する場合、同一 execution の artifact を書き換えて再開してはならない。
+
+```text
+EXEC-001 -> ESCALATED
+human approves a material change
+EXEC-001 remains terminal
+EXEC-002 starts with revised artifacts
+REQ-v2 --supersedes--> REQ-v1
+```
+
+人間の承認は frozen artifact の上書き権ではない。変更を承認した場合は successor execution を作り、前 execution、承認 receipt、supersedes relation を参照する。
+
+successor `init` は `predecessor_execution_id` と `lineage_receipt_digest` を必須とし、旧 execution が terminal state であることを検証する。
+
+### Escalation
+
+review failure は、G2 を再評価する `IMPLEMENT` への corrective edge を開ける。次の条件では corrective edge を開かず `ESCALATED` に移る。
 
 - scope、authority、または frozen requirements の変更が必要
 - 外部操作、破壊操作、機密情報、または新しいユーザー権限が必要
 - 証拠または identity が矛盾
-- 同じ unresolved finding または derived root cause が二回連続
+- receipt が同じ `finding_id` または `root_cause_id` を unresolved として二回連続で示す
 - 三回の valid review round を消費
-- controller が recovery-required 状態
+
+controller は finding の自由文を比較しない。`finding_id` と `root_cause_id` は semantic review receipt の必須 stable ID とする。
+
+### Transition table
+
+| From | Condition | To |
+|---|---|---|
+| none | `init` input、policy snapshot、execution identity が有効 | `INIT` |
+| `INIT` | 初期 artifact publication が成功 | `REQUIREMENTS` |
+| `REQUIREMENTS` | G1 `requirements_frozen` | `IMPLEMENT` |
+| `IMPLEMENT` | G2 `implementation_recorded` | `LOCAL_VERIFY` |
+| `LOCAL_VERIFY` | G3 `local_verified` | `SEMANTIC_REVIEW` |
+| `SEMANTIC_REVIEW` | correctable findings、retry budget内 | `IMPLEMENT` |
+| `SEMANTIC_REVIEW` | G4 `semantically_accepted` | `COMPLETE` |
+| mutable state | escalation condition | `ESCALATED` |
+| mutable state | transactionまたはintegrity ambiguity | `RECOVERY_REQUIRED` |
+| mutable state | trusted operatorの明示停止 | `STOPPED` |
+
+表にない transition はすべて拒否する。
 
 ### Gate
 
@@ -94,6 +155,7 @@ review failure は `IMPLEMENT` への corrective edge を開く。次の条件�
 - scope digest
 - user approval receipt
 - GPT Pro packet identity と model attestation
+- authority snapshot digest
 
 #### G2: implementation_recorded
 
@@ -103,6 +165,7 @@ review failure は `IMPLEMENT` への corrective edge を開く。次の条件�
 - requirement-to-code links
 - worker report
 - base state または snapshot identity
+- implementation receipt の `execution_id`、`input_digest`、`output_digest`
 
 #### G3: local_verified
 
@@ -113,6 +176,7 @@ review failure は `IMPLEMENT` への corrective edge を開く。次の条件�
 - artifact path と SHA-256
 - requirement-to-test links
 - repository diff または snapshot digest
+- evidence が current active snapshot に bind されていること
 
 #### G4: semantically_accepted
 
@@ -120,10 +184,24 @@ review failure は `IMPLEMENT` への corrective edge を開く。次の条件�
 
 - GPT Pro semantic review receipt
 - combined mode で bounded consultation を実施した場合の Sol advice receipt と Codex disposition。相談しなかった場合は、その事実と理由を示す no-consultation event
-- 全 requirement の有効な implements、verified_by、reviewed_by path
+- 全 active requirement が typed completion predicate を満たすこと
 - 未解決 finding がないこと
+- accepted review の `input_digest` が current evidence set digest と一致すること
 
 `COMPLETE` は G4 通過後だけ許可する。`gpt-pro-codex-loop` を outer protocol にした run は、同 controller の `final-verify` 成功も必要とする。
+
+## Determinism
+
+controller は外部 Skill が発行した構造化 receipt を検証するだけであり、review 本文の意味を解釈しない。transition 判定へ使える入力は、closed schema の値、stable ID、canonical digest、sequence、active status、policy snapshot に限定する。
+
+```text
+same policy snapshot + same ordered event log
+  -> same execution state
+  -> same provenance projection
+  -> same allowed next commands
+```
+
+timestamp、表示順、自然言語の表現差は replay と transition 判定に使わない。
 
 ## Event Log
 
@@ -136,15 +214,38 @@ JSONL event を append-only の正本とする。projection や status file を�
   "schema_version": 1,
   "event_id": "EVT-...",
   "execution_id": "EXEC-...",
+  "sequence": 17,
   "type": "test_verified",
-  "actor": {"kind": "tool", "id": "pytest"},
+  "issuer": {"kind": "tool", "id": "pytest", "version": "..."},
   "subject_ids": ["REQ-017", "TEST-042"],
   "artifact_refs": [{"path": "relative/path", "sha256": "..."}],
   "result": "pass",
+  "input_digest": "...",
+  "output_digest": "...",
   "previous_event_hash": "...",
   "timestamp": "..."
 }
 ```
+
+順序は `execution_id + sequence + previous_event_hash` で決める。timestamp は監査情報であり、ordering や transition に使用しない。
+
+### Receipt binding
+
+privileged event は generic `record` から作成できない。human approval、GPT Pro packet、Sol advice、completion、stop には専用 import command を使い、少なくとも次を検証する。
+
+- `receipt_schema_version`
+- `receipt_id`
+- `issuer_skill` と `issuer_version`
+- `execution_id`
+- `transaction_id` または `invocation_id`
+- `input_digest` と `output_digest`
+- nonce
+- authority snapshot digest
+- `issued_at`
+
+既存 `gpt-pro-codex-loop` の Browser identity、conversation identity、nonce、model attestation、snapshot、transaction を信頼の根として保持する。`hotl-governance` が独自認証へ置き換えない。
+
+初版では、ローカル CLI を操作できるユーザーを trusted operator とする。ただし、`record --actor human` のような自己申告は認めず、承認対象 digest に bind された専用 approval receipt だけを privileged event に変換する。host が chat approval または tool approval の provenance を提供する場合は、その identity と nonce を receipt に含める。提供しない host では trusted operator assertion であり、人間の存在を暗号学的に証明するものではない。
 
 ### 整合性
 
@@ -156,20 +257,27 @@ JSONL event を append-only の正本とする。projection や status file を�
 - `previous_event_hash` で chain を形成し、編集、削除、並べ替えを検出する。
 - replay は同じ入力から同じ state と projection を生成する。
 
+canonical JSON は UTF-8、object key の辞書順、余分な空白なし、LF、整数だけを許可する。float、NaN、Infinity、重複 key、BOM を拒否する。
+
+path は `/` 区切りの POSIX 表記へ正規化する。absolute path、空 segment、`.`、`..`、NUL、repository 外へ解決される symlink または reparse point を拒否する。Windows では比較用 canonical identity と保存用 POSIX path を分離する。
+
+### Threat model
+
+hash chain が検出するのは accidental corruption、partial modification、truncation、並べ替え、naive tampering である。repository 全体へ write できる悪意ある主体が event を再生成・再hash する攻撃は防がない。external signed checkpoint、repository 外 secret、remote transparency log は初版の非対象とする。
+
 ## Provenance Graph
 
 ### Node
 
 - requirement
-- decision
 - code
 - test
 - evidence
 - review
 - change
+- command
 - failure
 - policy
-- skill-version
 
 ### Edge
 
@@ -177,6 +285,8 @@ JSONL event を append-only の正本とする。projection や status file を�
 - verifies
 - produces
 - supports
+- executes
+- proves
 - reviews
 - included_in
 - violates
@@ -184,7 +294,56 @@ JSONL event を append-only の正本とする。projection や status file を�
 - derived_from
 - supersedes
 
-各 requirement は completion 時点で、現在有効な code、test、evidence、review、change へ到達できなければならない。superseded node または invalidated evidence を coverage に数えない。
+### Typed edge schema
+
+初版で completion predicate に使用できる triple を次に限定する。
+
+| Source node | Edge | Target node |
+|---|---|---|
+| code | `implements` | requirement |
+| test | `verifies` | requirement |
+| command | `executes` | test |
+| command | `produces` | evidence |
+| evidence | `proves` | test |
+| evidence | `supports` | review |
+| review | `reviews` | requirement |
+| code | `included_in` | change |
+| test | `included_in` | change |
+| failure | `violates` | requirement |
+| change | `fixes` | failure |
+| evidence | `derived_from` | evidence |
+| review | `derived_from` | review |
+| change | `derived_from` | change |
+| requirement | `supersedes` | requirement |
+| policy | `supersedes` | policy |
+
+表にない triple は拒否する。`derived_from` は監査用であり、completion coverage を単独では満たさない。
+
+### Completion predicate
+
+各 active requirement R について、次をすべて満たす場合だけ coverage を認める。
+
+1. active code C が存在し、`C implements R` である。
+2. active test T が存在し、`T verifies R` である。
+3. command K が T を成功実行し、K が valid evidence E を生成し、`E proves T` であり、E が current active snapshot に bind されている。
+4. accepted review V が存在し、`V reviews R` であり、V の `input_digest` が current evidence set digest と一致する。
+5. active change M が存在し、C と T が M に `included_in` されている。
+
+単なる reachability では completion を認めない。superseded node、invalidated evidence、過去 snapshot の evidence は current coverage に数えない。
+
+## Evidence Lifecycle
+
+event と receipt、command output などの immutable evidence artifact は `.hotl/evidence/<sha256>` に content-addressed で保存する。mutable repository file の過去 digest は historical observation であり、現在の file digest と一致し続ける必要はない。
+
+code、test、または active snapshot が変わった場合、`evidence_invalidated` event により関連 evidence の projection status を `historically_valid` へ移す。削除せず監査履歴に残すが、G3/G4 の current coverage には数えない。再検証で新しい `valid_current` evidence を生成する。
+
+`verify-log` は次を別々に報告する。
+
+- log integrity
+- projection determinism
+- immutable evidence artifact integrity
+- current active snapshot integrity
+- historical mutable path observation
 
 ## CLI
 
@@ -193,7 +352,8 @@ JSONL event を append-only の正本とする。projection や status file を�
 - `init`: execution と policy snapshot を初期化する。
 - `status`: 現在 state、満たされた gate、missing evidence、許可された次 command を表示する。
 - `record`: closed event type と検証済み subject/artifact を追記する。
-- `import-receipt`: GPT Pro または Sol Advisor receipt を検証して event に変換する。
+- `approve`: trusted operator に承認対象 digest を提示し、専用 human approval receipt を生成する。
+- `import-receipt`: GPT Pro、Sol Advisor、または検証 tool の receipt を issuer ごとの closed schema で検証して event に変換する。
 - `evaluate`: gate を評価し、許可された state transition だけを実行する。
 - `project`: execution/provenance projection を再生成する。
 - `verify-log`: schema、hash chain、artifact digest、replay determinism を検証する。
@@ -225,6 +385,15 @@ Browser 制御、model attestation、conversation identity、nonce、snapshot、
 
 Sol を mandatory final gate にしない。未実施の相談を捏造せず、相談が不要だった事実を明示的 event として記録できるようにする。
 
+`no-consultation` は closed `reason_code` を必須とする。
+
+- `NOT_APPLICABLE`
+- `NO_MATERIAL_UNCERTAINTY`
+- `POLICY_NOT_REQUIRED`
+- `ADVISOR_UNAVAILABLE`
+
+`ADVISOR_UNAVAILABLE` を許容できるのは、Sol consultation を runtime dependency にしない standalone HOTL policy だけである。`orchestrate-gpt-pro-sol-advisor` combined mode では既存 contract を優先し、advisor preflight、invocation、attestation の失敗は hard stop とする。runtime で暗黙に緩和しない。
+
 ## Error Handling
 
 - schema error、identity mismatch、digest mismatch、unknown transition は安定した error code を返す。
@@ -232,6 +401,8 @@ Sol を mandatory final gate にしない。未実施の相談を捏造せず、
 - recovery 状態では read-only status と検証だけを許可する。
 - 既存 artifact を自動削除、修復、改名しない。
 - adapter receipt が不正な場合、その本文を判断材料にせず停止する。
+
+v1 は repair command を実装しない。`RECOVERY_REQUIRED` に入った execution は再開できない。operator が controller 外で artifact を保全・調査し、必要なら known-good source から復元した後、旧 execution を参照する successor execution を新規作成する。
 
 ## Testing
 
@@ -243,6 +414,8 @@ Sol を mandatory final gate にしない。未実施の相談を捏造せず、
 - canonical JSON と hash chain
 - path canonicalization と artifact digest
 - replay determinism
+- privileged receipt spoof の拒否
+- immutable execution boundary
 
 ### Transaction
 
@@ -252,6 +425,7 @@ Sol を mandatory final gate にしない。未実施の相談を捏造せず、
 - stale receipt と replay
 - tamper detection
 - recovery-required hard stop
+- successor execution の lineage
 
 ### Adapter
 
@@ -259,6 +433,8 @@ Sol を mandatory final gate にしない。未実施の相談を捏造せず、
 - Sol advice/attestation/disposition fixture
 - malformed、mismatched、replayed receipt
 - consultationなしの正常経路
+- no-consultation reason policy
+- stale snapshot evidence の invalidation
 
 ### Regression と Eval
 
@@ -289,10 +465,13 @@ Sol を mandatory final gate にしない。未実施の相談を捏造せず、
 - focused unit、transaction、adapter、eval が通る。
 - `python scripts/validate-skills.py` が通る。
 - `python scripts/generate-skill-catalog.py` 後に意図した catalog 差分だけが残る。
-- `python scripts/context_budget_report.py --repo . --manifest context-budget-manifest.json --baseline context-budget-baseline.json --max-growth-bytes 0` が通る。意図的な model-visible 増加は別途レビューして baseline を更新する。
+- `python scripts/context_budget_report.py --repo . --manifest context-budget-manifest.json --baseline context-budget-baseline.json --max-growth-bytes 0` を baseline 変更前に実行する。
+- growth がある場合は file/byte 単位で内容を確認し、HOTL に必要な増加だけを明示承認して baseline を更新する。その後、同じ `--max-growth-bytes 0` command を再実行する。失敗だけを理由に baseline を更新しない。
 - GPT Pro controller の `final-verify` が成功する。
 - fresh repository diff inspection で対象外変更がない。
 
-## 実装開始前の前提
+## Current implementation-session prerequisite
+
+これは今回の実装セッションにだけ適用する前提であり、`hotl-governance` の runtime dependency ではない。
 
 `orchestrate-gpt-pro-sol-advisor` combined mode の preflight が成功しなければ、GPT Pro controller を初期化しない。現在の Codex task で `get_setup_status`、`get_preferences`、`sol_advisor_advisor` が観測できない場合は、Sol Advisor setup と adapter installation を完了し、新しい Codex task を開始してから実装へ進む。
