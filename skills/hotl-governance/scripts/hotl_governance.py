@@ -99,6 +99,7 @@ def _parser() -> argparse.ArgumentParser:
     successor.add_argument("--predecessor", required=True)
     successor.add_argument("--lineage", required=True)
     successor.add_argument("--policy", required=True)
+    successor.add_argument("--requirements", required=True)
     return parser
 
 
@@ -135,8 +136,11 @@ def _record_artifacts(repository: Path, event: dict[str, object]) -> dict[str, b
             raise controller.ControllerError(
                 "INVALID_SCHEMA", "Artifact reference fields are invalid."
             )
-        normalized = contract.normalize_repo_path(repository, str(ref["path"]))
-        content = (repository / Path(normalized)).read_bytes()
+        if not isinstance(ref["path"], str):
+            raise controller.ControllerError(
+                "INVALID_SCHEMA", "Artifact reference path must be a string."
+            )
+        content = store.read_repository_artifact(repository, ref["path"])
         digest = "sha256:" + hashlib.sha256(content).hexdigest()
         if digest != ref["sha256"]:
             raise controller.ControllerError(
@@ -219,6 +223,7 @@ def _dispatch(arguments: argparse.Namespace) -> dict[str, object]:
             arguments.predecessor,
             _read_object(arguments.lineage, "lineage"),
             _read_object(arguments.policy, "policy"),
+            _read_object(arguments.requirements, "requirements"),
         )
     raise controller.ControllerError("UNKNOWN_COMMAND", "Command is not supported.")
 
@@ -242,6 +247,8 @@ def main_json(argv: Sequence[str]) -> dict[str, object]:
         return _failure(command, error.code, error.message)
     except (OSError, UnicodeError) as error:
         return _failure(command, "INPUT_READ_ERROR", str(error))
+    except TypeError:
+        return _failure(command, "INVALID_SCHEMA", "Input values have invalid types.")
     return {"command": command, "ok": True, "result": result}
 
 

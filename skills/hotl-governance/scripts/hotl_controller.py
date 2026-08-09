@@ -299,6 +299,14 @@ def _review_is_current(projection: Projection, event: Mapping[str, object]) -> b
     )
 
 
+def _snapshot_binding_is_current(
+    receipt_type: str, snapshot_digest: object, active_snapshot_digest: str
+) -> bool:
+    if receipt_type in {"material_change", "stop"} and snapshot_digest is None:
+        return True
+    return snapshot_digest == active_snapshot_digest
+
+
 def project_event(projection: Projection, event: Mapping[str, object]) -> Projection:
     """Project one validated event; only a committed transition may change state."""
     candidate = _validated_event(event)
@@ -464,7 +472,11 @@ def project_event(projection: Projection, event: Mapping[str, object]) -> Projec
             and (
                 not current_bound
                 or (
-                    payload["snapshot_digest"] == projection.active_snapshot_digest
+                    _snapshot_binding_is_current(
+                        receipt_type,
+                        payload["snapshot_digest"],
+                        projection.active_snapshot_digest,
+                    )
                     and payload["evidence_set_digest"]
                     == projection_evidence_set_digest(projection)
                     and payload["cycle_id"] == projection.cycle_id
@@ -663,7 +675,11 @@ def _receipt_is_current(projection: Projection, record: ReceiptRecord) -> bool:
     if record.receipt_type in {"requirements", "approval"}:
         return True
     return (
-        record.snapshot_digest == projection.active_snapshot_digest
+        _snapshot_binding_is_current(
+            record.receipt_type,
+            record.snapshot_digest,
+            projection.active_snapshot_digest,
+        )
         and record.evidence_set_digest == projection_evidence_set_digest(projection)
         and record.cycle_id == projection.cycle_id
     )
@@ -867,13 +883,20 @@ def _projection_value(projection: Projection) -> dict[str, object]:
     return value
 
 
-def _read_policy(paths: store.RunPaths) -> dict[str, object]:
+def _read_state(paths: store.RunPaths) -> dict[str, object]:
     try:
         raw = paths.state.read_text(encoding="utf-8")
         state = contract.strict_json_loads(raw)
     except (OSError, UnicodeError, contract.ContractError) as error:
         raise store.StoreError("RECOVERY_REQUIRED", "Persisted controller state is unreadable.") from error
-    if not isinstance(state, dict) or not isinstance(state.get("policy"), dict):
+    if not isinstance(state, dict):
+        raise store.StoreError("RECOVERY_REQUIRED", "Persisted controller state is invalid.")
+    return state
+
+
+def _read_policy(paths: store.RunPaths) -> dict[str, object]:
+    state = _read_state(paths)
+    if not isinstance(state.get("policy"), dict):
         raise store.StoreError("RECOVERY_REQUIRED", "Persisted controller policy is missing.")
     return dict(state["policy"])
 
@@ -1184,28 +1207,36 @@ def start_successor(
     predecessor_id: str,
     receipt: Mapping[str, object],
     policy: Mapping[str, object],
+    requirements: Mapping[str, object],
 ) -> dict[str, object]:
-    """Create an INIT successor without mutating its terminal predecessor."""
+    """Atomically create a replayable successor without mutating its predecessor."""
     predecessor_paths = store.resolve_run(repository, predecessor_id)
     lineage = _lineage_receipt(receipt, predecessor_id)
     _require_material_predecessor(predecessor_paths)
     _verify_lineage_evidence(predecessor_paths, lineage)
-    successor_policy = _canonical_mapping(policy)
-    execution_id = successor_policy.get("execution_id")
+    execution_id = policy.get("execution_id")
     if (
         not isinstance(execution_id, str)
         or contract.EXECUTION_ID.fullmatch(execution_id) is None
         or execution_id == predecessor_id
     ):
         raise ControllerError("INVALID_EXECUTION_ID", "Successor execution ID is invalid.")
-    if successor_policy.get("initial_state", State.INIT.value) != State.INIT.value:
+    try:
+        successor_policy = _validated_base_policy(
+            policy, execution_id, _SUCCESSOR_POLICY_FIELDS
+        )
+    except ControllerError as error:
+        if error.code in {"INVALID_FIELDS", "EXECUTION_MISMATCH"}:
+            raise ControllerError("INVALID_POLICY", "Successor policy fields are invalid.") from error
+        raise
+    if successor_policy["initial_state"] != State.INIT.value:
         raise ControllerError("INVALID_POLICY", "A successor must start in INIT.")
-    for binding in ("requirements_digest", "authority_snapshot_digest"):
-        value = successor_policy.get(binding)
-        if not isinstance(value, str) or contract.DIGEST.fullmatch(value) is None:
-            raise ControllerError(
-                "INVALID_POLICY", f"A successor requires a canonical {binding}."
-            )
+    requirements_value, identifiers, requirements_digest = _validated_requirements(requirements)
+    if successor_policy["requirements_digest"] != requirements_digest:
+        raise ControllerError(
+            "REQUIREMENTS_MISMATCH",
+            "Successor requirements content does not match the declared digest.",
+        )
     successor_policy.update(
         {
             "initial_state": State.INIT.value,
@@ -1229,6 +1260,7 @@ def start_successor(
             "evidence_set_digest": None,
             "cycle_id": None,
         }
+        events: list[dict[str, object]] = []
         first_event = _generated_event(
             execution_id,
             1,
@@ -1237,11 +1269,48 @@ def start_successor(
             payload,
             input_digest=str(lineage["lineage_receipt_digest"]),
         )
-        projection = replay(successor_policy, [first_event])
-        state = _state_value(
-            projection, successor_policy, 1, contract.canonical_digest(first_event)
+        events.append(first_event)
+        projection = replay(successor_policy, events)
+        previous = contract.canonical_digest(first_event)
+        for identifier in identifiers:
+            event = _generated_event(
+                execution_id,
+                len(events) + 1,
+                previous,
+                "node_declared",
+                {"node_id": identifier, "node_type": "requirement"},
+                subject_ids=[identifier],
+                input_digest=requirements_digest,
+            )
+            projection = project_event(projection, event)
+            events.append(event)
+            previous = contract.canonical_digest(event)
+        evidence_digest = projection_evidence_set_digest(projection)
+        transition = _generated_event(
+            execution_id,
+            len(events) + 1,
+            previous,
+            "transition_committed",
+            {
+                "cycle_id": projection.cycle_id,
+                "evidence_set_digest": evidence_digest,
+                "from_state": State.INIT.value,
+                "gate": "INIT",
+                "to_state": State.REQUIREMENTS.value,
+            },
+            input_digest=evidence_digest,
         )
-        store.publish_initial_run(successor_paths, state, first_event)
+        projection = project_event(projection, transition)
+        events.append(transition)
+        head = contract.canonical_digest(transition)
+        state = _state_value(projection, successor_policy, len(events), head)
+        artifacts = {
+            requirements_digest: contract.canonical_json_bytes(requirements_value),
+            contract.canonical_digest(successor_policy): contract.canonical_json_bytes(
+                successor_policy
+            ),
+        }
+        store.publish_initial_events(successor_paths, state, events, artifacts)
 
     recovery = store.recovery_status(predecessor_paths)
     if recovery["recovery_required"]:
@@ -1257,8 +1326,8 @@ def start_successor(
     return {
         "execution_id": execution_id,
         "predecessor_execution_id": predecessor_id,
-        "state": State.INIT.value,
-        "event_count": 1,
+        "state": State.REQUIREMENTS.value,
+        "event_count": len(identifiers) + 2,
         "lineage_receipt_digest": lineage["lineage_receipt_digest"],
     }
 
@@ -1274,6 +1343,9 @@ _INITIAL_POLICY_FIELDS = frozenset(
         "receipt_nonce",
         "schema_version",
     }
+)
+_SUCCESSOR_POLICY_FIELDS = _INITIAL_POLICY_FIELDS | frozenset(
+    {"initial_state", "requirements_digest"}
 )
 _SOURCE_RECEIPT_FIELDS = frozenset(
     {
@@ -1295,31 +1367,16 @@ _SOURCE_RECEIPT_FIELDS = frozenset(
         "snapshot_digest",
     }
 )
-_SOURCE_ISSUERS = {
-    "requirements": "gpt-pro-codex-loop",
-    "implementation": "codex",
-    "verification": "hotl-local-verifier",
-    "semantic_review": "gpt-pro-codex-loop",
-    "final": "gpt-pro-codex-loop",
-    "material_change": "gpt-pro-codex-loop",
-    "stop": "gpt-pro-codex-loop",
-}
-
-
 def _exact_mapping(value: object, fields: frozenset[str], label: str) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != fields:
         raise ControllerError("INVALID_FIELDS", f"{label} fields must match exactly.")
     return value
 
 
-def initialize_execution(
-    repository: Path,
-    execution_id: str,
-    policy: Mapping[str, object],
-    requirements: Mapping[str, object],
+def _validated_base_policy(
+    policy: Mapping[str, object], execution_id: str, fields: frozenset[str]
 ) -> dict[str, object]:
-    """Atomically publish requirements and the explicit INIT lifecycle transition."""
-    supplied = _exact_mapping(dict(policy), _INITIAL_POLICY_FIELDS, "policy")
+    supplied = _exact_mapping(dict(policy), fields, "policy")
     if supplied["schema_version"] != 1 or isinstance(supplied["schema_version"], bool):
         raise ControllerError("INVALID_POLICY", "Policy schema_version must be integer 1.")
     if supplied["execution_id"] != execution_id:
@@ -1343,6 +1400,12 @@ def initialize_execution(
         not isinstance(host_digest, str) or contract.DIGEST.fullmatch(host_digest) is None
     ):
         raise ControllerError("INVALID_DIGEST", "Host approval evidence digest is invalid.")
+    return supplied
+
+
+def _validated_requirements(
+    requirements: Mapping[str, object],
+) -> tuple[dict[str, object], list[str], str]:
     requirements_value = _exact_mapping(
         dict(requirements), frozenset({"requirements"}), "requirements"
     )
@@ -1358,7 +1421,18 @@ def initialize_execution(
         raise ControllerError(
             "INVALID_REQUIREMENTS", "Requirement IDs must be unique and canonically sorted."
         )
-    requirements_digest = contract.canonical_digest(requirements_value)
+    return requirements_value, identifiers, contract.canonical_digest(requirements_value)
+
+
+def initialize_execution(
+    repository: Path,
+    execution_id: str,
+    policy: Mapping[str, object],
+    requirements: Mapping[str, object],
+) -> dict[str, object]:
+    """Atomically publish requirements and the explicit INIT lifecycle transition."""
+    supplied = _validated_base_policy(policy, execution_id, _INITIAL_POLICY_FIELDS)
+    requirements_value, identifiers, requirements_digest = _validated_requirements(requirements)
     normalized_policy = dict(supplied)
     normalized_policy.update(
         {
@@ -1478,18 +1552,19 @@ def _validate_source_receipt(
     expected_type: str | None,
 ) -> tuple[str, dict[str, object]]:
     receipt_type = source.get("receipt_type")
-    if not isinstance(receipt_type, str) or receipt_type not in contract.RECEIPT_TYPE_ISSUERS:
+    if not isinstance(receipt_type, str):
+        raise ControllerError("INVALID_SCHEMA", "Receipt type must be a string.")
+    if receipt_type not in contract.RECEIPT_TYPE_ISSUERS:
         raise ControllerError("UNKNOWN_RECEIPT_TYPE", "Receipt type is not supported.")
     if receipt_type == "lineage":
         raise ControllerError("INVALID_RECEIPT_TYPE", "Lineage uses start-successor.")
     if expected_type is not None and receipt_type != expected_type:
         raise ControllerError("RECEIPT_TYPE_MISMATCH", "Receipt type does not match the command.")
     issuer = source.get("issuer_skill")
-    if receipt_type == "approval":
-        allowed = contract.RECEIPT_TYPE_ISSUERS["approval"]
-        if issuer not in allowed:
-            raise ControllerError("ISSUER_MISMATCH", "Approval issuer is not allowed.")
-    elif issuer != _SOURCE_ISSUERS.get(receipt_type):
+    if not isinstance(issuer, str):
+        raise ControllerError("INVALID_SCHEMA", "Receipt issuer must be a string.")
+    allowed = contract.RECEIPT_TYPE_ISSUERS[receipt_type]
+    if issuer not in allowed:
         raise ControllerError("ISSUER_MISMATCH", "Receipt issuer is not allowed for its type.")
     base_fields = contract.RECEIPT_BASE_FIELDS | (
         {"transaction_id"} if "transaction_id" in source else {"invocation_id"}
@@ -1498,7 +1573,7 @@ def _validate_source_receipt(
     try:
         contract.validate_receipt(
             base,
-            str(issuer),
+            issuer,
             projection.execution_id,
             projection.authority_snapshot_digest,
         )
@@ -1522,7 +1597,11 @@ def _validate_source_receipt(
         if source["input_digest"] != projection.requirements_digest:
             raise ControllerError("DIGEST_MISMATCH", "Frozen receipt target digest is wrong.")
     elif (
-        source["snapshot_digest"] != projection.active_snapshot_digest
+        not _snapshot_binding_is_current(
+            receipt_type,
+            source["snapshot_digest"],
+            projection.active_snapshot_digest,
+        )
         or source["evidence_set_digest"] != current_digest
         or source["cycle_id"] != projection.cycle_id
         or source["input_digest"] != current_digest
@@ -1831,21 +1910,43 @@ def verify_execution(repository: Path, execution_id: str) -> dict[str, object]:
         "immutable_evidence_integrity": False,
         "log_findings": list(recovery["reasons"]),
         "log_integrity": not recovery["recovery_required"],
+        "persisted_projection_integrity": False,
+        "persisted_projection_findings": [],
         "projection_determinism": False,
         "projection_findings": [],
+        "projection_replay_determinism": False,
     }
     if recovery["recovery_required"]:
         return report
-    policy = _read_policy(paths)
+    persisted_state = _read_state(paths)
+    policy_value = persisted_state.get("policy")
+    if not isinstance(policy_value, dict):
+        raise store.StoreError("RECOVERY_REQUIRED", "Persisted controller policy is missing.")
+    policy = dict(policy_value)
     events = store.load_events(paths)
     left = replay(policy, events)
     right = replay(policy, events)
     deterministic = contract.canonical_json_bytes(_projection_value(left)) == contract.canonical_json_bytes(
         _projection_value(right)
     )
-    report["projection_determinism"] = deterministic
+    report["projection_replay_determinism"] = deterministic
+    persisted_matches = False
+    try:
+        persisted_matches = contract.canonical_json_bytes(
+            persisted_state.get("projection")
+        ) == contract.canonical_json_bytes(_projection_value(left))
+    except contract.ContractError:
+        persisted_matches = False
+    report["persisted_projection_integrity"] = persisted_matches
+    if not persisted_matches:
+        report["persisted_projection_findings"] = ["PERSISTED_PROJECTION_MISMATCH"]
+    report["projection_determinism"] = deterministic and persisted_matches
+    projection_findings: list[str] = []
     if not deterministic:
-        report["projection_findings"] = ["PROJECTION_MISMATCH"]
+        projection_findings.append("PROJECTION_REPLAY_MISMATCH")
+    if not persisted_matches:
+        projection_findings.append("PERSISTED_PROJECTION_MISMATCH")
+    report["projection_findings"] = projection_findings
     immutable_findings: list[str] = []
     try:
         evidence_objects = sorted(paths.evidence.iterdir(), key=lambda path: path.name)
@@ -1888,16 +1989,8 @@ def verify_execution(repository: Path, execution_id: str) -> dict[str, object]:
             continue
         for ref in event["artifact_refs"]:
             try:
-                normalized = contract.normalize_repo_path(
-                    repository, str(ref["path"])
-                )
-            except contract.ContractError:
-                current_findings.append(str(ref["path"]) + ":UNSAFE_PATH")
-                continue
-            path = repository / Path(normalized)
-            try:
-                content = path.read_bytes()
-            except OSError:
+                content = store.read_repository_artifact(repository, ref["path"])
+            except (store.StoreError, TypeError):
                 current_findings.append(str(ref["path"]) + ":UNREADABLE")
                 continue
             if "sha256:" + hashlib.sha256(content).hexdigest() != ref["sha256"]:

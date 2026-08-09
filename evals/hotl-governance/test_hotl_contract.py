@@ -238,6 +238,25 @@ class RepositoryPathTests(unittest.TestCase):
 
 
 class EnvelopeValidationTests(unittest.TestCase):
+    def test_receipt_issuer_policy_is_immutable_and_canonical(self) -> None:
+        original = contract.RECEIPT_TYPE_ISSUERS["approval"]
+        try:
+            with self.assertRaises(TypeError):
+                contract.RECEIPT_TYPE_ISSUERS["approval"] = frozenset({"forged"})  # type: ignore[index]
+        finally:
+            if contract.RECEIPT_TYPE_ISSUERS["approval"] != original:
+                contract.RECEIPT_TYPE_ISSUERS["approval"] = original
+        self.assertEqual(
+            frozenset(
+                {
+                    "gpt-pro-codex-loop",
+                    "hotl-host-approval",
+                    "trusted-local-operator",
+                }
+            ),
+            contract.RECEIPT_TYPE_ISSUERS["approval"],
+        )
+
     def test_event_requires_the_exact_closed_envelope_and_chain_position(self) -> None:
         event = valid_event()
         self.assertEqual(event, contract.validate_event(event, None, 1))

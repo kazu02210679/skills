@@ -66,6 +66,56 @@ def fixture_state(count: int, head: str) -> dict[str, object]:
 
 
 class TransactionStorageTests(unittest.TestCase):
+    def test_safe_artifact_read_rejects_static_symlink_or_reparse(self) -> None:
+        target = self.repository / "target.txt"
+        target.write_bytes(b"inside\n")
+        link = self.repository / "artifact.txt"
+        try:
+            link.symlink_to(target)
+        except OSError as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+
+        with self.assertRaises(store.StoreError) as raised:
+            store.read_repository_artifact(self.repository, "artifact.txt")
+
+        self.assertEqual("UNSAFE_ARTIFACT", raised.exception.code)
+
+    def test_safe_artifact_read_fails_closed_on_swap_to_outside_link(self) -> None:
+        candidate = self.repository / "artifact.txt"
+        candidate.write_bytes(b"inside\n")
+        outside = Path(self.temporary.name) / "outside.txt"
+        outside.write_bytes(b"outside\n")
+        probe = self.repository / "probe-link"
+        try:
+            probe.symlink_to(outside)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+        real_open = os.open
+        swapped = False
+
+        def swap_before_open(
+            path: object,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            nonlocal swapped
+            if not swapped and (str(path) == "artifact.txt" or Path(path) == candidate):
+                candidate.unlink()
+                candidate.symlink_to(outside)
+                swapped = True
+            if dir_fd is None:
+                return real_open(path, flags, mode)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with patch.object(store.os, "open", side_effect=swap_before_open):
+            with self.assertRaises(store.StoreError) as raised:
+                store.read_repository_artifact(self.repository, "artifact.txt")
+
+        self.assertTrue(swapped)
+        self.assertEqual("UNSAFE_ARTIFACT", raised.exception.code)
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name) / "repository"

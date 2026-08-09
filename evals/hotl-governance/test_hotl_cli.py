@@ -352,6 +352,20 @@ class HotlCliTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual("INVALID_REVIEW", result["error"]["code"])
 
+        unhashable_issuer = self._receipt("approval", "RCP-BAD-ISSUER")
+        unhashable_issuer["issuer_skill"] = ["gpt-pro-codex-loop"]
+        issuer_result = self._import(
+            unhashable_issuer, "unhashable-issuer.json"
+        )
+        self.assertFalse(issuer_result["ok"])
+        self.assertEqual("INVALID_SCHEMA", issuer_result["error"]["code"])
+
+        unhashable_type = self._receipt("approval", "RCP-BAD-TYPE")
+        unhashable_type["receipt_type"] = {"approval": True}
+        type_result = self._import(unhashable_type, "unhashable-type.json")
+        self.assertFalse(type_result["ok"])
+        self.assertEqual("INVALID_SCHEMA", type_result["error"]["code"])
+
     def test_init_atomically_reaches_requirements_with_explicit_init_transition(self) -> None:
         result = self._init()
         self.assertTrue(result["ok"], result)
@@ -735,6 +749,25 @@ class HotlCliTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual("STALE_RECEIPT", result["error"]["code"])
 
+    def test_null_snapshot_terminal_receipts_can_stop_after_snapshot_activation(self) -> None:
+        for index, (receipt_type, gate) in enumerate(
+            (("stop", "STOP"), ("material_change", "MATERIAL_CHANGE")), 1
+        ):
+            with self.subTest(receipt_type=receipt_type):
+                self.execution = f"EXEC-00000000010{index}"
+                self._init(execution=self.execution)
+                receipt = self._receipt(
+                    receipt_type, f"RCP-NULL-SNAPSHOT-{index}"
+                )
+                receipt["snapshot_digest"] = None
+                imported = self._import(
+                    receipt, f"null-snapshot-{receipt_type}.json"
+                )
+                self.assertTrue(imported["ok"], imported)
+                transitioned = self._evaluate(gate)
+                self.assertTrue(transitioned["ok"], transitioned)
+                self.assertEqual("STOPPED", transitioned["result"]["state"])
+
     def test_rejected_review_receipt_roots_and_findings_are_one_atomic_batch(self) -> None:
         self._reach_semantic_review()
         receipt = self._receipt(
@@ -805,14 +838,15 @@ class HotlCliTests(unittest.TestCase):
         self.assertEqual("RECOVERY_REQUIRED", result["error"]["code"])
         self.assertTrue(orphan.is_dir())
 
-    def test_start_successor_dispatches_validated_lineage_without_predecessor_mutation(self) -> None:
+    def test_successor_is_immediately_verifiable_and_can_later_advance_g1(self) -> None:
         self._init()
         self.assertTrue(
             self._import(self._receipt("stop", "RCP-STOP-1"), "stop.json")["ok"]
         )
         self.assertEqual("STOPPED", self._evaluate("STOP")["result"]["state"])
         predecessor = store.resolve_run(self.repository, self.execution)
-        before = snapshot_tree(predecessor.root)
+        before_events = predecessor.events.read_bytes()
+        before_state = predecessor.state.read_bytes()
         binding = {
             "predecessor_execution_id": self.execution,
             "supersedes": [{"new_id": "REQ-2", "old_id": "REQ-1"}],
@@ -824,13 +858,25 @@ class HotlCliTests(unittest.TestCase):
             "lineage.json", binding | {"lineage_receipt_digest": digest}
         )
         successor = "EXEC-ABCDEF123456"
+        successor_requirements_value = {"requirements": ["REQ-2"]}
+        successor_requirements = self._write(
+            "successor-requirements.json", successor_requirements_value
+        )
         policy = self._write(
             "successor-policy.json",
             {
+                "active_snapshot_digest": SNAPSHOT,
+                "approval_mode": "agentic",
                 "authority_snapshot_digest": AUTHORITY,
+                "cycle_id": 1,
                 "execution_id": successor,
+                "host_approval_evidence_digest": None,
                 "initial_state": "INIT",
-                "requirements_digest": "sha256:" + "d" * 64,
+                "receipt_nonce": NONCE,
+                "requirements_digest": contract.canonical_digest(
+                    successor_requirements_value
+                ),
+                "schema_version": 1,
             },
         )
 
@@ -845,13 +891,46 @@ class HotlCliTests(unittest.TestCase):
                 str(lineage),
                 "--policy",
                 str(policy),
+                "--requirements",
+                str(successor_requirements),
             ]
         )
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual("INIT", result["result"]["state"])
-        after = snapshot_tree(predecessor.root)
-        self.assertEqual(before, after)
+        self.assertEqual("REQUIREMENTS", result["result"]["state"])
+        self.assertEqual(before_events, predecessor.events.read_bytes())
+        self.assertEqual(before_state, predecessor.state.read_bytes())
+        verification = cli.main_json(
+            [
+                "verify-log",
+                "--repo",
+                str(self.repository),
+                "--execution",
+                successor,
+            ]
+        )
+        self.assertTrue(verification["ok"], verification)
+        self.assertTrue(verification["result"]["log_integrity"])
+        self.assertTrue(verification["result"]["projection_determinism"])
+        self.assertTrue(verification["result"]["persisted_projection_integrity"])
+        self.assertTrue(verification["result"]["immutable_evidence_integrity"])
+
+        self.execution = successor
+        self.assertTrue(
+            self._import(
+                self._receipt("requirements", "RCP-SUCCESSOR-REQ"),
+                "successor-requirements-receipt.json",
+            )["ok"]
+        )
+        self.assertTrue(
+            self._import(
+                self._receipt("approval", "RCP-SUCCESSOR-APP"),
+                "successor-approval-receipt.json",
+            )["ok"]
+        )
+        advanced = self._evaluate("G1")
+        self.assertTrue(advanced["ok"], advanced)
+        self.assertEqual("IMPLEMENT", advanced["result"]["state"])
 
     def test_project_stdout_is_deterministic_and_read_only(self) -> None:
         self._init()
@@ -936,6 +1015,35 @@ class HotlCliTests(unittest.TestCase):
             digest + ":MISSING",
             result["result"]["immutable_evidence_findings"],
         )
+
+    def test_verify_log_detects_canonical_persisted_projection_tampering_read_only(self) -> None:
+        self._init()
+        paths = store.resolve_run(self.repository, self.execution)
+        state = json.loads(paths.state.read_text(encoding="utf-8"))
+        state["projection"]["state"] = "IMPLEMENT"
+        paths.state.write_bytes(contract.canonical_json_bytes(state))
+        before = snapshot_tree(self.repository / ".hotl")
+
+        result = cli.main_json(
+            [
+                "verify-log",
+                "--repo",
+                str(self.repository),
+                "--execution",
+                self.execution,
+            ]
+        )
+
+        self.assertTrue(result["ok"], result)
+        report = result["result"]
+        self.assertTrue(report["log_integrity"])
+        self.assertTrue(report["projection_replay_determinism"])
+        self.assertFalse(report["persisted_projection_integrity"])
+        self.assertFalse(report["projection_determinism"])
+        self.assertIn(
+            "PERSISTED_PROJECTION_MISMATCH", report["projection_findings"]
+        )
+        self.assertEqual(before, snapshot_tree(self.repository / ".hotl"))
 
 
 if __name__ == "__main__":

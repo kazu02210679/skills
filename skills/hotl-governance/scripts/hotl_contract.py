@@ -12,6 +12,7 @@ import ntpath
 import re
 import stat
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 
 
 EXECUTION_ID = re.compile(r"EXEC-[0-9A-F]{12}\Z")
@@ -45,7 +46,7 @@ EVENT_TYPES = frozenset(
         "transition_committed",
     }
 )
-RECEIPT_TYPE_ISSUERS = {
+RECEIPT_TYPE_ISSUERS = MappingProxyType({
     "requirements": frozenset({"gpt-pro-codex-loop"}),
     "approval": frozenset(
         {"gpt-pro-codex-loop", "hotl-host-approval", "trusted-local-operator"}
@@ -57,7 +58,7 @@ RECEIPT_TYPE_ISSUERS = {
     "material_change": frozenset({"gpt-pro-codex-loop"}),
     "stop": frozenset({"gpt-pro-codex-loop"}),
     "lineage": frozenset({"hotl-governance-lineage"}),
-}
+})
 TRANSITION_DECISIONS = frozenset(
     {
         "INIT",

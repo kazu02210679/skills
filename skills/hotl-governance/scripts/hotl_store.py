@@ -13,9 +13,16 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Iterator, Mapping, Sequence
 
-from hotl_contract import ContractError, canonical_digest, canonical_json_bytes, validate_event
+from hotl_contract import (
+    ContractError,
+    canonical_digest,
+    canonical_json_bytes,
+    normalize_repo_path,
+    validate_event,
+)
 
 
 EXECUTION_ID = re.compile(r"EXEC-[0-9A-F]{12}\Z")
@@ -58,6 +65,128 @@ def _is_link_or_reparse(path: Path) -> bool:
         return True
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
     return bool(getattr(metadata, "st_file_attributes", 0) & reparse)
+
+
+def _artifact_error(error: BaseException | None = None) -> StoreError:
+    failure = StoreError(
+        "UNSAFE_ARTIFACT",
+        "Artifact path could not be opened as a stable plain repository file.",
+    )
+    if error is not None:
+        failure.__cause__ = error
+    return failure
+
+
+def _read_open_file(fd: int) -> bytes:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode):
+        raise _artifact_error()
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    after = os.fstat(fd)
+    identity = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        getattr(value, "st_mtime_ns", None),
+        getattr(value, "st_ctime_ns", None),
+    )
+    if identity(before) != identity(after):
+        raise _artifact_error()
+    return b"".join(chunks)
+
+
+def _windows_final_path(fd: int) -> Path:
+    import ctypes
+    import msvcrt
+
+    handle = msvcrt.get_osfhandle(fd)
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetFinalPathNameByHandleW(
+        ctypes.c_void_p(handle), buffer, len(buffer), 0
+    )
+    if length == 0 or length >= len(buffer):
+        raise _artifact_error()
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return Path(value)
+
+
+def _read_repository_artifact_windows(repository: Path, normalized: str) -> bytes:
+    supplied = repository.absolute()
+    if _is_link_or_reparse(supplied) or not supplied.is_dir():
+        raise _artifact_error()
+    root = supplied.resolve(strict=True)
+    candidate = root
+    for part in PurePosixPath(normalized).parts:
+        candidate = candidate / part
+        if _is_link_or_reparse(candidate):
+            raise _artifact_error()
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(candidate, flags)
+    try:
+        opened = _windows_final_path(fd)
+        try:
+            common = os.path.commonpath((str(root), str(opened)))
+            if os.path.normcase(common) != os.path.normcase(str(root)):
+                raise _artifact_error()
+        except ValueError as error:
+            raise _artifact_error(error) from error
+        content = _read_open_file(fd)
+        common = os.path.commonpath((str(root), str(_windows_final_path(fd))))
+        if os.path.normcase(common) != os.path.normcase(str(root)):
+            raise _artifact_error()
+        return content
+    finally:
+        os.close(fd)
+
+
+def _read_repository_artifact_posix(repository: Path, normalized: str) -> bytes:
+    root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    try:
+        current = os.open(repository, root_flags)
+        descriptors.append(current)
+        root_metadata = os.fstat(current)
+        if not stat.S_ISDIR(root_metadata.st_mode):
+            raise _artifact_error()
+        parts = PurePosixPath(normalized).parts
+        for part in parts[:-1]:
+            current = os.open(part, root_flags, dir_fd=current)
+            descriptors.append(current)
+            if not stat.S_ISDIR(os.fstat(current).st_mode):
+                raise _artifact_error()
+        artifact = os.open(parts[-1], file_flags, dir_fd=current)
+        descriptors.append(artifact)
+        return _read_open_file(artifact)
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def read_repository_artifact(repository: Path, raw_path: str) -> bytes:
+    """Read a repository artifact through one link-safe, handle-bound operation."""
+    try:
+        normalized = normalize_repo_path(repository, raw_path)
+        if os.name == "nt":
+            return _read_repository_artifact_windows(Path(repository), normalized)
+        return _read_repository_artifact_posix(Path(repository), normalized)
+    except StoreError:
+        raise
+    except (ContractError, OSError, ValueError, TypeError) as error:
+        raise _artifact_error(error) from error
 
 
 def _require_plain_directory(path: Path, *, recovery: bool = True) -> None:

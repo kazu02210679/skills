@@ -25,6 +25,22 @@ SUCCESSOR_TWO = "EXEC-FEDCBA654321"
 DIGEST_ONE = "sha256:" + "1" * 64
 DIGEST_TWO = "sha256:" + "2" * 64
 DIGEST_THREE = "sha256:" + "3" * 64
+SUCCESSOR_REQUIREMENTS = {"requirements": ["REQ-2"]}
+
+
+def successor_policy(execution_id: str) -> dict[str, object]:
+    return {
+        "active_snapshot_digest": DIGEST_TWO,
+        "approval_mode": "agentic",
+        "authority_snapshot_digest": DIGEST_THREE,
+        "cycle_id": 1,
+        "execution_id": execution_id,
+        "host_approval_evidence_digest": None,
+        "initial_state": "INIT",
+        "receipt_nonce": "1" * 32,
+        "requirements_digest": contract.canonical_digest(SUCCESSOR_REQUIREMENTS),
+        "schema_version": 1,
+    }
 
 
 def fixture_projection(state: str, **changes: object) -> controller.Projection:
@@ -295,6 +311,30 @@ def projection_bytes(projection: controller.Projection) -> bytes:
 
 
 class ProjectionTests(unittest.TestCase):
+    def test_null_snapshot_terminal_receipts_remain_current_after_activation(self) -> None:
+        for receipt_type, decision in (
+            ("stop", "STOP"),
+            ("material_change", "MATERIAL_CHANGE"),
+        ):
+            with self.subTest(receipt_type=receipt_type):
+                projection = fixture_projection(
+                    "REQUIREMENTS", active_snapshot_digest=DIGEST_TWO, cycle_id=1
+                )
+                event = fixture_receipt(
+                    projection,
+                    receipt_type,
+                    "RCP-" + decision,
+                    receipt_digest="sha256:"
+                    + hashlib.sha256(receipt_type.encode()).hexdigest(),
+                )
+                payload = dict(event["payload"])
+                payload["snapshot_digest"] = None
+                admitted = controller.project_event(
+                    projection, event | {"payload": payload}
+                )
+                self.assertTrue(admitted.receipt_records["RCP-" + decision].valid)
+                self.assertEqual(("STOPPED",), controller.allowed_transitions(admitted))
+
     def test_offline_approval_is_gate_eligible_only_in_frozen_manual_mode(self) -> None:
         for approval_mode, expected in (("agentic", False), ("offline_manual", True)):
             with self.subTest(approval_mode=approval_mode):
@@ -1240,12 +1280,7 @@ class RepositoryControllerTests(unittest.TestCase):
 
     def test_successor_requires_terminal_predecessor_and_lineage(self) -> None:
         paths, _, _ = self._initialize("REQUIREMENTS")
-        policy = {
-            "execution_id": SUCCESSOR_ONE,
-            "initial_state": "INIT",
-            "requirements_digest": DIGEST_TWO,
-            "authority_snapshot_digest": DIGEST_THREE,
-        }
+        policy = successor_policy(SUCCESSOR_ONE)
         valid = self._lineage(paths)
 
         for receipt in (
@@ -1255,7 +1290,9 @@ class RepositoryControllerTests(unittest.TestCase):
             valid | {"supersedes": [{"new_id": "REQ-1", "old_id": "REQ-1"}]},
         ):
             with self.subTest(receipt=receipt), self.assertRaises(controller.ControllerError):
-                controller.start_successor(self.repository, EXECUTION_ID, receipt, policy)
+                controller.start_successor(
+                    self.repository, EXECUTION_ID, receipt, policy, SUCCESSOR_REQUIREMENTS
+                )
 
     def test_successor_preserves_predecessor_and_allows_branching(self) -> None:
         paths, _ = self._terminal_predecessor()
@@ -1267,52 +1304,44 @@ class RepositoryControllerTests(unittest.TestCase):
             self.repository,
             EXECUTION_ID,
             receipt,
-            {
-                "execution_id": SUCCESSOR_ONE,
-                "initial_state": "INIT",
-                "requirements_digest": DIGEST_TWO,
-                "authority_snapshot_digest": DIGEST_THREE,
-            },
+            successor_policy(SUCCESSOR_ONE),
+            SUCCESSOR_REQUIREMENTS,
         )
         second = controller.start_successor(
             self.repository,
             EXECUTION_ID,
             receipt,
-            {
-                "execution_id": SUCCESSOR_TWO,
-                "initial_state": "INIT",
-                "requirements_digest": DIGEST_TWO,
-                "authority_snapshot_digest": DIGEST_THREE,
-            },
+            successor_policy(SUCCESSOR_TWO),
+            SUCCESSOR_REQUIREMENTS,
         )
 
         self.assertEqual(SUCCESSOR_ONE, first["execution_id"])
         self.assertEqual(SUCCESSOR_TWO, second["execution_id"])
         self.assertEqual(before_events, paths.events.read_bytes())
         self.assertEqual(before_state, paths.state.read_bytes())
-        self.assertEqual("INIT", controller.status_execution(self.repository, SUCCESSOR_ONE)["state"])
+        self.assertEqual(
+            "REQUIREMENTS",
+            controller.status_execution(self.repository, SUCCESSOR_ONE)["state"],
+        )
         successor_paths = store.resolve_run(self.repository, SUCCESSOR_ONE)
         successor_state = json.loads(successor_paths.state.read_text(encoding="utf-8"))
         successor_events = store.load_events(successor_paths)
-        self.assertEqual(["receipt_imported"], [event["type"] for event in successor_events])
+        self.assertEqual(
+            ["receipt_imported", "node_declared", "transition_committed"],
+            [event["type"] for event in successor_events],
+        )
         self.assertEqual(
             {},
             controller.replay(successor_state["policy"], successor_events).gate_evidence,
         )
-        self.assertEqual(
-            "REQUIREMENTS",
-            controller.commit_transition(self.repository, SUCCESSOR_ONE, "INIT")["state"],
-        )
+        verified = controller.verify_execution(self.repository, SUCCESSOR_ONE)
+        self.assertTrue(verified["immutable_evidence_integrity"], verified)
+        self.assertTrue(verified["projection_determinism"], verified)
 
     def test_successor_requires_bound_policy_digests(self) -> None:
         paths, _ = self._terminal_predecessor()
         receipt = self._lineage(paths)
-        base_policy = {
-            "execution_id": SUCCESSOR_ONE,
-            "initial_state": "INIT",
-            "requirements_digest": DIGEST_TWO,
-            "authority_snapshot_digest": DIGEST_THREE,
-        }
+        base_policy = successor_policy(SUCCESSOR_ONE)
         for missing in ("requirements_digest", "authority_snapshot_digest"):
             policy = dict(base_policy)
             policy.pop(missing)
@@ -1320,9 +1349,21 @@ class RepositoryControllerTests(unittest.TestCase):
                 controller.ControllerError
             ) as raised:
                 controller.start_successor(
-                    self.repository, EXECUTION_ID, receipt, policy
+                    self.repository,
+                    EXECUTION_ID,
+                    receipt,
+                    policy,
+                    SUCCESSOR_REQUIREMENTS,
                 )
             self.assertEqual("INVALID_POLICY", raised.exception.code)
+
+        mismatched = dict(SUCCESSOR_REQUIREMENTS)
+        mismatched["requirements"] = ["REQ-3"]
+        with self.assertRaises(controller.ControllerError) as raised:
+            controller.start_successor(
+                self.repository, EXECUTION_ID, receipt, base_policy, mismatched
+            )
+        self.assertEqual("REQUIREMENTS_MISMATCH", raised.exception.code)
 
     def test_material_change_receipt_then_lifecycle_commit_stops_predecessor(self) -> None:
         paths, _ = self._terminal_predecessor()
@@ -1334,21 +1375,20 @@ class RepositoryControllerTests(unittest.TestCase):
     def test_missing_or_corrupt_lineage_evidence_is_rejected(self) -> None:
         paths, _ = self._terminal_predecessor()
         valid = self._lineage(paths)
-        policy = {
-            "execution_id": SUCCESSOR_ONE,
-            "initial_state": "INIT",
-            "requirements_digest": DIGEST_TWO,
-            "authority_snapshot_digest": DIGEST_THREE,
-        }
+        policy = successor_policy(SUCCESSOR_ONE)
         missing = valid | {"lineage_receipt_digest": DIGEST_THREE}
         with self.assertRaises(controller.ControllerError) as raised:
-            controller.start_successor(self.repository, EXECUTION_ID, missing, policy)
+            controller.start_successor(
+                self.repository, EXECUTION_ID, missing, policy, SUCCESSOR_REQUIREMENTS
+            )
         self.assertEqual("LINEAGE_EVIDENCE_MISSING", raised.exception.code)
 
         evidence_path = paths.evidence / str(valid["lineage_receipt_digest"])[7:]
         evidence_path.write_bytes(b"corrupt\n")
         with self.assertRaises(controller.ControllerError) as raised:
-            controller.start_successor(self.repository, EXECUTION_ID, valid, policy)
+            controller.start_successor(
+                self.repository, EXECUTION_ID, valid, policy, SUCCESSOR_REQUIREMENTS
+            )
         self.assertEqual("LINEAGE_EVIDENCE_CORRUPT", raised.exception.code)
 
     def test_recovery_required_predecessor_can_start_successor_without_mutation(self) -> None:
@@ -1364,12 +1404,8 @@ class RepositoryControllerTests(unittest.TestCase):
             self.repository,
             EXECUTION_ID,
             receipt,
-            {
-                "execution_id": SUCCESSOR_ONE,
-                "initial_state": "INIT",
-                "requirements_digest": DIGEST_TWO,
-                "authority_snapshot_digest": DIGEST_THREE,
-            },
+            successor_policy(SUCCESSOR_ONE),
+            SUCCESSOR_REQUIREMENTS,
         )
 
         self.assertEqual(SUCCESSOR_ONE, result["execution_id"])
@@ -1388,12 +1424,8 @@ class RepositoryControllerTests(unittest.TestCase):
                 self.repository,
                 EXECUTION_ID,
                 receipt,
-                {
-                    "execution_id": SUCCESSOR_ONE,
-                    "initial_state": "INIT",
-                    "requirements_digest": DIGEST_TWO,
-                    "authority_snapshot_digest": DIGEST_THREE,
-                },
+                successor_policy(SUCCESSOR_ONE),
+                SUCCESSOR_REQUIREMENTS,
             )
 
         self.assertEqual("PREDECESSOR_NOT_FOUND", raised.exception.code)
