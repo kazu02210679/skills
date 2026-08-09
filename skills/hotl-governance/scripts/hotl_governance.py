@@ -172,18 +172,24 @@ def _record_artifacts(repository: Path, event: dict[str, object]) -> dict[str, b
     return artifacts
 
 
-def _next_commands(status: dict[str, object]) -> list[str]:
+def _next_commands(
+    status: dict[str, object], *, repository: Path | None = None, execution_id: str | None = None
+) -> list[str]:
     state = status["state"]
     if state == "UNINITIALIZED":
         return ["init"]
     if state == controller.State.RECOVERY_REQUIRED.value or state in {
         member.value for member in controller.TERMINAL_STATES
     }:
-        return ["start-successor"]
+        if repository is not None and isinstance(execution_id, str) and controller.has_material_predecessor(
+            repository, execution_id
+        ):
+            return ["start-successor"]
+        return []
     if status.get("allowed_transitions"):
         return ["evaluate"]
     if state == controller.State.REQUIREMENTS.value:
-        return ["import-receipt"]
+        return ["export-governance-context", "import-receipt"]
     if state == controller.State.IMPLEMENT.value:
         return ["record-implementation"]
     if state == controller.State.LOCAL_VERIFY.value:
@@ -205,7 +211,7 @@ def _dispatch(arguments: argparse.Namespace) -> dict[str, object]:
         )
     if command == "status":
         status = controller.status_execution(repository, arguments.execution)
-        return status | {"next_commands": _next_commands(status)}
+        return status | {"next_commands": _next_commands(status, repository=repository, execution_id=arguments.execution)}
     if command == "record":
         event = _read_object(arguments.event, "event")
         artifacts = _record_artifacts(repository, event)

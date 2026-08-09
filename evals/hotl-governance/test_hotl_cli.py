@@ -1150,7 +1150,22 @@ class HotlCliTests(unittest.TestCase):
         )
         after = snapshot_tree(self.repository / ".hotl")
         self.assertEqual(before, after)
-        self.assertEqual(["import-receipt"], result["result"]["next_commands"])
+        self.assertEqual(
+            ["export-governance-context", "import-receipt"],
+            result["result"]["next_commands"],
+        )
+
+    def test_empty_damaged_run_advertises_no_unexecutable_successor(self) -> None:
+        """A recovery shell without state/events cannot be a successor predecessor."""
+        paths = store.resolve_run(self.repository, self.execution)
+        paths.root.mkdir(parents=True)
+        result = cli.main_json(
+            ["status", "--repo", str(self.repository), "--execution", self.execution]
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("RECOVERY_REQUIRED", result["result"]["state"])
+        self.assertTrue(result["result"]["recovery"]["reasons"])
+        self.assertEqual([], result["result"]["next_commands"])
 
     def test_absent_execution_status_advertises_init_not_recovery(self) -> None:
         """Changing absence handling back to recovery must make this fail."""
@@ -1189,7 +1204,7 @@ class HotlCliTests(unittest.TestCase):
         result = cli.main_json(
             ["status", "--repo", str(self.repository), "--execution", self.execution]
         )
-        self.assertEqual(["import-receipt"], result["result"]["next_commands"])
+        self.assertEqual(["export-governance-context", "import-receipt"], result["result"]["next_commands"])
 
     def test_generic_record_rejects_every_privileged_event_without_mutation(self) -> None:
         self._init()
@@ -1742,6 +1757,67 @@ class HotlCliTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"], result)
         self.assertEqual("REQUIREMENTS", result["result"]["state"])
+
+    def test_verification_rejects_empty_unittest_artifact_without_receipt(self) -> None:
+        """A zero-test unittest success must not mint a G3 verification receipt."""
+        argv = [sys.executable, "-m", "unittest", "test_example.py"]
+        initialized = self._init(required_verification_argv=[argv])
+        self.assertTrue(initialized["ok"], initialized)
+        (self.repository / "example.py").write_bytes(b"value = 1\n")
+        (self.repository / "test_example.py").write_bytes(b"")
+        result = cli.main_json(
+            [
+                "run-verification", "--repo", str(self.repository), "--execution", self.execution,
+                "--argv", str(self._write("empty-unittest-argv.json", argv)),
+            ]
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("NO_TESTS_EXECUTED", result["error"]["code"])
+        self.assertFalse(
+            any(record["receipt_type"] == "verification" for record in self._projection()["receipt_records"].values())
+        )
+
+    def test_verification_rejects_too_few_unittest_results_for_declared_tests(self) -> None:
+        """One executed test cannot attest two declared TEST identities."""
+        argv = [sys.executable, "-m", "unittest", "test_example.py", "test_other.py"]
+        requirements = self._write("count-requirements.json", {"requirements": ["REQ-1"]})
+        policy = self._write(
+            "count-policy.json",
+            {
+                "active_snapshot_digest": SNAPSHOT, "approval_mode": "agentic",
+                "authority_snapshot_digest": AUTHORITY, "cycle_id": 1,
+                "execution_id": self.execution, "host_approval_evidence_digest": None,
+                "receipt_nonce": NONCE, "schema_version": 1,
+                "verification_specs": [{
+                    "argv": argv, "artifact_paths": ["example.py", "test_example.py", "test_other.py"],
+                    "test_artifacts": [
+                        {"path": "test_example.py", "test_id": "TEST-1"},
+                        {"path": "test_other.py", "test_id": "TEST-2"},
+                    ],
+                    "test_ids": ["TEST-1", "TEST-2"],
+                }],
+            },
+        )
+        initialized = cli.main_json([
+            "init", "--repo", str(self.repository), "--execution", self.execution,
+            "--policy", str(policy), "--requirements", str(requirements),
+        ])
+        self.assertTrue(initialized["ok"], initialized)
+        (self.repository / "example.py").write_bytes(b"value = 1\n")
+        (self.repository / "test_example.py").write_bytes(
+            b"import unittest\n\nclass ExampleTests(unittest.TestCase):\n"
+            b"    def test_example(self):\n        self.assertTrue(True)\n"
+        )
+        (self.repository / "test_other.py").write_bytes(b"")
+        result = cli.main_json([
+            "run-verification", "--repo", str(self.repository), "--execution", self.execution,
+            "--argv", str(self._write("count-unittest-argv.json", argv)),
+        ])
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("TEST_COUNT_MISMATCH", result["error"]["code"])
+        self.assertFalse(
+            any(record["receipt_type"] == "verification" for record in self._projection()["receipt_records"].values())
+        )
 
     def test_import_sol_receipt_accepts_exact_task7_no_consultation_bytes(self) -> None:
         """Replacing this closed adapter with generic receipt import must fail."""

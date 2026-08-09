@@ -1334,6 +1334,15 @@ def _require_material_predecessor(paths: store.RunPaths) -> None:
     )
 
 
+def has_material_predecessor(repository: Path, execution_id: str) -> bool:
+    """Return whether a run can safely serve as a successor predecessor."""
+    try:
+        _require_material_predecessor(store.resolve_run(repository, execution_id))
+    except (ControllerError, store.StoreError):
+        return False
+    return True
+
+
 def start_successor(
     repository: Path,
     predecessor_id: str,
@@ -2553,6 +2562,15 @@ def record_implementation(
         return _append_locked(paths, policy, old_events, projected, batch, captured)
 
 
+def _unittest_executed_test_count(stdout: bytes, stderr: bytes) -> int:
+    """Read the completed-test count emitted by the shell-free unittest runner."""
+    output = (stdout + b"\n" + stderr).decode("utf-8", errors="replace")
+    matches = re.findall(r"(?m)^\s*Ran (\d+) tests? in ", output)
+    if not matches or int(matches[-1]) == 0:
+        raise ControllerError("NO_TESTS_EXECUTED", "Verification did not report an executed unittest.")
+    return int(matches[-1])
+
+
 def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> dict[str, object]:
     """Run one frozen argv without a shell and retain exact zero-exit output bytes."""
     try:
@@ -2588,6 +2606,13 @@ def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> 
             raise ControllerError("VERIFICATION_EXECUTION_FAILED", "Verification argv could not be started.") from error
         if completed.returncode != 0:
             raise ControllerError("VERIFICATION_FAILED", "Verification argv exited nonzero.")
+        executed_test_count = _unittest_executed_test_count(completed.stdout, completed.stderr)
+        declared_test_artifact_count = len({item["path"] for item in spec.test_artifacts})
+        if executed_test_count < declared_test_artifact_count:
+            raise ControllerError(
+                "TEST_COUNT_MISMATCH",
+                "Verification executed fewer tests than declared test artifacts.",
+            )
         for artifact_path, digest in before_artifacts.items():
             content = store.read_repository_artifact(repository, artifact_path)
             if "sha256:" + hashlib.sha256(content).hexdigest() != digest:
