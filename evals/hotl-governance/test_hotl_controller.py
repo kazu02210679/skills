@@ -311,6 +311,14 @@ def projection_bytes(projection: controller.Projection) -> bytes:
     value["required_verification_argv"] = [
         list(argv) for argv in projection.required_verification_argv
     ]
+    value["verification_specs"] = [
+        {
+            "argv": list(spec.argv),
+            "artifact_paths": list(spec.artifact_paths),
+            "test_ids": list(spec.test_ids),
+        }
+        for spec in projection.verification_specs
+    ]
     return contract.canonical_json_bytes(value)
 
 

@@ -57,6 +57,15 @@ class HotlCliTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.repository = Path(self.temporary.name) / "repository"
         self.repository.mkdir()
+        for arguments in (
+            ("init",),
+            ("config", "user.email", "hotl@example.invalid"),
+            ("config", "user.name", "HOTL test"),
+        ):
+            subprocess.run(["git", *arguments], cwd=self.repository, check=True, capture_output=True)
+        (self.repository / "baseline.txt").write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "baseline.txt"], cwd=self.repository, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "baseline"], cwd=self.repository, check=True, capture_output=True)
         self.inputs = Path(self.temporary.name) / "inputs"
         self.inputs.mkdir()
         self.execution = EXECUTION
@@ -153,7 +162,7 @@ class HotlCliTests(unittest.TestCase):
             "authority_snapshot_digest": self.authority_snapshot_digest, "cycle_id": 1,
             "execution_id": self.execution, "host_approval_evidence_digest": None,
             "receipt_nonce": self.receipt_nonce,
-            "required_verification_argv": [[sys.executable, "-c", "print('verified')"]],
+            "verification_specs": [{"argv": [sys.executable, "-c", "print('verified')"], "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]}],
             "schema_version": 1,
         }
         initialized = controller.initialize_execution(self.repository, self.execution, hotl_policy, hotl_requirements)
@@ -344,7 +353,7 @@ class HotlCliTests(unittest.TestCase):
                 "execution_id": self.execution,
                 "host_approval_evidence_digest": None,
                 "receipt_nonce": self.receipt_nonce,
-                "required_verification_argv": [[sys.executable, "-c", "print('verified')"]],
+                "verification_specs": [{"argv": [sys.executable, "-c", "print('verified')"], "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]}],
                 "schema_version": 1,
             },
         )
@@ -433,7 +442,7 @@ class HotlCliTests(unittest.TestCase):
             "schema_version": 1,
         }
         if required_verification_argv is not None:
-            policy_value["required_verification_argv"] = required_verification_argv
+            policy_value["verification_specs"] = [{"argv": argv, "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]} for argv in required_verification_argv]
         policy = self._write(
             f"policy-{execution}.json",
             policy_value,
@@ -697,7 +706,7 @@ class HotlCliTests(unittest.TestCase):
                 {"path": "example.py", "sha256": "sha256:" + hashlib.sha256(code.read_bytes()).hexdigest()},
                 {"path": "test_example.py", "sha256": "sha256:" + hashlib.sha256(test.read_bytes()).hexdigest()},
             ],
-            "base_snapshot_digest": SNAPSHOT,
+            "base_snapshot_digest": controller.repository_base_identity(self.repository),
             "edges": claims["edges"],
             "nodes": claims["nodes"],
             "requirements_digest": projection["requirements_digest"],
@@ -705,7 +714,7 @@ class HotlCliTests(unittest.TestCase):
             "snapshot_digest": projection["active_snapshot_digest"],
         }
         report = {
-            "base_snapshot_digest": SNAPSHOT,
+            "base_snapshot_digest": controller.repository_base_identity(self.repository),
             "manifest_digest": contract.canonical_digest(manifest),
             "requirements_digest": projection["requirements_digest"],
             "schema_version": 1,
@@ -1551,7 +1560,7 @@ class HotlCliTests(unittest.TestCase):
                 {"path": "example.py", "sha256": code_digest},
                 {"path": "test_example.py", "sha256": test_digest},
             ],
-            "base_snapshot_digest": SNAPSHOT,
+            "base_snapshot_digest": controller.repository_base_identity(self.repository),
             "edges": [
                 {"edge": "implements", "source_id": "CODE-1", "target_id": "REQ-1"},
                 {"edge": "verifies", "source_id": "TEST-1", "target_id": "REQ-1"},
@@ -1571,7 +1580,7 @@ class HotlCliTests(unittest.TestCase):
         report_path = self._write(
             "implementation-report.json",
             {
-                "base_snapshot_digest": SNAPSHOT,
+                "base_snapshot_digest": controller.repository_base_identity(self.repository),
                 "manifest_digest": contract.canonical_digest(manifest),
                 "requirements_digest": projection["requirements_digest"],
                 "schema_version": 1,
@@ -1591,6 +1600,83 @@ class HotlCliTests(unittest.TestCase):
         self.assertEqual(contract.canonical_json_bytes(manifest), (paths.evidence / contract.canonical_digest(manifest)[7:]).read_bytes())
         self.assertEqual(report_path.read_bytes(), (paths.evidence / contract.canonical_digest(contract.strict_json_loads(report_path.read_text(encoding="utf-8")))[7:]).read_bytes())
 
+    def test_worker_selected_fake_base_identity_cannot_open_g2(self) -> None:
+        """Replacing controller-derived Git base identity must let this forgery through."""
+        self._init_from_gpt_requirements()
+        self.assertTrue(self._evaluate("G1")["ok"])
+        code = self.repository / "example.py"
+        test = self.repository / "test_example.py"
+        code.write_bytes(b"value = 1\n")
+        test.write_bytes(b"assert True\n")
+        projection = self._projection()
+        fake_base = "sha256:" + "f" * 64
+        manifest = {
+            "artifacts": [
+                {"path": "example.py", "sha256": "sha256:" + hashlib.sha256(code.read_bytes()).hexdigest()},
+                {"path": "test_example.py", "sha256": "sha256:" + hashlib.sha256(test.read_bytes()).hexdigest()},
+            ],
+            "base_snapshot_digest": fake_base,
+            "edges": [
+                {"edge": "implements", "source_id": "CODE-1", "target_id": "REQ-1"},
+                {"edge": "verifies", "source_id": "TEST-1", "target_id": "REQ-1"},
+                {"edge": "included_in", "source_id": "CODE-1", "target_id": "CHG-1"},
+                {"edge": "included_in", "source_id": "TEST-1", "target_id": "CHG-1"},
+            ],
+            "nodes": [
+                {"node_id": "CHG-1", "node_type": "change"},
+                {"node_id": "CODE-1", "node_type": "code"},
+                {"node_id": "TEST-1", "node_type": "test"},
+            ],
+            "requirements_digest": projection["requirements_digest"],
+            "schema_version": 1,
+            "snapshot_digest": projection["active_snapshot_digest"],
+        }
+        report = {
+            "base_snapshot_digest": fake_base,
+            "manifest_digest": contract.canonical_digest(manifest),
+            "requirements_digest": projection["requirements_digest"],
+            "schema_version": 1,
+            "snapshot_digest": projection["active_snapshot_digest"],
+        }
+        recorded = cli.main_json([
+            "record-implementation", "--repo", str(self.repository), "--execution", self.execution,
+            "--manifest", str(self._write("fake-base-manifest.json", manifest)),
+            "--report", str(self._write("fake-base-report.json", report)),
+        ])
+        self.assertFalse(recorded["ok"], recorded)
+        self.assertEqual("BASE_IDENTITY_MISMATCH", recorded["error"]["code"])
+
+    def test_mutated_implementation_after_controller_verification_closes_g3_and_verify_log(self) -> None:
+        """Removing receipt-bound artifact rehashing leaves stale verification healthy."""
+        self._init_from_gpt_requirements()
+        self.assertTrue(self._evaluate("G1")["ok"])
+        self._record_controller_implementation()
+        self.assertTrue(self._evaluate("G2")["ok"])
+        self._record_proof()
+        self._run_current_verification()
+        (self.repository / "example.py").write_bytes(b"value = 2\n")
+        gate = self._evaluate("G3")
+        self.assertFalse(gate["ok"], gate)
+        self.assertEqual("GATE_FAILED", gate["error"]["code"])
+        verified = cli.main_json(["verify-log", "--repo", str(self.repository), "--execution", self.execution])
+        self.assertTrue(verified["ok"], verified)
+        self.assertFalse(verified["result"]["current_snapshot_integrity"])
+
+    def test_tampered_referenced_implementation_blob_is_not_healthy(self) -> None:
+        """Replacing immutable evidence digest verification must hide this tamper."""
+        self._init_from_gpt_requirements()
+        self.assertTrue(self._evaluate("G1")["ok"])
+        self._record_controller_implementation()
+        paths = store.resolve_run(self.repository, self.execution)
+        manifest = next(
+            path for path in paths.evidence.iterdir()
+            if b'"base_snapshot_digest"' in path.read_bytes() and b'"artifacts"' in path.read_bytes()
+        )
+        manifest.write_bytes(b"tampered")
+        result = cli.main_json(["verify-log", "--repo", str(self.repository), "--execution", self.execution])
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["result"]["immutable_evidence_integrity"])
+
     def test_init_freezes_canonical_verification_argv_policy(self) -> None:
         """Dropping the frozen argv field must make init reject this policy."""
         requirements = self._write("argv-requirements.json", {"requirements": ["REQ-1"]})
@@ -1604,7 +1690,7 @@ class HotlCliTests(unittest.TestCase):
                 "execution_id": self.execution,
                 "host_approval_evidence_digest": None,
                 "receipt_nonce": NONCE,
-                "required_verification_argv": [[sys.executable, "-c", "print('verified')"]],
+                "verification_specs": [{"argv": [sys.executable, "-c", "print('verified')"], "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]}],
                 "schema_version": 1,
             },
         )
@@ -1612,12 +1698,14 @@ class HotlCliTests(unittest.TestCase):
             ["init", "--repo", str(self.repository), "--execution", self.execution, "--policy", str(policy), "--requirements", str(requirements)]
         )
         self.assertTrue(result["ok"], result)
-        self.assertEqual([[sys.executable, "-c", "print('verified')"]], self._projection().get("required_verification_argv"))
+        self.assertEqual([{"argv": [sys.executable, "-c", "print('verified')"], "artifact_paths": ["example.py", "test_example.py"], "test_ids": ["TEST-1"]}], self._projection().get("verification_specs"))
 
     def test_controller_runs_only_exact_frozen_argv_without_a_shell(self) -> None:
         """Removing controller argv execution must turn this into an argument error."""
         argv = [sys.executable, "-c", "print('verified')"]
         self._init(required_verification_argv=[argv])
+        (self.repository / "example.py").write_bytes(b"value = 1\n")
+        (self.repository / "test_example.py").write_bytes(b"assert True\n")
         result = cli.main_json(
             [
                 "run-verification", "--repo", str(self.repository), "--execution", self.execution,

@@ -44,7 +44,7 @@ predicate emits no transition.
 | --- | --- | --- | --- |
 | G1 | REQUIREMENTS | active frozen requirements plus the exact accepted GPT Pro `requirements` receipt, bound to policy authority and requirements digest | IMPLEMENT |
 | G2 | IMPLEMENT | controller-owned `record-implementation` receipt binds a re-read change manifest, worker report, base identity, snapshot, requirements, code/test/change graph, and exact artifact digests | LOCAL_VERIFY |
-| G3 | LOCAL_VERIFY | exact current-cycle local evidence plus controller-owned zero-exit receipts for every policy-frozen canonical argv, each executed with no shell | SEMANTIC_REVIEW |
+| G3 | LOCAL_VERIFY | exact current-cycle local evidence plus controller-owned zero-exit receipts for every closed verification spec (exact argv, test IDs, and artifact paths), each shell-free and re-hashed before/after execution | SEMANTIC_REVIEW |
 | G4 | SEMANTIC_REVIEW | current accepted review, GPT Pro final receipt, exact Task 7 Sol consultation/disposition or no-consultation audit receipt, and complete active-requirement coverage | COMPLETE |
 
 Only `evaluate` may advance a gate. `record` and `import-receipt` append validated evidence but leave state unchanged. A failed predicate emits no transition; it never creates an implicit repair path.

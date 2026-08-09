@@ -103,6 +103,13 @@ class ReceiptRecord:
 
 
 @dataclass(frozen=True)
+class VerificationSpec:
+    argv: tuple[str, ...]
+    test_ids: tuple[str, ...]
+    artifact_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Projection:
     execution_id: str
     state: State
@@ -120,6 +127,7 @@ class Projection:
     authority_snapshot_digest: str
     approval_mode: str
     required_verification_argv: tuple[tuple[str, ...], ...]
+    verification_specs: tuple[VerificationSpec, ...]
 
 
 def _controller_error(error: Exception) -> ControllerError:
@@ -154,6 +162,7 @@ def empty_projection(
     authority_snapshot_digest: str | None = None,
     approval_mode: str = "agentic",
     required_verification_argv: Sequence[Sequence[str]] = (),
+    verification_specs: Sequence[Mapping[str, object]] = (),
 ) -> Projection:
     """Return an empty, execution-bound projection."""
     if not isinstance(execution_id, str) or contract.EXECUTION_ID.fullmatch(execution_id) is None:
@@ -187,6 +196,20 @@ def empty_projection(
         normalized_argv.append(tuple(command))
     if normalized_argv != sorted(normalized_argv) or len(set(normalized_argv)) != len(normalized_argv):
         raise ControllerError("INVALID_POLICY", "Verification argv arrays must be unique and canonically sorted.")
+    normalized_specs: list[VerificationSpec] = []
+    for spec in verification_specs:
+        if not isinstance(spec, Mapping) or set(spec) != {"argv", "artifact_paths", "test_ids"}:
+            raise ControllerError("INVALID_POLICY", "Verification specs must use the closed schema.")
+        argv, tests, paths = spec["argv"], spec["test_ids"], spec["artifact_paths"]
+        if (not isinstance(argv, (list, tuple)) or not argv or any(not isinstance(v, str) or not v or "\x00" in v for v in argv)
+            or not isinstance(tests, (list, tuple)) or not tests or any(not isinstance(v, str) or contract.NODE_ID.fullmatch(v) is None or not v.startswith("TEST-") for v in tests)
+            or not isinstance(paths, (list, tuple)) or not paths or any(not isinstance(v, str) or not v or v.startswith(("/", "\\")) or "\\" in v or any(p in {"", ".", ".."} for p in v.split("/")) for v in paths)):
+            raise ControllerError("INVALID_POLICY", "Verification spec argv, test IDs, and artifact paths are invalid.")
+        if list(tests) != sorted(set(tests)) or list(paths) != sorted(set(paths)):
+            raise ControllerError("INVALID_POLICY", "Verification spec test IDs and artifact paths must be canonical.")
+        normalized_specs.append(VerificationSpec(tuple(argv), tuple(tests), tuple(paths)))
+    if normalized_specs != sorted(normalized_specs, key=lambda spec: spec.argv) or len({spec.argv for spec in normalized_specs}) != len(normalized_specs):
+        raise ControllerError("INVALID_POLICY", "Verification specs must have unique canonically sorted argv.")
     normalized_gate_evidence = {
         gate: tuple(sorted(values)) for gate, values in sorted((gate_evidence or {}).items())
     }
@@ -207,6 +230,7 @@ def empty_projection(
         authority_snapshot_digest=authority_snapshot_digest,
         approval_mode=approval_mode,
         required_verification_argv=tuple(normalized_argv),
+        verification_specs=tuple(normalized_specs),
     )
 
 
@@ -566,6 +590,7 @@ def replay(policy: Mapping[str, object], events: Sequence[Mapping[str, object]])
         authority_snapshot_digest=normalized.get("authority_snapshot_digest"),  # type: ignore[arg-type]
         approval_mode=normalized.get("approval_mode", "agentic"),  # type: ignore[arg-type]
         required_verification_argv=normalized.get("required_verification_argv", ()),  # type: ignore[arg-type]
+        verification_specs=normalized.get("verification_specs", ()),  # type: ignore[arg-type]
         gate_evidence=normalized.get("gate_evidence"),  # type: ignore[arg-type]
     )
     previous_hash: str | None = None
@@ -807,7 +832,8 @@ def evaluate_gate(projection: Projection, gate: str) -> tuple[bool, tuple[str, .
         errors_list = list(_local_evidence_errors(projection))
         if not _has_current_receipt(projection, "verification", "hotl-local-verifier"):
             errors_list.append("G3:missing_verification_receipt")
-        for argv in projection.required_verification_argv:
+        for spec in projection.verification_specs:
+            argv = spec.argv
             if not any(
                 _receipt_is_current(projection, record)
                 and record.receipt_type == "verification"
@@ -980,6 +1006,7 @@ def _generated_event(
     result: str = "pass",
     issuer_skill: str = "hotl-governance",
     issuer_kind: str = "controller",
+    artifact_refs: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     seed = {
         "execution_id": execution_id,
@@ -997,7 +1024,7 @@ def _generated_event(
         "payload": payload,
         "issuer": {"kind": issuer_kind, "id": issuer_skill, "version": "1"},
         "subject_ids": subject_ids or [],
-        "artifact_refs": [],
+        "artifact_refs": artifact_refs or [],
         "result": result,
         "input_digest": input_digest,
         "output_digest": contract.canonical_digest(payload),
@@ -1094,11 +1121,42 @@ def activate_snapshot(
         return _append_locked(paths, policy, old_events, projected, batch, {})
 
 
+def _current_receipt_artifact_findings(
+    repository: Path, events: Sequence[Mapping[str, object]], projection: Projection
+) -> list[str]:
+    findings: list[str] = []
+    for event in events:
+        if event.get("type") != "receipt_imported":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        receipt_id = payload.get("receipt_id")
+        record = projection.receipt_records.get(receipt_id) if isinstance(receipt_id, str) else None
+        if record is None or not _receipt_is_current(projection, record):
+            continue
+        for ref in event.get("artifact_refs", []):
+            if not isinstance(ref, Mapping) or not isinstance(ref.get("path"), str) or not isinstance(ref.get("sha256"), str):
+                findings.append("RECEIPT_ARTIFACT:INVALID_REFERENCE")
+                continue
+            try:
+                content = store.read_repository_artifact(repository, ref["path"])
+            except store.StoreError:
+                findings.append(ref["path"] + ":UNREADABLE")
+                continue
+            digest = "sha256:" + hashlib.sha256(content).hexdigest()
+            if digest != ref["sha256"]:
+                findings.append(ref["path"] + ":DIGEST_MISMATCH")
+    return findings
+
+
 def commit_transition(repository: Path, execution_id: str, gate: str) -> dict[str, object]:
     """Evaluate and commit the sole normal state-advance event."""
     paths = store.resolve_run(repository, execution_id)
     with store.run_lock(paths.lock):
         policy, old_events, projection = _load_locked(paths)
+        if gate == "G3" and _current_receipt_artifact_findings(repository, old_events, projection):
+            raise ControllerError("GATE_FAILED", "G3:referenced_artifact_stale")
         target = _transition_target(projection, gate)
         evidence_digest = projection_evidence_set_digest(projection)
         previous = contract.canonical_digest(old_events[-1])
@@ -1383,6 +1441,7 @@ _INITIAL_POLICY_FIELDS = frozenset(
     }
 )
 _VERIFICATION_POLICY_FIELD = "required_verification_argv"
+_VERIFICATION_SPECS_FIELD = "verification_specs"
 _SUCCESSOR_POLICY_FIELDS = _INITIAL_POLICY_FIELDS | frozenset(
     {"initial_state", "requirements_digest"}
 )
@@ -1459,10 +1518,12 @@ def _validated_base_policy(
     policy: Mapping[str, object], execution_id: str, fields: frozenset[str]
 ) -> dict[str, object]:
     supplied = dict(policy)
-    if set(supplied) not in {fields, fields | {_VERIFICATION_POLICY_FIELD}}:
+    if set(supplied) not in {fields, fields | {_VERIFICATION_POLICY_FIELD}, fields | {_VERIFICATION_SPECS_FIELD}}:
         raise ControllerError("INVALID_FIELDS", "policy fields must match exactly.")
     if _VERIFICATION_POLICY_FIELD not in supplied:
         supplied[_VERIFICATION_POLICY_FIELD] = []
+    if _VERIFICATION_SPECS_FIELD not in supplied:
+        supplied[_VERIFICATION_SPECS_FIELD] = []
     if supplied["schema_version"] != 1 or isinstance(supplied["schema_version"], bool):
         raise ControllerError("INVALID_POLICY", "Policy schema_version must be integer 1.")
     if supplied["execution_id"] != execution_id:
@@ -1498,6 +1559,10 @@ def _validated_base_policy(
     normalized_commands = [list(command) for command in commands]
     if normalized_commands != sorted(normalized_commands) or len({tuple(command) for command in normalized_commands}) != len(normalized_commands):
         raise ControllerError("INVALID_POLICY", "Policy verification argv must be unique and canonically sorted.")
+    if supplied[_VERIFICATION_POLICY_FIELD] and supplied[_VERIFICATION_SPECS_FIELD]:
+        raise ControllerError("INVALID_POLICY", "Use closed verification_specs instead of argv-only policy.")
+    # Validate the closed policy at the same boundary that freezes it.
+    empty_projection(execution_id, verification_specs=supplied[_VERIFICATION_SPECS_FIELD])
     return supplied
 
 
@@ -1590,6 +1655,24 @@ def _validated_requirements(
     }
 
 
+def repository_base_identity(repository: Path) -> str:
+    """Derive the immutable implementation base from Git, never policy input."""
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+    except OSError as error:
+        raise ControllerError("BASE_IDENTITY_UNAVAILABLE", "Git base identity is unavailable.") from error
+    head = completed.stdout.decode("ascii", errors="strict").strip()
+    if completed.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", head):
+        raise ControllerError("BASE_IDENTITY_UNAVAILABLE", "Git HEAD base identity is unavailable.")
+    return contract.canonical_digest({"git_head": head, "schema_version": 1})
+
+
 def initialize_execution(
     repository: Path,
     execution_id: str,
@@ -1604,6 +1687,7 @@ def initialize_execution(
     normalized_policy = dict(supplied)
     normalized_policy.update(
         {
+            "base_identity": repository_base_identity(repository),
             "initial_state": State.INIT.value,
             "requirements_digest": requirements_digest,
         }
@@ -1654,6 +1738,7 @@ def initialize_execution(
     store.publish_initial_events(paths, state, events, artifacts)
     return {
         "cycle_id": projection.cycle_id,
+        "base_identity": normalized_policy["base_identity"],
         "event_count": len(events),
         "execution_id": execution_id,
         "head_event_hash": head,
@@ -2094,6 +2179,7 @@ def _admitted_receipt_events(
         result: str = "pass",
         issuer_kind: str = "controller",
         issuer_skill: str = "hotl-governance",
+        artifact_refs: list[dict[str, object]] | None = None,
     ) -> None:
         nonlocal previous, projection
         event = _generated_event(
@@ -2107,6 +2193,7 @@ def _admitted_receipt_events(
             result=result,
             issuer_kind=issuer_kind,
             issuer_skill=issuer_skill,
+            artifact_refs=artifact_refs,
         )
         projection = project_event(projection, event)
         batch.append(event)
@@ -2139,6 +2226,7 @@ def _admitted_receipt_events(
             "snapshot_digest": source["snapshot_digest"],
         },
         input_digest=receipt_digest,
+        artifact_refs=list(claims.get("artifacts", [])) if isinstance(claims.get("artifacts", []), list) else None,
     )
     if receipt_type == "implementation":
         for node in claims["nodes"]:  # type: ignore[index]
@@ -2349,11 +2437,16 @@ def record_implementation(
     paths = store.resolve_run(repository, execution_id)
     with store.run_lock(paths.lock):
         policy, old_events, projection = _load_locked(paths)
+        if manifest["base_snapshot_digest"] != policy.get("base_identity"):
+            raise ControllerError(
+                "BASE_IDENTITY_MISMATCH",
+                "Implementation manifest must bind the controller-frozen Git base identity.",
+            )
         if manifest["requirements_digest"] != projection.requirements_digest or manifest["snapshot_digest"] != projection.active_snapshot_digest:
             raise ControllerError("STALE_RECEIPT", "Implementation does not bind the active requirements and snapshot.")
         source = {
             "authority_snapshot_digest": projection.authority_snapshot_digest,
-            "claims": claims | {"manifest_digest": manifest_digest, "report_digest": report_digest},
+            "claims": claims | {"artifacts": manifest["artifacts"], "manifest_digest": manifest_digest, "report_digest": report_digest},
             "cycle_id": projection.cycle_id,
             "evidence_set_digest": projection_evidence_set_digest(projection),
             "execution_id": projection.execution_id,
@@ -2374,7 +2467,7 @@ def record_implementation(
         receipt_digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
         if any(record.receipt_digest == receipt_digest for record in projection.receipt_records.values()):
             raise ControllerError("REPLAYED_RECEIPT", "Implementation manifest was already recorded.")
-        batch, projected = _admitted_receipt_events(projection, old_events, source, receipt_digest, claims)
+        batch, projected = _admitted_receipt_events(projection, old_events, source, receipt_digest, source["claims"])
         captured[receipt_digest] = source_bytes
         return _append_locked(paths, policy, old_events, projected, batch, captured)
 
@@ -2398,8 +2491,13 @@ def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> 
     paths = store.resolve_run(repository, execution_id)
     with store.run_lock(paths.lock):
         policy, old_events, projection = _load_locked(paths)
-        if argv not in projection.required_verification_argv:
-            raise ControllerError("VERIFICATION_NOT_REQUIRED", "Verification argv is not frozen by policy.")
+        spec = next((item for item in projection.verification_specs if item.argv == argv), None)
+        if spec is None:
+            raise ControllerError("VERIFICATION_NOT_REQUIRED", "Verification argv is not an exact frozen verification spec.")
+        before_artifacts: dict[str, str] = {}
+        for artifact_path in spec.artifact_paths:
+            content = store.read_repository_artifact(repository, artifact_path)
+            before_artifacts[artifact_path] = "sha256:" + hashlib.sha256(content).hexdigest()
         try:
             completed = subprocess.run(
                 list(argv), cwd=repository, shell=False, check=False,
@@ -2409,6 +2507,10 @@ def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> 
             raise ControllerError("VERIFICATION_EXECUTION_FAILED", "Verification argv could not be started.") from error
         if completed.returncode != 0:
             raise ControllerError("VERIFICATION_FAILED", "Verification argv exited nonzero.")
+        for artifact_path, digest in before_artifacts.items():
+            content = store.read_repository_artifact(repository, artifact_path)
+            if "sha256:" + hashlib.sha256(content).hexdigest() != digest:
+                raise ControllerError("ARTIFACT_MUTATED_DURING_VERIFICATION", "Verification artifact changed during execution.")
         stdout_digest = "sha256:" + hashlib.sha256(completed.stdout).hexdigest()
         stderr_digest = "sha256:" + hashlib.sha256(completed.stderr).hexdigest()
         argv_digest = contract.canonical_digest(list(argv))
@@ -2418,10 +2520,11 @@ def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> 
             if record.status == "valid_current"
             and record.cycle_id == projection.cycle_id
             and record.snapshot_digest == projection.active_snapshot_digest
+            and record.test_id in spec.test_ids
         ]
         source = {
             "authority_snapshot_digest": projection.authority_snapshot_digest,
-            "claims": {"argv": list(argv), "argv_digest": argv_digest, "edges": edges, "exit_status": 0, "stderr_digest": stderr_digest, "stdout_digest": stdout_digest},
+            "claims": {"argv": list(argv), "argv_digest": argv_digest, "artifacts": [{"path": path, "sha256": digest} for path, digest in sorted(before_artifacts.items())], "edges": edges, "exit_status": 0, "stderr_digest": stderr_digest, "stdout_digest": stdout_digest, "test_ids": list(spec.test_ids)},
             "cycle_id": projection.cycle_id,
             "evidence_set_digest": projection_evidence_set_digest(projection),
             "execution_id": projection.execution_id,
@@ -2587,6 +2690,7 @@ def verify_execution(repository: Path, execution_id: str) -> dict[str, object]:
     report["immutable_evidence_findings"] = immutable_findings
     report["immutable_evidence_integrity"] = not immutable_findings
     current_findings: list[str] = []
+    current_findings.extend(_current_receipt_artifact_findings(repository, events, left))
     historical = 0
     for event in events:
         if event["type"] != "evidence_recorded":

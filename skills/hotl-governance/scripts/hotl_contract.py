@@ -577,7 +577,8 @@ def _validate_event_contract(event: dict[str, object]) -> None:
         _require_subjects(event["subject_ids"], [])
         _require_event_issuer(event, "controller", "hotl-governance")
         _require_event_result(event, "pass")
-        _require_empty_artifacts(event)
+        if receipt_type not in {"implementation", "verification"}:
+            _require_empty_artifacts(event)
         return
 
     payload = _require_payload(
