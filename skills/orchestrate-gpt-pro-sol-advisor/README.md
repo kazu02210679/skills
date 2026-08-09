@@ -22,7 +22,7 @@ GPT Pro の初期化より先に Sol Advisor の setup status と preferences �
 
 Solを起動した後、助言を読む・採否判断する前にpublic native spawn/details metadataを確認します。details取得時のquery targetまたは返却されたthread IDをspawnで得たadvisor thread IDと完全一致させ、実際の `sol_advisor_advisor` roleも必須とします。public detailsがrole以外を省略した場合だけ、Codex Skill catalogから解決したインストール済みSol Advisorのorchestration `SKILL.md` を起点に `../../scripts/inspect-agent-runtime.sh` をcanonical resolutionし、その正規ファイルを同じadvisor thread IDに対して1回実行します。repo-localの同名script、存在しないplugin風path、canonical plugin cache/version root外へ逃げるsymlinkは認めません。
 
-inspectorの証拠はprocess exit code 0と完全一致する10項目JSONです。script自身がrolloutの一意性と完了を検査して成功時だけJSONを返すため、`status=complete` や `rollout_count=1` を外部入力のtrust signalとして要求しません。成功時の監査記録では、この事実からstatusとrollout countを導出します。inspector JSONは同じthreadを識別し、public detailsとの重複値も一致しなければなりません。
+inspectorの証拠はprocess exit code 0と完全一致する10項目JSONです。ここから導出できるのは`rollout_count=1`と`inspection_status=success`だけで、advisor completionではありません。completionは同じthread IDにbindされたhost-native result/wait/detailsのterminal stateで別途証明します。観測できなければ助言を破棄して停止します。inspector JSONは同じthreadを識別し、public detailsとの重複値も一致しなければなりません。
 
 各項目の出所を `public-native-details` または `local-runtime-inspector` として記録します。role/model/effortはbound profileと一致し、sandboxは厳密に `read-only` でなければなりません。permission profileはpreferencesに保存されないため一致比較やallowlist判定をせず、空でない観測値をそのまま監査記録へ残します。public role欠落、inspector失敗・曖昧・別thread・不正形式・競合、呼び出し失敗なら助言本文を下流へ渡さず破棄し、advisor再試行・role fallback・GPT Pro続行をせず併用モードを停止します。自己申告、caller-supplied Boolean、role manifest、要求設定は実行時attestationの代用になりません。
 

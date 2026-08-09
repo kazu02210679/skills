@@ -29,7 +29,7 @@ self-claims cannot be promoted by a caller-supplied trust flag.
 Its cases verify pre-GPC setup ordering, the single active preferences object,
 canonical workspace identity plus exact upstream raw-workspace `profileKey`
 serialization, the exact Codex advisor, trusted runtime identity/isolation
-attestation provenance, exact-thread inspector completion, opaque permission
+attestation provenance, exact-thread host completion, inspector success, opaque permission
 audit evidence, authority, bounded recurrence, and fail-closed dependency
 handling.
 

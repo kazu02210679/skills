@@ -115,6 +115,44 @@ def trusted_catalog_context(**overrides: object) -> dict[str, object]:
     return context
 
 
+def trusted_host_context(
+    thread_id: str = "11111111-1111-7111-8111-111111111111",
+    **overrides: object,
+) -> dict[str, object]:
+    context: dict[str, object] = {
+        "advisor_thread_id": thread_id,
+        "terminal_state": "completed",
+        "source": "native-result",
+    }
+    context.update(overrides)
+    return context
+
+
+_RAW_ROUTE = POLICY.route
+_DEFAULT_TRUSTED_HOST = object()
+
+
+def _route_with_trusted_host(
+    scenario: dict[str, object],
+    *,
+    trusted_catalog: dict[str, object] | None = None,
+    trusted_host: dict[str, object] | None | object = _DEFAULT_TRUSTED_HOST,
+) -> dict[str, object]:
+    if trusted_host is _DEFAULT_TRUSTED_HOST:
+        thread_id = scenario.get(
+            "advisor_thread_id", "11111111-1111-7111-8111-111111111111"
+        )
+        trusted_host = trusted_host_context(str(thread_id))
+    return _RAW_ROUTE(
+        scenario,
+        trusted_catalog=trusted_catalog,
+        trusted_host=trusted_host if isinstance(trusted_host, dict) else None,
+    )
+
+
+POLICY.route = _route_with_trusted_host
+
+
 def attested_combined(**overrides: object) -> dict[str, object]:
     public = public_observations()
     for field, legacy_key in POLICY.RUNTIME_FIELDS.items():
@@ -791,7 +829,65 @@ class CompositionContractTests(unittest.TestCase):
         self.assertEqual("primary-disposition", result["terminal"])
         self.assertEqual(1, result["advice_admitted"])
         self.assertEqual(1, result["runtime_inspector"]["rollout_count"])
-        self.assertEqual("complete", result["runtime_inspector"]["status"])
+        self.assertEqual(
+            "success", result["runtime_inspector"]["inspection_status"]
+        )
+        self.assertNotIn("status", result["runtime_inspector"])
+        self.assertEqual(
+            {
+                "thread_id": thread_id,
+                "terminal_state": "completed",
+                "source": "native-result",
+            },
+            result["advisor_completion"],
+        )
+
+    def test_inspector_exit_zero_does_not_prove_advisor_completion(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        result = _RAW_ROUTE(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                **inspector_evidence(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Did the advisor itself reach a terminal state?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("advisor-completion-unavailable", result["terminal"])
+        self.assertEqual(0, result["advice_admitted"])
+        self.assertTrue(result["advice_discarded"])
+
+    def test_completion_must_be_host_confirmed_for_the_same_thread(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        scenario = attested_combined(
+            advisor_thread_id=thread_id,
+            public_runtime_thread_id=thread_id,
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Is completion proven by the host for this thread?",
+            material_risk=True,
+            decision_value=True,
+        )
+        invalid = (
+            None,
+            True,
+            trusted_host_context(
+                "22222222-2222-7222-8222-222222222222"
+            ),
+            trusted_host_context(thread_id, terminal_state="running"),
+            trusted_host_context(thread_id, source="local-runtime-inspector"),
+        )
+        for trusted_host in invalid:
+            with self.subTest(trusted_host=trusted_host):
+                result = _RAW_ROUTE(scenario, trusted_host=trusted_host)
+                self.assertEqual("advisor-completion-unavailable", result["terminal"])
+                self.assertEqual(0, result["advice_admitted"])
+                self.assertTrue(result["advice_discarded"])
 
     def test_runtime_attestation_uses_same_thread_inspector_only_for_omissions(self) -> None:
         thread_id = "11111111-1111-7111-8111-111111111111"
