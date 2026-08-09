@@ -181,14 +181,15 @@ def _next_commands(status: dict[str, object]) -> list[str]:
         return ["start-successor"]
     if status.get("allowed_transitions"):
         return ["evaluate"]
-    if state == controller.State.REQUIREMENTS.value and (
-        status.get("approval_mode") == "offline_manual"
-        or status.get("host_approval_configured") is True
-    ):
-        return ["approve", "import-receipt"]
+    if state == controller.State.REQUIREMENTS.value:
+        return ["import-receipt"]
+    if state == controller.State.IMPLEMENT.value:
+        return ["record-implementation"]
     if state == controller.State.LOCAL_VERIFY.value:
-        return ["record", "import-receipt"]
-    return ["import-receipt"]
+        return ["run-verification"]
+    if state == controller.State.SEMANTIC_REVIEW.value:
+        return ["import-receipt", "import-sol-receipt"]
+    return []
 
 
 def _dispatch(arguments: argparse.Namespace) -> dict[str, object]:

@@ -699,3 +699,83 @@ def governance_receipt(
     if disposition is not None:
         _fail("No-consultation cannot carry a disposition.")
     return _no_consultation_receipt(scenario, authoritative_route, identity)
+
+
+def validate_governance_receipt(raw: bytes) -> dict[str, Any]:
+    """Validate exact canonical Task 7 receipt bytes without trusting a caller label."""
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ReceiptError("Receipt must be UTF-8 JSON.") from error
+    if not isinstance(value, dict) or _canonical_bytes(value) != raw:
+        _fail("Receipt must be exact canonical JSON.")
+    receipt_type = value.get("receipt_type")
+    receipt_fields = {
+        "consultation": {
+            "authority_snapshot_digest", "binding", "disposition", "execution_id",
+            "input_digest", "invocation_id", "issued_at_unix", "issuer_skill",
+            "issuer_version", "nonce", "output_digest", "receipt_id",
+            "receipt_schema_version", "receipt_type", "scenario_digest",
+        },
+        "no-consultation": {
+            "authority_snapshot_digest", "execution_id", "input_digest",
+            "invocation_id", "issued_at_unix", "issuer_skill", "issuer_version",
+            "nonce", "output_digest", "reason_code", "receipt_id",
+            "receipt_schema_version", "receipt_type", "scenario_digest",
+        },
+    }
+    if receipt_type not in receipt_fields or set(value) != receipt_fields[receipt_type]:
+        _fail("Receipt fields are not closed.")
+    for field, pattern in (
+        ("execution_id", _EXECUTION_ID),
+        ("invocation_id", _INVOCATION_ID),
+        ("input_digest", _DIGEST),
+        ("output_digest", _DIGEST),
+        ("authority_snapshot_digest", _DIGEST),
+        ("nonce", _NONCE),
+        ("scenario_digest", _DIGEST),
+    ):
+        _require_string(value, field, pattern)
+    issued_at = value.get("issued_at_unix")
+    if (
+        value.get("issuer_skill") != ISSUER_SKILL
+        or value.get("issuer_version") != ISSUER_VERSION
+        or value.get("receipt_schema_version") != RECEIPT_SCHEMA_VERSION
+        or not isinstance(issued_at, int)
+        or isinstance(issued_at, bool)
+        or issued_at < 0
+    ):
+        _fail("Receipt issuer, schema, or timestamp is invalid.")
+    identity = dict(value)
+    receipt_id = identity.pop("receipt_id")
+    expected_receipt_id = "RCP-SOL-" + hashlib.sha256(
+        _canonical_bytes(identity)
+    ).hexdigest()[:20].upper()
+    if receipt_id != expected_receipt_id:
+        _fail("Receipt identity is invalid.")
+    if receipt_type == "consultation":
+        binding = value.get("binding")
+        expected_binding_fields = {
+            "advice_admitted", "advisor_invocation_succeeded", "effort", "model",
+            "permission_profile", "role", "runtime_attested",
+            "runtime_observation_trusted", "sandbox",
+        }
+        if (
+            value.get("disposition") not in DISPOSITIONS
+            or not isinstance(binding, dict)
+            or set(binding) != expected_binding_fields
+            or binding.get("advice_admitted") != 1
+            or binding.get("advisor_invocation_succeeded") is not True
+            or binding.get("runtime_attested") is not True
+            or binding.get("runtime_observation_trusted") is not True
+            or binding.get("role") != ADVISOR_ROLE
+            or binding.get("sandbox") != "read-only"
+            or any(
+                not isinstance(binding[field], str) or not binding[field].strip()
+                for field in ("model", "effort", "permission_profile")
+            )
+        ):
+            _fail("Receipt runtime binding is invalid.")
+    elif value.get("reason_code") not in NO_CONSULTATION_REASONS:
+        _fail("Receipt reason is invalid.")
+    return value

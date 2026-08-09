@@ -834,7 +834,8 @@ class ControllerCase(unittest.TestCase):
             completed.stdout,
         )
 
-    def test_real_exported_requirements_bytes_are_accepted_by_hotl_closed_seam(self) -> None:
+    def test_unbound_exported_requirements_bytes_are_rejected_by_hotl_closed_seam(self) -> None:
+        """A standalone GPT receipt cannot activate HOTL without its explicit context."""
         self._freeze_initial_requirements()
         receipt_path = self._run_dir() / "governance-receipt-requirements.json"
         receipt = controller.export_governance_receipt(
@@ -918,12 +919,12 @@ class ControllerCase(unittest.TestCase):
             (
                 "requirements",
                 {"requirements_digest": "sha256:" + "d" * 64},
-                "REQUIREMENTS_MISMATCH",
+                "GPT_RECEIPT_ID_MISMATCH",
             ),
             (
                 "snapshot",
                 {"snapshot_digest": "sha256:" + "d" * 64},
-                "INVALID_RECEIPT_BINDING",
+                "GPT_RECEIPT_ID_MISMATCH",
             ),
             (
                 "binding",
@@ -953,7 +954,7 @@ class ControllerCase(unittest.TestCase):
                 self.assertFalse(rejected["ok"], rejected)
                 self.assertEqual(code, rejected["error"]["code"])
 
-        imported = run_hotl(
+        unbound = run_hotl(
             "import-receipt",
             "--repo",
             str(self.repository),
@@ -962,17 +963,8 @@ class ControllerCase(unittest.TestCase):
             "--receipt",
             str(receipt_path),
         )
-        self.assertTrue(imported["ok"], imported)
-        replayed = run_hotl(
-            "import-receipt",
-            "--repo",
-            str(self.repository),
-            "--execution",
-            str(receipt["execution_id"]),
-            "--receipt",
-            str(receipt_path),
-        )
-        self.assertEqual("REPLAYED_RECEIPT", replayed["error"]["code"])
+        self.assertFalse(unbound["ok"], unbound)
+        self.assertEqual("HOTL_CONTEXT_MISMATCH", unbound["error"]["code"])
 
     def _prepare_supplemental_review(self) -> dict[str, object]:
         self._accept_evidence_request()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import re
 import stat
@@ -1776,9 +1777,7 @@ def _validate_gpt_binding(
             "INVALID_RECEIPT_BINDING",
             "GPT Pro model, reasoning, and plan bindings must be nonempty.",
         )
-    if model == "GPT-5.6 Sol" and (
-        reasoning != "Pro" or plan not in {"Pro", "Business", "Enterprise"}
-    ):
+    if (model, reasoning, plan) != ("GPT-5.6 Sol", "Pro", "Pro"):
         raise ControllerError(
             "INVALID_RECEIPT_BINDING", "GPT Pro model attestation is not canonical."
         )
@@ -1796,6 +1795,37 @@ def _validate_gpt_binding(
             "GPT_IDENTITY_MISMATCH",
             "GPT Pro identity does not match its deterministic provenance binding.",
         )
+
+
+def _validate_gpt_receipt_identity(source: Mapping[str, object]) -> None:
+    """Recompute the v1 GPT exporter identity; never trust a caller label."""
+    transaction_id = source.get("transaction_id")
+    binding = source.get("binding")
+    if not isinstance(transaction_id, str) or not isinstance(binding, dict):
+        raise ControllerError("INVALID_RECEIPT_IDENTITY", "GPT Pro receipt transaction identity is invalid.")
+    task_slug = binding.get("task_slug")
+    receipt_type = source.get("receipt_type")
+    if not isinstance(task_slug, str) or not isinstance(receipt_type, str):
+        raise ControllerError("INVALID_RECEIPT_IDENTITY", "GPT Pro receipt transaction identity is invalid.")
+    prefixes = {
+        "requirements": (f"gpc-loop-{task_slug}:requirements-", f"gpc-loop-{task_slug}:approval-stop-"),
+        "semantic_review": (f"gpc-loop-{task_slug}:review-",),
+        "final": (f"gpc-loop-{task_slug}:final-verify-",),
+    }
+    allowed_prefixes = prefixes.get(receipt_type)
+    if allowed_prefixes is None or not any(transaction_id.startswith(prefix) and transaction_id[len(prefix):].isdigit() for prefix in allowed_prefixes):
+        raise ControllerError("INVALID_RECEIPT_IDENTITY", "GPT Pro receipt transaction is not an exporter transaction.")
+    seed = {
+        field: source[field]
+        for field in (
+            "authority_snapshot_digest", "binding", "claims", "execution_id",
+            "input_digest", "issued_at_unix", "nonce", "output_digest",
+            "receipt_type", "requirements_digest", "snapshot_digest", "transaction_id",
+        )
+    }
+    expected = "RCP-GPC-" + hashlib.sha256(contract.canonical_json_bytes(seed)).hexdigest()[:20].upper()
+    if source.get("receipt_id") != expected:
+        raise ControllerError("GPT_RECEIPT_ID_MISMATCH", "GPT Pro receipt identity does not match the exporter algorithm.")
 
 
 def _validate_claim_edges(claims: dict[str, object], fields: frozenset[str]) -> None:
@@ -1839,6 +1869,8 @@ def _validate_source_receipt(
             recompute_governance_identity=receipt_type
             in {"requirements", "semantic_review", "final"},
         )
+        if receipt_type in {"requirements", "semantic_review", "final"}:
+            _validate_gpt_receipt_identity(source)
     elif "binding" in source:
         raise ControllerError(
             "INVALID_RECEIPT_BINDING",
@@ -1911,7 +1943,7 @@ def _validate_source_receipt(
     claims = source["claims"]
     if not isinstance(claims, dict):
         raise ControllerError("INVALID_RECEIPT", "Receipt claims must be an object.")
-    if gpt_external and "hotl_governance_context" in claims:
+    if gpt_external and receipt_type == "requirements":
         expected_context = _governance_context_value(policy, projection)
         expected_context_digest = "sha256:" + hashlib.sha256(
             contract.canonical_json_bytes(expected_context)
@@ -1921,6 +1953,11 @@ def _validate_source_receipt(
             or claims.get("hotl_governance_context_digest") != expected_context_digest
         ):
             raise ControllerError("HOTL_CONTEXT_MISMATCH", "GPT receipt does not bind the current HOTL governance context.")
+        claims = {
+            key: value for key, value in claims.items()
+            if key not in {"hotl_governance_context", "hotl_governance_context_digest"}
+        }
+    elif gpt_external:
         claims = {
             key: value for key, value in claims.items()
             if key not in {"hotl_governance_context", "hotl_governance_context_digest"}
@@ -2415,12 +2452,13 @@ def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> 
 def import_sol_receipt(repository: Path, execution_id: str, raw: bytes) -> dict[str, object]:
     """Import exact canonical Task 7 audit bytes; this is never approval authority."""
     try:
-        value = contract.strict_json_loads(raw.decode("utf-8", errors="strict"))
-        task7_bytes = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    except (UnicodeError, ValueError, contract.ContractError) as error:
+        path = Path(__file__).resolve().parents[2] / "orchestrate-gpt-pro-sol-advisor" / "scripts" / "governance_receipt.py"
+        spec = importlib.util.spec_from_file_location("hotl_task7_receipts", path)
+        if spec is None or spec.loader is None: raise ImportError("Task 7 receipt validator is unavailable.")
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        value = module.validate_governance_receipt(raw)
+    except (ImportError, OSError, UnicodeError, ValueError) as error:
         raise ControllerError("INVALID_SOL_RECEIPT", "Sol receipt must be canonical Task 7 JSON.") from error
-    if not isinstance(value, dict) or task7_bytes != raw:
-        raise ControllerError("INVALID_SOL_RECEIPT", "Sol receipt must preserve exact Task 7 bytes.")
     raw_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
     receipt_type = value.get("receipt_type")
     expected_fields = {
