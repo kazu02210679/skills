@@ -10,6 +10,7 @@ import hashlib
 import json
 import ntpath
 import re
+import stat
 from pathlib import Path, PurePosixPath
 
 
@@ -18,6 +19,45 @@ EVENT_ID = re.compile(r"EVT-[0-9A-F]{12}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 NONCE = re.compile(r"[0-9a-f]{32}\Z")
 NODE_ID = re.compile(r"(?:REQ|CODE|TEST|CMD|EVID|REV|CHG|FAIL|POL)-[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
+STABLE_ID = re.compile(r"[A-Za-z][A-Za-z0-9._:-]*\Z")
+
+NODE_TYPE_PREFIXES = {
+    "requirement": "REQ-",
+    "code": "CODE-",
+    "test": "TEST-",
+    "command": "CMD-",
+    "evidence": "EVID-",
+    "review": "REV-",
+    "change": "CHG-",
+    "failure": "FAIL-",
+    "policy": "POL-",
+}
+EVENT_TYPES = frozenset(
+    {
+        "node_declared",
+        "edge_declared",
+        "snapshot_activated",
+        "evidence_recorded",
+        "evidence_invalidated",
+        "review_recorded",
+        "finding_recorded",
+        "receipt_imported",
+        "transition_committed",
+    }
+)
+STATES = frozenset(
+    {
+        "INIT",
+        "REQUIREMENTS",
+        "IMPLEMENT",
+        "LOCAL_VERIFY",
+        "SEMANTIC_REVIEW",
+        "COMPLETE",
+        "ESCALATED",
+        "RECOVERY_REQUIRED",
+        "STOPPED",
+    }
+)
 
 ALLOWED_EDGE_TRIPLES = frozenset(
     {
@@ -190,7 +230,12 @@ def _canonical_repo_path_text(raw: object) -> str:
 def normalize_repo_path(repository: Path, raw: str) -> str:
     normalized = _canonical_repo_path_text(raw)
     root = Path(repository).resolve(strict=False)
-    target = (root / PurePosixPath(normalized)).resolve(strict=False)
+    candidate = root
+    for part in PurePosixPath(normalized).parts:
+        candidate = candidate / part
+        if _is_link_or_reparse_point(candidate):
+            raise ContractError("LINK_FORBIDDEN", "Path must not traverse a symlink or reparse point.")
+    target = candidate.resolve(strict=False)
     try:
         target.relative_to(root)
     except ValueError as error:
@@ -198,10 +243,22 @@ def normalize_repo_path(repository: Path, raw: str) -> str:
     return normalized
 
 
-def _validate_issuer(value: object) -> None:
+def _is_link_or_reparse_point(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    if path.is_symlink():
+        return True
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    return bool(getattr(metadata, "st_file_attributes", 0) & reparse_attribute)
+
+
+def _validate_issuer(value: object) -> dict[str, object]:
     issuer = _require_exact_fields(value, ISSUER_FIELDS, "issuer")
     for field in ISSUER_FIELDS:
         _require_string(issuer[field], f"issuer.{field}")
+    return issuer
 
 
 def _validate_subject_ids(value: object) -> None:
@@ -225,6 +282,188 @@ def _validate_artifact_refs(value: object) -> None:
         _require_digest(artifact["sha256"], "artifact reference sha256")
 
 
+def _require_nonnegative_integer(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ContractError("INVALID_VALUE", f"{label} must be a non-negative integer.")
+    return value
+
+
+def _node_type_for_id(value: object, label: str) -> str:
+    node_id = _require_string(value, label)
+    if not NODE_ID.fullmatch(node_id):
+        raise ContractError("INVALID_NODE_ID", f"{label} must be a known typed node ID.")
+    for node_type, prefix in NODE_TYPE_PREFIXES.items():
+        if node_id.startswith(prefix):
+            return node_type
+    raise ContractError("INVALID_NODE_ID", f"{label} has an unsupported node type.")
+
+
+def _require_subjects(value: object, expected: list[str]) -> None:
+    if value != expected:
+        raise ContractError("SUBJECT_MISMATCH", "Event subject_ids do not match its typed payload.")
+
+
+def _require_event_issuer(event: dict[str, object], kind: str, identifier: str | None = None) -> None:
+    issuer = _validate_issuer(event["issuer"])
+    if issuer["kind"] != kind or (identifier is not None and issuer["id"] != identifier):
+        raise ContractError("ISSUER_MISMATCH", "Event issuer is not permitted for this event type.")
+
+
+def _require_event_result(event: dict[str, object], expected: str) -> None:
+    if event["result"] != expected:
+        raise ContractError("RESULT_MISMATCH", "Event result is not permitted for this event type.")
+
+
+def _require_empty_artifacts(event: dict[str, object]) -> None:
+    if event["artifact_refs"] != []:
+        raise ContractError("ARTIFACT_MISMATCH", "This event type must not include artifact references.")
+
+
+def _require_payload(value: object, fields: frozenset[str], event_type: str) -> dict[str, object]:
+    return _require_exact_fields(value, fields, f"{event_type} payload")
+
+
+def _validate_event_contract(event: dict[str, object]) -> None:
+    event_type = event["type"]
+    if not isinstance(event_type, str) or event_type not in EVENT_TYPES:
+        raise ContractError("UNKNOWN_EVENT_TYPE", "Event type is not supported by the v1 contract.")
+
+    if event_type == "node_declared":
+        payload = _require_payload(event["payload"], frozenset({"node_id", "node_type"}), event_type)
+        node_type = _require_string(payload["node_type"], "node_type")
+        if node_type not in NODE_TYPE_PREFIXES:
+            raise ContractError("INVALID_NODE_TYPE", "node_type is not supported.")
+        node_id = _require_string(payload["node_id"], "node_id")
+        if not node_id.startswith(NODE_TYPE_PREFIXES[node_type]) or not NODE_ID.fullmatch(node_id):
+            raise ContractError("NODE_TYPE_MISMATCH", "node_id prefix does not match node_type.")
+        _require_subjects(event["subject_ids"], [node_id])
+        _require_event_issuer(event, "controller", "hotl-governance")
+        _require_event_result(event, "pass")
+        _require_empty_artifacts(event)
+        return
+
+    if event_type == "edge_declared":
+        payload = _require_payload(event["payload"], frozenset({"source_id", "edge", "target_id"}), event_type)
+        source_id = _require_string(payload["source_id"], "source_id")
+        target_id = _require_string(payload["target_id"], "target_id")
+        source_type = _node_type_for_id(source_id, "source_id")
+        target_type = _node_type_for_id(target_id, "target_id")
+        validate_edge(source_type, _require_string(payload["edge"], "edge"), target_type)
+        _require_subjects(event["subject_ids"], [source_id, target_id])
+        _require_event_issuer(event, "controller", "hotl-governance")
+        _require_event_result(event, "pass")
+        _require_empty_artifacts(event)
+        return
+
+    if event_type == "snapshot_activated":
+        payload = _require_payload(event["payload"], frozenset({"snapshot_digest", "cycle_id"}), event_type)
+        _require_digest(payload["snapshot_digest"], "snapshot_digest")
+        _require_nonnegative_integer(payload["cycle_id"], "cycle_id")
+        _require_subjects(event["subject_ids"], [])
+        _require_event_issuer(event, "controller", "hotl-governance")
+        _require_event_result(event, "pass")
+        _require_empty_artifacts(event)
+        return
+
+    if event_type == "evidence_recorded":
+        payload = _require_payload(
+            event["payload"],
+            frozenset({"evidence_id", "artifact_digest", "test_id", "snapshot_digest", "cycle_id"}),
+            event_type,
+        )
+        if _node_type_for_id(payload["evidence_id"], "evidence_id") != "evidence":
+            raise ContractError("NODE_TYPE_MISMATCH", "evidence_id must use the EVID- prefix.")
+        if _node_type_for_id(payload["test_id"], "test_id") != "test":
+            raise ContractError("NODE_TYPE_MISMATCH", "test_id must use the TEST- prefix.")
+        _require_digest(payload["artifact_digest"], "artifact_digest")
+        _require_digest(payload["snapshot_digest"], "snapshot_digest")
+        _require_nonnegative_integer(payload["cycle_id"], "cycle_id")
+        _require_subjects(event["subject_ids"], [payload["evidence_id"], payload["test_id"]])
+        if not any(ref["sha256"] == payload["artifact_digest"] for ref in event["artifact_refs"]):
+            raise ContractError("ARTIFACT_MISMATCH", "Evidence event must bind its artifact digest.")
+        _require_event_issuer(event, "tool")
+        _require_event_result(event, "pass")
+        return
+
+    if event_type == "evidence_invalidated":
+        payload = _require_payload(event["payload"], frozenset({"evidence_id", "cycle_id"}), event_type)
+        if _node_type_for_id(payload["evidence_id"], "evidence_id") != "evidence":
+            raise ContractError("NODE_TYPE_MISMATCH", "evidence_id must use the EVID- prefix.")
+        _require_nonnegative_integer(payload["cycle_id"], "cycle_id")
+        _require_subjects(event["subject_ids"], [payload["evidence_id"]])
+        _require_event_issuer(event, "controller", "hotl-governance")
+        _require_event_result(event, "pass")
+        _require_empty_artifacts(event)
+        return
+
+    if event_type == "review_recorded":
+        payload = _require_payload(
+            event["payload"], frozenset({"review_id", "status", "evidence_set_digest", "cycle_id"}), event_type
+        )
+        if _node_type_for_id(payload["review_id"], "review_id") != "review":
+            raise ContractError("NODE_TYPE_MISMATCH", "review_id must use the REV- prefix.")
+        status = payload["status"]
+        if status not in {"accepted", "rejected"}:
+            raise ContractError("INVALID_REVIEW_STATUS", "Review status must be accepted or rejected.")
+        _require_digest(payload["evidence_set_digest"], "evidence_set_digest")
+        _require_nonnegative_integer(payload["cycle_id"], "cycle_id")
+        _require_subjects(event["subject_ids"], [payload["review_id"]])
+        _require_event_issuer(event, "skill")
+        _require_event_result(event, "pass" if status == "accepted" else "fail")
+        _require_empty_artifacts(event)
+        return
+
+    if event_type == "finding_recorded":
+        payload = _require_payload(
+            event["payload"], frozenset({"finding_id", "root_cause_id", "review_id", "status"}), event_type
+        )
+        for field in ("finding_id", "root_cause_id"):
+            identifier = _require_string(payload[field], field)
+            if not STABLE_ID.fullmatch(identifier):
+                raise ContractError("INVALID_FINDING_ID", f"{field} is not a stable identifier.")
+        if _node_type_for_id(payload["review_id"], "review_id") != "review":
+            raise ContractError("NODE_TYPE_MISMATCH", "review_id must use the REV- prefix.")
+        status = payload["status"]
+        if status not in {"open", "resolved"}:
+            raise ContractError("INVALID_FINDING_STATUS", "Finding status must be open or resolved.")
+        _require_subjects(event["subject_ids"], [payload["review_id"]])
+        _require_event_issuer(event, "skill")
+        _require_event_result(event, "fail" if status == "open" else "pass")
+        _require_empty_artifacts(event)
+        return
+
+    if event_type == "receipt_imported":
+        payload = _require_payload(
+            event["payload"], frozenset({"receipt_id", "receipt_digest", "issuer_skill"}), event_type
+        )
+        for field in ("receipt_id", "issuer_skill"):
+            _require_string(payload[field], field)
+        _require_digest(payload["receipt_digest"], "receipt_digest")
+        _require_subjects(event["subject_ids"], [])
+        _require_event_issuer(event, "controller", "hotl-governance")
+        _require_event_result(event, "pass")
+        _require_empty_artifacts(event)
+        return
+
+    payload = _require_payload(
+        event["payload"],
+        frozenset({"gate", "from_state", "to_state", "evidence_set_digest", "cycle_id"}),
+        event_type,
+    )
+    if payload["gate"] not in {"G1", "G2", "G3", "G4"}:
+        raise ContractError("INVALID_GATE", "Transition gate must be G1 through G4.")
+    if payload["from_state"] not in STATES or payload["to_state"] not in STATES:
+        raise ContractError("INVALID_STATE", "Transition states must be known controller states.")
+    if payload["from_state"] == payload["to_state"]:
+        raise ContractError("INVALID_STATE", "Transition states must differ.")
+    _require_digest(payload["evidence_set_digest"], "evidence_set_digest")
+    _require_nonnegative_integer(payload["cycle_id"], "cycle_id")
+    _require_subjects(event["subject_ids"], [])
+    _require_event_issuer(event, "controller", "hotl-governance")
+    _require_event_result(event, "pass")
+    _require_empty_artifacts(event)
+
+
 def validate_event(
     value: object, previous_hash: str | None, expected_sequence: int
 ) -> dict[str, object]:
@@ -241,20 +480,22 @@ def validate_event(
         raise ContractError("INVALID_EVENT_ID", "Invalid event ID.")
     if not isinstance(event["execution_id"], str) or not EXECUTION_ID.fullmatch(event["execution_id"]):
         raise ContractError("INVALID_EXECUTION_ID", "Invalid execution ID.")
-    _require_string(event["type"], "event type")
     if not isinstance(event["payload"], dict):
         raise ContractError("INVALID_SCHEMA", "event payload must be an object.")
-    _validate_json_tree(event["payload"])
     _validate_issuer(event["issuer"])
     _validate_subject_ids(event["subject_ids"])
     _validate_artifact_refs(event["artifact_refs"])
-    _require_string(event["result"], "event result")
     _require_digest(event["input_digest"], "event input_digest")
     _require_digest(event["output_digest"], "event output_digest")
-    if previous_hash is not None:
+    if expected_sequence == 1:
+        if previous_hash is not None or event["previous_event_hash"] is not None:
+            raise ContractError("PREVIOUS_HASH_MISMATCH", "The first event must not have a predecessor hash.")
+    else:
         _require_digest(previous_hash, "previous hash")
-    if event["previous_event_hash"] != previous_hash:
-        raise ContractError("PREVIOUS_HASH_MISMATCH", "Event previous hash does not match the chain head.")
+        _require_digest(event["previous_event_hash"], "event previous_event_hash")
+        if event["previous_event_hash"] != previous_hash:
+            raise ContractError("PREVIOUS_HASH_MISMATCH", "Event previous hash does not match the chain head.")
+    _validate_event_contract(event)
     _require_string(event["timestamp"], "event timestamp")
     return event
 

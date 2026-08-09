@@ -25,10 +25,16 @@ def valid_event(**changes: object) -> dict[str, object]:
         "event_id": "EVT-123456789ABC",
         "execution_id": EXECUTION_ID,
         "sequence": 1,
-        "type": "test_verified",
-        "payload": {"test_id": "TEST-42"},
+        "type": "evidence_recorded",
+        "payload": {
+            "evidence_id": "EVID-42",
+            "artifact_digest": DIGEST_ONE,
+            "test_id": "TEST-42",
+            "snapshot_digest": DIGEST_TWO,
+            "cycle_id": 1,
+        },
         "issuer": {"kind": "tool", "id": "pytest", "version": "8.0"},
-        "subject_ids": ["REQ-42", "TEST-42"],
+        "subject_ids": ["EVID-42", "TEST-42"],
         "artifact_refs": [{"path": "evidence/test-output.txt", "sha256": DIGEST_ONE}],
         "result": "pass",
         "input_digest": DIGEST_TWO,
@@ -38,6 +44,101 @@ def valid_event(**changes: object) -> dict[str, object]:
     }
     event.update(changes)
     return event
+
+
+def event_for(event_type: str) -> dict[str, object]:
+    cases: dict[str, dict[str, object]] = {
+        "node_declared": {
+            "payload": {"node_id": "REQ-42", "node_type": "requirement"},
+            "issuer": {"kind": "controller", "id": "hotl-governance", "version": "1"},
+            "subject_ids": ["REQ-42"],
+            "artifact_refs": [],
+            "result": "pass",
+        },
+        "edge_declared": {
+            "payload": {"source_id": "CODE-42", "edge": "implements", "target_id": "REQ-42"},
+            "issuer": {"kind": "controller", "id": "hotl-governance", "version": "1"},
+            "subject_ids": ["CODE-42", "REQ-42"],
+            "artifact_refs": [],
+            "result": "pass",
+        },
+        "snapshot_activated": {
+            "payload": {"snapshot_digest": DIGEST_ONE, "cycle_id": 1},
+            "issuer": {"kind": "controller", "id": "hotl-governance", "version": "1"},
+            "subject_ids": [],
+            "artifact_refs": [],
+            "result": "pass",
+        },
+        "evidence_recorded": {
+            "payload": {
+                "evidence_id": "EVID-42",
+                "artifact_digest": DIGEST_ONE,
+                "test_id": "TEST-42",
+                "snapshot_digest": DIGEST_TWO,
+                "cycle_id": 1,
+            },
+            "issuer": {"kind": "tool", "id": "pytest", "version": "8.0"},
+            "subject_ids": ["EVID-42", "TEST-42"],
+            "artifact_refs": [{"path": "evidence/test-output.txt", "sha256": DIGEST_ONE}],
+            "result": "pass",
+        },
+        "evidence_invalidated": {
+            "payload": {"evidence_id": "EVID-42", "cycle_id": 1},
+            "issuer": {"kind": "controller", "id": "hotl-governance", "version": "1"},
+            "subject_ids": ["EVID-42"],
+            "artifact_refs": [],
+            "result": "pass",
+        },
+        "review_recorded": {
+            "payload": {
+                "review_id": "REV-42",
+                "status": "accepted",
+                "evidence_set_digest": DIGEST_ONE,
+                "cycle_id": 1,
+            },
+            "issuer": {"kind": "skill", "id": "gpt-pro-codex-loop", "version": "1"},
+            "subject_ids": ["REV-42"],
+            "artifact_refs": [],
+            "result": "pass",
+        },
+        "finding_recorded": {
+            "payload": {
+                "finding_id": "FIND-42",
+                "root_cause_id": "ROOT-42",
+                "review_id": "REV-42",
+                "status": "open",
+            },
+            "issuer": {"kind": "skill", "id": "gpt-pro-codex-loop", "version": "1"},
+            "subject_ids": ["REV-42"],
+            "artifact_refs": [],
+            "result": "fail",
+        },
+        "receipt_imported": {
+            "payload": {
+                "receipt_id": "RCP-42",
+                "receipt_digest": DIGEST_ONE,
+                "issuer_skill": "gpt-pro-codex-loop",
+            },
+            "issuer": {"kind": "controller", "id": "hotl-governance", "version": "1"},
+            "subject_ids": [],
+            "artifact_refs": [],
+            "result": "pass",
+        },
+        "transition_committed": {
+            "payload": {
+                "gate": "G1",
+                "from_state": "REQUIREMENTS",
+                "to_state": "IMPLEMENT",
+                "evidence_set_digest": DIGEST_ONE,
+                "cycle_id": 1,
+            },
+            "issuer": {"kind": "controller", "id": "hotl-governance", "version": "1"},
+            "subject_ids": [],
+            "artifact_refs": [],
+            "result": "pass",
+        },
+    }
+    return valid_event(type=event_type, **cases[event_type])
 
 
 def valid_receipt(**changes: object) -> dict[str, object]:
@@ -111,6 +212,21 @@ class RepositoryPathTests(unittest.TestCase):
             with self.assertRaises(contract.ContractError):
                 contract.normalize_repo_path(repository, "escape/secret.txt")
 
+    def test_rejects_in_repository_symlink_or_reparse_component(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            target = repository / "target"
+            repository.mkdir()
+            target.mkdir()
+            link = repository / "inside"
+            try:
+                link.symlink_to(target, target_is_directory=True)
+            except OSError as error:
+                self.skipTest(f"symlink creation unavailable: {error}")
+            with self.assertRaises(contract.ContractError):
+                contract.normalize_repo_path(repository, "inside/secret.txt")
+
 
 class EnvelopeValidationTests(unittest.TestCase):
     def test_event_requires_the_exact_closed_envelope_and_chain_position(self) -> None:
@@ -140,6 +256,41 @@ class EnvelopeValidationTests(unittest.TestCase):
     def test_event_accepts_only_the_supplied_previous_hash(self) -> None:
         event = valid_event(sequence=2, previous_event_hash=DIGEST_ONE)
         self.assertEqual(event, contract.validate_event(event, DIGEST_ONE, 2))
+
+    def test_event_requires_a_predecessor_hash_after_sequence_one(self) -> None:
+        with self.assertRaises(contract.ContractError):
+            contract.validate_event(valid_event(sequence=2), None, 2)
+
+    def test_event_types_have_closed_payload_and_typed_subject_contracts(self) -> None:
+        for event_type in (
+            "node_declared",
+            "edge_declared",
+            "snapshot_activated",
+            "evidence_recorded",
+            "evidence_invalidated",
+            "review_recorded",
+            "finding_recorded",
+            "receipt_imported",
+            "transition_committed",
+        ):
+            with self.subTest(event_type=event_type):
+                event = event_for(event_type)
+                self.assertEqual(event, contract.validate_event(event, None, 1))
+
+        with self.assertRaises(contract.ContractError):
+            contract.validate_event(valid_event(type="unrecognized", payload={}), None, 1)
+        with self.assertRaises(contract.ContractError):
+            contract.validate_event(
+                event_for("transition_committed") | {"payload": {"gate": "G1", "extra": True}},
+                None,
+                1,
+            )
+        with self.assertRaises(contract.ContractError):
+            contract.validate_event(
+                event_for("evidence_recorded") | {"subject_ids": ["EVID-42", "REQ-42"]},
+                None,
+                1,
+            )
 
     def test_receipt_is_closed_and_bound_to_issuer_execution_and_authority(self) -> None:
         receipt = valid_receipt()
