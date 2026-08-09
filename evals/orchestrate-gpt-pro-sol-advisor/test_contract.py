@@ -41,15 +41,46 @@ def valid_combined(**overrides: object) -> dict[str, object]:
     return scenario
 
 
+def public_observations(**overrides: object) -> dict[str, object]:
+    observed: dict[str, object] = {
+        "role": "sol_advisor_advisor",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "sandbox": "read-only",
+        "permission_profile": "managed",
+    }
+    observed.update(overrides)
+    return observed
+
+
+def inspector_output(
+    thread_id: str = "11111111-1111-7111-8111-111111111111",
+    **overrides: object,
+) -> dict[str, object]:
+    output: dict[str, object] = {
+        "thread_id": thread_id,
+        "parent_thread_id": "00000000-0000-7000-8000-000000000000",
+        "agent_role": "sol_advisor_advisor",
+        "agent_path": "agents/sol_advisor_advisor.toml",
+        "model_provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "sandbox_policy_type": "read-only",
+        "permission_profile_type": "managed",
+        "cwd": "/repo/current",
+    }
+    output.update(overrides)
+    return output
+
+
 def attested_combined(**overrides: object) -> dict[str, object]:
+    public = public_observations()
+    for field, legacy_key in POLICY.RUNTIME_FIELDS.items():
+        if legacy_key in overrides:
+            public[field] = overrides.pop(legacy_key)
     evidence: dict[str, object] = {
         "advisor_invocation_succeeded": True,
-        "runtime_observation_trusted": True,
-        "observed_advisor_role": "sol_advisor_advisor",
-        "observed_advisor_model": "gpt-5.6-sol",
-        "observed_advisor_effort": "high",
-        "observed_advisor_sandbox": "read-only",
-        "observed_permission_profile": "managed",
+        "public_runtime_observations": public,
     }
     evidence.update(overrides)
     return valid_combined(**evidence)
@@ -349,7 +380,6 @@ class CompositionContractTests(unittest.TestCase):
     def test_runtime_attestation_is_required_before_advice_disposition(self) -> None:
         base = valid_combined(
             advisor_invocation_succeeded=True,
-            runtime_observation_trusted=True,
             codex_commitment_boundary=True,
             concrete_question=True,
             precise_question="Does this auth boundary preserve tenant isolation?",
@@ -357,7 +387,9 @@ class CompositionContractTests(unittest.TestCase):
             decision_value=True,
         )
         unavailable = POLICY.route(base)
-        self.assertEqual("advisor-attestation-unavailable", unavailable["terminal"])
+        self.assertEqual(
+            "advisor-attestation-provenance-invalid", unavailable["terminal"]
+        )
         self.assertEqual(1, unavailable["sol_calls"])
         self.assertFalse(unavailable["advice_accepted"])
 
@@ -393,7 +425,13 @@ class CompositionContractTests(unittest.TestCase):
         }
         for field, evidence in mismatches.items():
             with self.subTest(field=field):
-                result = POLICY.route({**base, **evidence})
+                public = {
+                    name: evidence[key]
+                    for name, key in POLICY.RUNTIME_FIELDS.items()
+                }
+                result = POLICY.route(
+                    {**base, "public_runtime_observations": public}
+                )
                 self.assertEqual("advisor-attestation-mismatch", result["terminal"])
                 self.assertEqual(field, result["attestation_failure"])
                 self.assertFalse(result["advice_accepted"])
@@ -406,16 +444,31 @@ class CompositionContractTests(unittest.TestCase):
             material_risk=True,
             decision_value=True,
         )
-        for key in POLICY.RUNTIME_FIELDS.values():
-            with self.subTest(missing=key):
-                result = POLICY.route({**base, key: None})
-                self.assertEqual("advisor-attestation-unavailable", result["terminal"])
+        for field in POLICY.RUNTIME_FIELDS:
+            with self.subTest(missing=field):
+                public = dict(base["public_runtime_observations"])
+                public.pop(field)
+                result = POLICY.route(
+                    {**base, "public_runtime_observations": public}
+                )
+                expected = (
+                    "advisor-attestation-provenance-invalid"
+                    if field == "role"
+                    else "advisor-attestation-inspector-unavailable"
+                )
+                self.assertEqual(expected, result["terminal"])
                 self.assertTrue(result["advice_discarded"])
                 self.assertEqual(0, result["downstream_advice_propagations"])
                 self.assertEqual(0, result["fallback_calls"])
 
-        malformed = POLICY.route({**base, "observed_advisor_model": ["gpt-5.6-sol"]})
-        self.assertEqual("advisor-attestation-unavailable", malformed["terminal"])
+        malformed_public = dict(base["public_runtime_observations"])
+        malformed_public["model"] = ["gpt-5.6-sol"]
+        malformed = POLICY.route(
+            {**base, "public_runtime_observations": malformed_public}
+        )
+        self.assertEqual(
+            "advisor-attestation-provenance-invalid", malformed["terminal"]
+        )
 
     def test_advisor_invocation_failure_discards_advice_without_fallback(self) -> None:
         base = attested_combined(
@@ -438,25 +491,163 @@ class CompositionContractTests(unittest.TestCase):
                 self.assertEqual(0, result["downstream_advice_propagations"])
                 self.assertEqual(0, result["fallback_calls"])
 
-    def test_runtime_observation_provenance_must_be_trusted(self) -> None:
-        base = attested_combined(
+    def test_caller_boolean_cannot_promote_or_veto_runtime_provenance(self) -> None:
+        public = attested_combined(
             codex_commitment_boundary=True,
             concrete_question=True,
-            precise_question="Can matching self-claims be trusted?",
+            precise_question="Can a caller Boolean decide provenance?",
             material_risk=True,
             decision_value=True,
-            advice_body="I promise these fields came from the runtime.",
         )
-        for trusted in (None, False, "true"):
-            with self.subTest(trusted=trusted):
-                result = POLICY.route(
-                    {**base, "runtime_observation_trusted": trusted}
+        for claimed in (None, False, True, "true"):
+            with self.subTest(claimed=claimed):
+                result = POLICY.route({**public, "runtime_observation_trusted": claimed})
+                self.assertEqual("primary-disposition", result["terminal"])
+                self.assertEqual(1, result["advice_admitted"])
+
+    def test_runtime_attestation_prefers_public_native_details(self) -> None:
+        public = {
+            "role": "sol_advisor_advisor",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "sandbox": "read-only",
+            "permission_profile": "managed",
+        }
+        result = POLICY.route(
+            valid_combined(
+                advisor_invocation_succeeded=True,
+                public_runtime_observations=public,
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Do public native details prove the runtime route?",
+                material_risk=True,
+                decision_value=True,
+            )
+        )
+        self.assertEqual("primary-disposition", result["terminal"])
+        self.assertEqual(public, result["runtime_observations"])
+        self.assertEqual(
+            {field: "public-native-details" for field in POLICY.RUNTIME_FIELDS},
+            result["runtime_observation_sources"],
+        )
+
+    def test_runtime_attestation_uses_same_thread_inspector_only_for_omissions(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        inspector = {
+            "role": "sol_advisor_advisor",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "sandbox": "read-only",
+            "permission_profile": "managed",
+        }
+        result = POLICY.route(
+            valid_combined(
+                advisor_invocation_succeeded=True,
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                runtime_inspector_status="complete",
+                runtime_inspector_script="scripts/inspect-agent-runtime.sh",
+                runtime_inspector_rollout_count=1,
+                advisor_thread_id=thread_id,
+                runtime_inspector_output=inspector_output(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can omitted native details be filled safely?",
+                material_risk=True,
+                decision_value=True,
+            )
+        )
+        self.assertEqual("primary-disposition", result["terminal"])
+        self.assertEqual(inspector, result["runtime_observations"])
+        self.assertEqual("public-native-details", result["runtime_observation_sources"]["role"])
+        for field in ("model", "effort", "sandbox", "permission_profile"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    "local-runtime-inspector",
+                    result["runtime_observation_sources"][field],
                 )
-                self.assertEqual("advisor-attestation-untrusted", result["terminal"])
-                self.assertTrue(result["advice_discarded"])
+
+    def test_inspector_requires_exact_script_one_rollout_and_complete_result(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        complete = {
+            "runtime_inspector_status": "complete",
+            "runtime_inspector_script": "scripts/inspect-agent-runtime.sh",
+            "runtime_inspector_rollout_count": 1,
+            "advisor_thread_id": thread_id,
+            "runtime_inspector_output": inspector_output(thread_id),
+        }
+        base = attested_combined(
+            public_runtime_observations={"role": "sol_advisor_advisor"},
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Is the local inspector result admissible?",
+            material_risk=True,
+            decision_value=True,
+        )
+        invalid = (
+            ("runtime_inspector_script", None),
+            ("runtime_inspector_script", "scripts/other.sh"),
+            ("runtime_inspector_rollout_count", None),
+            ("runtime_inspector_rollout_count", 0),
+            ("runtime_inspector_rollout_count", 2),
+            ("runtime_inspector_rollout_count", True),
+            ("runtime_inspector_status", None),
+            ("runtime_inspector_status", "failed"),
+            (
+                "runtime_inspector_output",
+                {key: value for key, value in inspector_output().items() if key != "cwd"},
+            ),
+            (
+                "runtime_inspector_output",
+                {**inspector_output(), "advice_body": "not allowlisted"},
+            ),
+        )
+        for field, value in invalid:
+            with self.subTest(field=field, value=value):
+                evidence = {**complete, field: value}
+                result = POLICY.route({**base, **evidence})
+                self.assertEqual(
+                    "advisor-attestation-inspector-unavailable", result["terminal"]
+                )
                 self.assertEqual(0, result["advice_admitted"])
-                self.assertEqual(0, result["downstream_advice_propagations"])
-                self.assertEqual(0, result["fallback_calls"])
+                self.assertTrue(result["advice_discarded"])
+
+    def test_self_claims_and_failed_inspector_cannot_satisfy_provenance(self) -> None:
+        gate = {
+            "codex_commitment_boundary": True,
+            "concrete_question": True,
+            "precise_question": "Can useful advice bypass runtime provenance?",
+            "material_risk": True,
+            "decision_value": True,
+        }
+        self_claim = POLICY.route(
+            valid_combined(
+                **gate,
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
+            )
+        )
+        self.assertEqual("advisor-attestation-provenance-invalid", self_claim["terminal"])
+        self.assertEqual(0, self_claim["advice_admitted"])
+        self.assertTrue(self_claim["advice_discarded"])
+
+        failed_inspector = POLICY.route(
+            attested_combined(
+                **gate,
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                runtime_inspector_status="failed",
+                advisor_thread_id="11111111-1111-7111-8111-111111111111",
+            )
+        )
+        self.assertEqual(
+            "advisor-attestation-inspector-unavailable",
+            failed_inspector["terminal"],
+        )
+        self.assertEqual(0, failed_inspector["advice_admitted"])
+        self.assertTrue(failed_inspector["advice_discarded"])
 
     def test_permission_profile_is_observed_but_not_a_saved_preference(self) -> None:
         for permission in (
@@ -494,9 +685,16 @@ class CompositionContractTests(unittest.TestCase):
         for permission in (None, "", "   "):
             with self.subTest(permission=permission):
                 result = POLICY.route(
-                    {**base, "observed_permission_profile": permission}
+                    {
+                        **base,
+                        "public_runtime_observations": public_observations(
+                            permission_profile=permission
+                        ),
+                    }
                 )
-                self.assertEqual("advisor-attestation-unavailable", result["terminal"])
+                self.assertEqual(
+                    "advisor-attestation-provenance-invalid", result["terminal"]
+                )
                 self.assertTrue(result["advice_discarded"])
 
         for sandbox in (
@@ -508,9 +706,16 @@ class CompositionContractTests(unittest.TestCase):
             "workspace-write",
         ):
             with self.subTest(sandbox=sandbox):
-                result = POLICY.route({**base, "observed_advisor_sandbox": sandbox})
+                result = POLICY.route(
+                    {
+                        **base,
+                        "public_runtime_observations": public_observations(
+                            sandbox=sandbox
+                        ),
+                    }
+                )
                 expected = (
-                    "advisor-attestation-unavailable"
+                    "advisor-attestation-provenance-invalid"
                     if sandbox in (None, "")
                     else "advisor-attestation-mismatch"
                 )
@@ -647,6 +852,10 @@ class CompositionContractTests(unittest.TestCase):
                 "retained-implementer-config-is-rejected",
                 "runtime-permission-missing-is-rejected",
                 "runtime-permission-blank-is-rejected",
+                "public-native-attestation-is-preferred",
+                "inspector-fills-public-omissions",
+                "inspector-thread-mismatch-stops",
+                "self-claims-do-not-establish-provenance",
             },
             set(cases),
         )
@@ -730,8 +939,13 @@ class CompositionContractTests(unittest.TestCase):
                 material_risk=True,
                 decision_value=True,
             ),
-            "pro-green-selfclaim": attested_combined(
-                runtime_observation_trusted=False,
+            "pro-green-selfclaim": valid_combined(
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
                 codex_commitment_boundary=True,
                 concrete_question=True,
                 precise_question="Can advice-body self-claims replace attestation?",
@@ -760,6 +974,59 @@ class CompositionContractTests(unittest.TestCase):
                     "advice_admitted",
                     "advice_discarded",
                     "fallback_calls",
+                ):
+                    if key in trace:
+                        self.assertEqual(trace[key], actual.get(key), key)
+
+        provenance = results["provenance_hardening"]
+        self.assertEqual(3, len(provenance["baseline"]))
+        self.assertEqual(3, len(provenance["with_skill"]))
+        self.assertTrue(
+            all(item["contract_violation"] for item in provenance["baseline"])
+        )
+        provenance_replays = {
+            "provenance-green-public": attested_combined(
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does public metadata prove the route?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            "provenance-green-inspector": attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                runtime_inspector_status="complete",
+                runtime_inspector_script="scripts/inspect-agent-runtime.sh",
+                runtime_inspector_rollout_count=1,
+                advisor_thread_id="11111111-1111-7111-8111-111111111111",
+                runtime_inspector_output=inspector_output(),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can the inspector fill omitted fields?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            "provenance-green-selfclaim": valid_combined(
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can self-claims establish provenance?",
+                material_risk=True,
+                decision_value=True,
+            ),
+        }
+        for trace in provenance["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = POLICY.route(provenance_replays[trace["sample"]])
+                for key in (
+                    "advice_admitted",
+                    "advice_discarded",
+                    "terminal",
+                    "runtime_attestation_source",
                 ):
                     if key in trace:
                         self.assertEqual(trace[key], actual.get(key), key)

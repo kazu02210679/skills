@@ -12,12 +12,20 @@ attestation claims with no runtime evidence, and equivalent canonical workspace
 spellings. All five routed correctly. Invalid advice was discarded before
 downstream use; valid low-risk work skipped Sol without making it a gate.
 
+A provenance-hardening RED/GREEN set then exposed the remaining Boolean-trust
+gap. The repaired harness requires public native details to identify the role,
+uses the installed allowlisted runtime inspector only to fill omitted fields
+for the exact same thread, rejects conflicting overlap, and records per-field
+`public-native-details` or `local-runtime-inspector` provenance. Matching
+self-claims cannot be promoted by a caller-supplied trust flag.
+
 `policy.py` is a deterministic evaluation harness, not a runtime dependency.
 Its cases verify pre-GPC setup ordering, the single active preferences object,
 canonical workspace identity plus exact upstream raw-workspace `profileKey`
 serialization, the exact Codex advisor, trusted runtime identity/isolation
-attestation, opaque permission audit evidence, authority, bounded recurrence,
-and fail-closed dependency handling.
+attestation provenance, exact-thread inspector completion, opaque permission
+audit evidence, authority, bounded recurrence, and fail-closed dependency
+handling.
 
 Run:
 

@@ -14,7 +14,9 @@ GPT Pro の初期化より先に Sol Advisor の setup status と preferences �
 
 新しいタスクではCodex runtimeから現在のworkspaceをcanonical pathに解決し、`get_preferences` が返す上流で検証済みのactive preferences objectについて、`client=codex` とworkspace identityの一致を要求します。workspace identityは双方をcanonicalizeして比較しますが、`profileKey` は別runtimeのcanonical pathから再生成せず、上流が保存したraw `preferences.workspace` を使った `codex:<scope>:<raw preferences.workspace>` と厳密比較します。別client・別workspace・不一致のprofileは使用しません。併用設定の助言ロールは `sol_advisor_advisor` だけです。旧互換のTerra / Sol reviewerへ自動フォールバックしません。
 
-Solを起動した後、助言を読む・採否判断する前に、信頼できるruntime観測元から実際のrole、model、reasoning effort、sandbox mode、permission profileを確認します。role/model/effortはbound profileと一致し、sandboxは厳密に `read-only` でなければなりません。permission profileはpreferencesに保存されないため一致比較やallowlist判定をせず、信頼できる空でない観測値をそのまま監査記録へ残します。呼び出し失敗、欠落・曖昧・不正形式・不一致・観測元未確認なら助言本文を下流へ渡さず破棄し、再試行・fallback・GPT Pro続行をせず併用モードを停止します。「編集しない」という自己申告は実行時attestationの代用になりません。
+Solを起動した後、助言を読む・採否判断する前に、まずpublic native spawn/details metadataを確認し、そこに実際の `sol_advisor_advisor` roleが含まれることを必須とします。public detailsがrole以外のmodel、reasoning effort、sandbox mode、permission profileを省略した場合だけ、インストール済みSol Advisor packageの `scripts/inspect-agent-runtime.sh` をskill-relative pathから解決し、同じnative advisor thread IDに対して1回実行します。inspectorは一意のrolloutを読み、同じthreadを識別し、必要項目をすべて返し、public detailsと重複する値が一致しなければなりません。
+
+各項目の出所を `public-native-details` または `local-runtime-inspector` として記録します。role/model/effortはbound profileと一致し、sandboxは厳密に `read-only` でなければなりません。permission profileはpreferencesに保存されないため一致比較やallowlist判定をせず、空でない観測値をそのまま監査記録へ残します。public role欠落、inspector失敗・曖昧・別thread・不正形式・競合、呼び出し失敗なら助言本文を下流へ渡さず破棄し、advisor再試行・role fallback・GPT Pro続行をせず併用モードを停止します。自己申告、caller-supplied Boolean、role manifest、要求設定は実行時attestationの代用になりません。
 
 ## 権限境界
 
