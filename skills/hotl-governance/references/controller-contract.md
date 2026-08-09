@@ -145,5 +145,9 @@ The lineage digest must identify an existing immutable evidence object whose
 bytes are exactly the canonical predecessor/supersedes binding. Missing,
 corrupt, symlink/reparse, self-referential, duplicate, wrong-predecessor, and
 nonterminal lineage fail closed. Valid branches may share one predecessor. The
-successor begins with one validated `receipt_imported` lineage event at `INIT`;
-an explicit `INIT` lifecycle transition then advances it to `REQUIREMENTS`.
+successor is published as one atomic initial batch containing the validated
+`receipt_imported` lineage event, active requirement nodes and canonical requirement
+content, an explicit `INIT` lifecycle transition, and immutable canonical policy and
+requirements evidence under their declared digests. A healthy successor therefore
+begins at `REQUIREMENTS`; no later privileged backdoor is needed to establish its G1
+completion graph.

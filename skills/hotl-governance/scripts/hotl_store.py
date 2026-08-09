@@ -101,15 +101,20 @@ def _read_open_file(fd: int) -> bytes:
     return b"".join(chunks)
 
 
-def _windows_final_path(fd: int) -> Path:
+def _windows_final_path(handle: int) -> Path:
     import ctypes
-    import msvcrt
+    from ctypes import wintypes
 
-    handle = msvcrt.get_osfhandle(fd)
+    final_path = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+    final_path.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    final_path.restype = wintypes.DWORD
     buffer = ctypes.create_unicode_buffer(32768)
-    length = ctypes.windll.kernel32.GetFinalPathNameByHandleW(
-        ctypes.c_void_p(handle), buffer, len(buffer), 0
-    )
+    length = final_path(handle, buffer, len(buffer), 0)
     if length == 0 or length >= len(buffer):
         raise _artifact_error()
     value = buffer.value
@@ -118,6 +123,74 @@ def _windows_final_path(fd: int) -> Path:
     elif value.startswith("\\\\?\\"):
         value = value[4:]
     return Path(value)
+
+
+def _windows_file_attributes(handle: int) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
+
+    information = FileAttributeTagInfo()
+    get_information = ctypes.windll.kernel32.GetFileInformationByHandleEx
+    get_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    get_information.restype = wintypes.BOOL
+    if not get_information(
+        handle, 9, ctypes.byref(information), ctypes.sizeof(information)
+    ):
+        raise _artifact_error()
+    return int(information.attributes)
+
+
+def _windows_open_artifact(path: Path) -> tuple[int, int]:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.windll.kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        0x80000000,
+        0x00000001 | 0x00000002 | 0x00000004,
+        None,
+        3,
+        0x00200000 | 0x02000000,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle is None or handle == invalid_handle:
+        raise _artifact_error()
+    try:
+        fd = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except (OSError, ValueError) as error:
+        close_handle = ctypes.windll.kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        close_handle(handle)
+        raise _artifact_error(error) from error
+    return fd, int(handle)
+
+
+def _windows_same_lexical_path(expected: Path, opened: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(expected))) == os.path.normcase(
+        os.path.normpath(str(opened))
+    )
 
 
 def _read_repository_artifact_windows(repository: Path, normalized: str) -> bytes:
@@ -130,19 +203,18 @@ def _read_repository_artifact_windows(repository: Path, normalized: str) -> byte
         candidate = candidate / part
         if _is_link_or_reparse(candidate):
             raise _artifact_error()
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(candidate, flags)
+    fd, handle = _windows_open_artifact(candidate)
     try:
-        opened = _windows_final_path(fd)
-        try:
-            common = os.path.commonpath((str(root), str(opened)))
-            if os.path.normcase(common) != os.path.normcase(str(root)):
-                raise _artifact_error()
-        except ValueError as error:
-            raise _artifact_error(error) from error
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+        if _windows_file_attributes(handle) & reparse:
+            raise _artifact_error()
+        opened = _windows_final_path(handle)
+        if not _windows_same_lexical_path(candidate, opened):
+            raise _artifact_error()
         content = _read_open_file(fd)
-        common = os.path.commonpath((str(root), str(_windows_final_path(fd))))
-        if os.path.normcase(common) != os.path.normcase(str(root)):
+        if _windows_file_attributes(handle) & reparse:
+            raise _artifact_error()
+        if not _windows_same_lexical_path(candidate, _windows_final_path(handle)):
             raise _artifact_error()
         return content
     finally:

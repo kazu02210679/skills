@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import errno
 import hashlib
 import json
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,6 +68,105 @@ def fixture_state(count: int, head: str) -> dict[str, object]:
 
 
 class TransactionStorageTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows handle semantics")
+    def test_safe_artifact_read_rejects_final_component_swap_to_in_repo_alias(
+        self,
+    ) -> None:
+        candidate = self.repository / "artifact.txt"
+        candidate.write_bytes(b"original\n")
+        alias_target = self.repository / "alias-target.txt"
+        alias_target.write_bytes(b"alias\n")
+        probe = self.repository / "probe-link"
+        try:
+            probe.symlink_to(alias_target)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"symlink creation unavailable: {error}")
+        kernel32 = ctypes.windll.kernel32
+        real_create_file = kernel32.CreateFileW
+        real_os_open = os.open
+        swapped = False
+
+        def swap() -> None:
+            nonlocal swapped
+            if not swapped:
+                candidate.unlink()
+                candidate.symlink_to(alias_target)
+                swapped = True
+
+        def swap_before_create(*args: object) -> object:
+            if Path(str(args[0])) == candidate:
+                swap()
+            return real_create_file(*args)
+
+        def swap_before_os_open(path: object, flags: int, mode: int = 0o777) -> int:
+            if Path(path) == candidate:
+                swap()
+            return real_os_open(path, flags, mode)
+
+        with (
+            patch.object(kernel32, "CreateFileW", side_effect=swap_before_create),
+            patch.object(store.os, "open", side_effect=swap_before_os_open),
+        ):
+            content: bytes | None = None
+            try:
+                content = store.read_repository_artifact(self.repository, "artifact.txt")
+            except store.StoreError as error:
+                raised = error
+            else:
+                raised = None
+
+        self.assertTrue(swapped)
+        self.assertIsNotNone(raised, f"unsafe alias bytes were accepted: {content!r}")
+        assert raised is not None
+        self.assertEqual("UNSAFE_ARTIFACT", raised.code)
+
+    @unittest.skipUnless(os.name == "nt", "Windows handle semantics")
+    def test_safe_artifact_read_rejects_intermediate_swap_to_in_repo_alias(
+        self,
+    ) -> None:
+        source = self.repository / "source"
+        source.mkdir()
+        candidate = source / "artifact.txt"
+        candidate.write_bytes(b"original\n")
+        alias_directory = self.repository / "alias-directory"
+        alias_directory.mkdir()
+        (alias_directory / "artifact.txt").write_bytes(b"alias\n")
+        probe = self.repository / "probe-directory-link"
+        try:
+            probe.symlink_to(alias_directory, target_is_directory=True)
+            probe.unlink()
+        except OSError as error:
+            self.skipTest(f"directory symlink creation unavailable: {error}")
+        kernel32 = ctypes.windll.kernel32
+        real_create_file = kernel32.CreateFileW
+        swapped = False
+
+        def swap_before_create(*args: object) -> object:
+            nonlocal swapped
+            if not swapped and Path(str(args[0])) == candidate:
+                candidate.unlink()
+                source.rmdir()
+                source.symlink_to(alias_directory, target_is_directory=True)
+                swapped = True
+            return real_create_file(*args)
+
+        with patch.object(kernel32, "CreateFileW", side_effect=swap_before_create):
+            content: bytes | None = None
+            try:
+                content = store.read_repository_artifact(
+                    self.repository, "source/artifact.txt"
+                )
+            except store.StoreError as error:
+                raised = error
+            else:
+                raised = None
+
+        self.assertTrue(swapped)
+        self.assertIsNotNone(raised, f"unsafe alias bytes were accepted: {content!r}")
+        assert raised is not None
+        self.assertEqual("UNSAFE_ARTIFACT", raised.code)
+
     def test_safe_artifact_read_rejects_static_symlink_or_reparse(self) -> None:
         target = self.repository / "target.txt"
         target.write_bytes(b"inside\n")
@@ -94,6 +195,13 @@ class TransactionStorageTests(unittest.TestCase):
         real_open = os.open
         swapped = False
 
+        def swap() -> None:
+            nonlocal swapped
+            if not swapped:
+                candidate.unlink()
+                candidate.symlink_to(outside)
+                swapped = True
+
         def swap_before_open(
             path: object,
             flags: int,
@@ -101,16 +209,28 @@ class TransactionStorageTests(unittest.TestCase):
             *,
             dir_fd: int | None = None,
         ) -> int:
-            nonlocal swapped
             if not swapped and (str(path) == "artifact.txt" or Path(path) == candidate):
-                candidate.unlink()
-                candidate.symlink_to(outside)
-                swapped = True
+                swap()
             if dir_fd is None:
                 return real_open(path, flags, mode)
             return real_open(path, flags, mode, dir_fd=dir_fd)
 
-        with patch.object(store.os, "open", side_effect=swap_before_open):
+        with ExitStack() as patches:
+            patches.enter_context(
+                patch.object(store.os, "open", side_effect=swap_before_open)
+            )
+            if os.name == "nt":
+                kernel32 = ctypes.windll.kernel32
+                real_create_file = kernel32.CreateFileW
+
+                def swap_before_create(*args: object) -> object:
+                    if Path(str(args[0])) == candidate:
+                        swap()
+                    return real_create_file(*args)
+
+                patches.enter_context(
+                    patch.object(kernel32, "CreateFileW", side_effect=swap_before_create)
+                )
             with self.assertRaises(store.StoreError) as raised:
                 store.read_repository_artifact(self.repository, "artifact.txt")
 
