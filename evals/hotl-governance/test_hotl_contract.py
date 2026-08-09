@@ -191,6 +191,14 @@ class CanonicalJsonTests(unittest.TestCase):
             with self.subTest(value=repr(value)), self.assertRaises(contract.ContractError):
                 contract.canonical_json_bytes(value)
 
+    def test_canonical_json_rejects_lone_unicode_surrogates_with_contract_error(self) -> None:
+        """Replacing this guard with UTF-8 encoding must not leak UnicodeEncodeError."""
+        for value in ({"x": "\ud800"}, {"\udfff": "x"}):
+            with self.subTest(value=repr(value)) as context:
+                with self.assertRaises(contract.ContractError) as raised:
+                    contract.canonical_json_bytes(value)
+            self.assertEqual("INVALID_JSON", raised.exception.code)
+
 
 class RepositoryPathTests(unittest.TestCase):
     def test_normalizes_backslashes_to_a_canonical_posix_path(self) -> None:

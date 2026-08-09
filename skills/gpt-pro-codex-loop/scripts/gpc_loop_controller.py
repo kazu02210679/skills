@@ -60,6 +60,18 @@ GOVERNANCE_RECEIPT_FIELDS = {
     "snapshot_digest",
     "transaction_id",
 }
+HOTL_GOVERNANCE_CONTEXT_FIELDS = {
+    "artifact_digest",
+    "artifact_type",
+    "authority_snapshot_digest",
+    "cycle_id",
+    "execution_id",
+    "policy_digest",
+    "receipt_nonce",
+    "requirements_digest",
+    "schema_version",
+    "snapshot_digest",
+}
 TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
 TEMPLATE_TOKEN = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 ATTEMPT_NAME = re.compile(r"(?:expected|abandoned|consumed)-attempt-(\d+)\.json\Z")
@@ -472,11 +484,32 @@ def _governance_receipt(
     binding = _governance_binding(paths, state)
     authority_digest = _governance_authority_digest(binding)
     nonce = governance_receipt_nonce(binding)
+    receipt_claims = dict(claims)
+    hotl_context = state.get("hotl_governance_context")
+    hotl_context_digest = state.get("hotl_governance_context_digest")
+    if hotl_context is not None:
+        if (
+            not isinstance(hotl_context, dict)
+            or not isinstance(hotl_context_digest, str)
+            or sha256_bytes(_canonical_json_bytes(hotl_context)) != hotl_context_digest
+            or hotl_context.get("execution_id") != governance_execution_id(paths.task_slug)
+            or hotl_context.get("authority_snapshot_digest") != authority_digest
+            or hotl_context.get("receipt_nonce") != nonce
+            or hotl_context.get("requirements_digest") != requirements_digest
+        ):
+            raise ControllerError(
+                "HOTL_CONTEXT_MISMATCH",
+                "HOTL governance context does not bind the authoritative receipt.",
+            )
+        receipt_claims.update(
+            hotl_governance_context=dict(hotl_context),
+            hotl_governance_context_digest=hotl_context_digest,
+        )
     receipt_id_seed = _canonical_json_bytes(
         {
             "authority_snapshot_digest": authority_digest,
             "binding": binding,
-            "claims": dict(claims),
+            "claims": receipt_claims,
             "execution_id": governance_execution_id(paths.task_slug),
             "input_digest": input_digest,
             "issued_at_unix": issued_at_unix,
@@ -491,7 +524,7 @@ def _governance_receipt(
     return {
         "authority_snapshot_digest": authority_digest,
         "binding": binding,
-        "claims": dict(claims),
+        "claims": receipt_claims,
         "cycle_id": None,
         "evidence_set_digest": None,
         "execution_id": governance_execution_id(paths.task_slug),
@@ -728,9 +761,11 @@ def initial_state(
     approved_paths: Sequence[str],
     model_policy: str,
     requested_label: str | None,
+    hotl_governance_context: Mapping[str, object] | None = None,
+    hotl_governance_context_digest: str | None = None,
 ) -> dict[str, object]:
     """Build the complete, preflight-only trusted state object."""
-    return {
+    state = {
         "schema_version": SCHEMA_VERSION,
         "phase": "PREFLIGHT",
         "review_round": 0,
@@ -786,6 +821,40 @@ def initial_state(
         "nonce_derivation_key": secrets.token_hex(32),
         "approved_existing_paths": sorted(approved_paths),
     }
+    if hotl_governance_context is not None:
+        state["hotl_governance_context"] = dict(hotl_governance_context)
+        state["hotl_governance_context_digest"] = hotl_governance_context_digest
+    return state
+
+
+def _load_hotl_governance_context(
+    path: Path, task_slug: str
+) -> tuple[dict[str, object], str]:
+    """Read one explicit, canonical, self-digesting HOTL context artifact."""
+    try:
+        raw = Path(path).read_bytes()
+        value = validate_packet.strict_json_loads(raw.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context is unreadable.") from exc
+    if not isinstance(value, dict) or _canonical_json_bytes(value) != raw:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context must be canonical JSON.")
+    if set(value) != HOTL_GOVERNANCE_CONTEXT_FIELDS:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context fields are invalid.")
+    body = {key: value[key] for key in value if key != "artifact_digest"}
+    if value["artifact_type"] != "hotl-governance-context" or value["schema_version"] != 1:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context schema is invalid.")
+    if value["execution_id"] != governance_execution_id(task_slug):
+        raise ControllerError("HOTL_CONTEXT_MISMATCH", "HOTL governance context execution does not match the task.")
+    if value["artifact_digest"] != sha256_bytes(_canonical_json_bytes(body)):
+        raise ControllerError("HOTL_CONTEXT_DIGEST_MISMATCH", "HOTL governance context artifact digest is invalid.")
+    if any(
+        not isinstance(value[field], str) or DIGEST.fullmatch(value[field]) is None
+        for field in ("authority_snapshot_digest", "policy_digest", "requirements_digest", "snapshot_digest")
+    ) or not isinstance(value["receipt_nonce"], str) or NONCE.fullmatch(value["receipt_nonce"]) is None:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context bindings are invalid.")
+    if not isinstance(value["cycle_id"], int) or isinstance(value["cycle_id"], bool) or value["cycle_id"] < 1:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context cycle is invalid.")
+    return dict(value), sha256_bytes(raw)
 
 
 def _validate_model_policy(model_policy: str, requested_label: str | None) -> None:
@@ -1365,12 +1434,19 @@ def initialize_run(
     requested_model_label: str | None,
     approved_existing_path_manifest: Path | None = None,
     retry_incomplete: bool = False,
+    governance_context_path: Path | None = None,
 ) -> dict[str, object]:
     """Create a fully validated, conversation-unbound controller run."""
     paths = resolve_run(repository, task_slug)
     _validate_model_policy(model_policy, requested_model_label)
     request_text = _read_input(request_path, "request")
     context_text = _read_input(repository_context_path, "repository context")
+    hotl_context: dict[str, object] | None = None
+    hotl_context_digest: str | None = None
+    if governance_context_path is not None:
+        hotl_context, hotl_context_digest = _load_hotl_governance_context(
+            governance_context_path, task_slug
+        )
     validate_model_bound_section("user_request", request_text)
     validate_model_bound_section("repository_evidence", context_text)
     if approved_existing_path_manifest is not None and approved_existing_paths:
@@ -1503,7 +1579,8 @@ def initialize_run(
                     )
                 approved_paths = _normalize_approved_paths(approved_existing_paths)
                 previous = initial_state(
-                    preflight, approved_paths, model_policy, requested_model_label
+                    preflight, approved_paths, model_policy, requested_model_label,
+                    hotl_context, hotl_context_digest,
                 )
                 candidate = dict(previous)
                 candidate["phase"] = "REQUIREMENTS_PENDING"

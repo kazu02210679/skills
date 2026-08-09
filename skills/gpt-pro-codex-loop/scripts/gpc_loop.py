@@ -66,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--retry-incomplete", action="store_true")
     init.add_argument("--model-policy", required=True, choices=("PRO_CLASS", "EXACT_LABEL"))
     init.add_argument("--requested-model-label")
+    init.add_argument("--governance-context", type=Path)
 
     requirements = _command_parser(subparsers, "prepare-requirements")
     requirements.add_argument("--conflict-evidence", type=Path)
@@ -122,6 +123,7 @@ def _dispatch(args: argparse.Namespace) -> dict[str, object]:
             args.requested_model_label,
             args.approved_existing_path_manifest,
             args.retry_incomplete,
+            args.governance_context,
         )
     if args.command == "prepare-requirements":
         return controller.prepare_requirements(args.repo, args.task, args.conflict_evidence)

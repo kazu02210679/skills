@@ -1092,6 +1092,85 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(state["model_attestation_schema_version"], 2)
         self.assertEqual(state["approved_existing_paths"], [])
 
+    def test_init_binds_only_a_closed_hotl_governance_context_artifact(self) -> None:
+        """Removing explicit context validation must not activate the HOTL binding."""
+        body = {
+            "artifact_type": "hotl-governance-context",
+            "authority_snapshot_digest": "sha256:" + "a" * 64,
+            "cycle_id": 1,
+            "execution_id": controller.governance_execution_id("controller-test"),
+            "policy_digest": "sha256:" + "b" * 64,
+            "receipt_nonce": "c" * 32,
+            "requirements_digest": "sha256:" + "d" * 64,
+            "schema_version": 1,
+            "snapshot_digest": "sha256:" + "e" * 64,
+        }
+        context = dict(body) | {"artifact_digest": controller.sha256_bytes(controller._canonical_json_bytes(body))}
+        path = self.input_directory / "hotl-governance-context.json"
+        path.write_bytes(controller._canonical_json_bytes(context))
+
+        controller.initialize_run(
+            self.repository, "controller-test", self.request, self.context,
+            [], "PRO_CLASS", None, governance_context_path=path,
+        )
+
+        state = self._state()
+        self.assertEqual(state["hotl_governance_context"], context)
+        self.assertEqual(
+            state["hotl_governance_context_digest"],
+            controller.sha256_bytes(path.read_bytes()),
+        )
+
+    def test_governance_receipt_carries_the_explicit_hotl_context_binding(self) -> None:
+        """Dropping receipt claims must not leave a HOTL-bound run indistinguishable."""
+        requirements = valid_requirements()
+        binding = {
+            "conversation_url": "https://chatgpt.com/c/controller-test",
+            "model_label": PRO_MODEL_LABEL,
+            "plan_label": PRO_PLAN_LABEL,
+            "reasoning_label": PRO_REASONING_LABEL,
+            "run_id": "gpc-loop-controller-test",
+            "task_slug": "controller-test",
+        }
+        body = {
+            "artifact_type": "hotl-governance-context",
+            "authority_snapshot_digest": controller.sha256_bytes(controller._canonical_json_bytes(binding)),
+            "cycle_id": 1,
+            "execution_id": controller.governance_execution_id("controller-test"),
+            "policy_digest": "sha256:" + "b" * 64,
+            "receipt_nonce": controller.governance_receipt_nonce(binding),
+            "requirements_digest": controller.sha256_bytes(controller._canonical_json_bytes(requirements)),
+            "schema_version": 1,
+            "snapshot_digest": "sha256:" + "e" * 64,
+        }
+        context = dict(body) | {"artifact_digest": controller.sha256_bytes(controller._canonical_json_bytes(body))}
+        path = self.input_directory / "bound-hotl-context.json"
+        path.write_bytes(controller._canonical_json_bytes(context))
+        controller.initialize_run(
+            self.repository, "controller-test", self.request, self.context,
+            [], "PRO_CLASS", None, governance_context_path=path,
+        )
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.input_directory / "bound-requirements.raw.md"
+        write_raw_envelope(raw, expected, requirements)
+        controller.accept_requirements(
+            self.repository, "controller-test", raw, binding["conversation_url"],
+            PRO_MODEL_LABEL, PRO_REASONING_LABEL, PRO_PLAN_LABEL,
+        )
+
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+
+        self.assertEqual(
+            {
+                "hotl_governance_context": context,
+                "hotl_governance_context_digest": controller.sha256_bytes(path.read_bytes()),
+            },
+            receipt["claims"],
+        )
+
     def test_legacy_unbound_state_upgrades_on_next_normal_transition(self) -> None:
         self._init_run()
         state = self._state()
@@ -1506,7 +1585,7 @@ class ControllerCase(unittest.TestCase):
                 ],
                 (
                     Path("."), "run", request, context,
-                    ["old.py", "legacy.py"], "EXACT_LABEL", "Pro", None, False,
+                    ["old.py", "legacy.py"], "EXACT_LABEL", "Pro", None, False, None,
                 ),
             ),
             ("prepare_requirements", ["prepare-requirements", "--repo", ".", "--task", "run", "--conflict-evidence", str(evidence)], (Path("."), "run", evidence)),

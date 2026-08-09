@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import stat
+import subprocess
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -116,6 +118,7 @@ class Projection:
     requirements_digest: str
     authority_snapshot_digest: str
     approval_mode: str
+    required_verification_argv: tuple[tuple[str, ...], ...]
 
 
 def _controller_error(error: Exception) -> ControllerError:
@@ -149,6 +152,7 @@ def empty_projection(
     requirements_digest: str | None = None,
     authority_snapshot_digest: str | None = None,
     approval_mode: str = "agentic",
+    required_verification_argv: Sequence[Sequence[str]] = (),
 ) -> Projection:
     """Return an empty, execution-bound projection."""
     if not isinstance(execution_id, str) or contract.EXECUTION_ID.fullmatch(execution_id) is None:
@@ -172,6 +176,16 @@ def empty_projection(
         raise ControllerError("INVALID_DIGEST", "Invalid authority snapshot digest.")
     if approval_mode not in {"agentic", "offline_manual"}:
         raise ControllerError("INVALID_POLICY", "Invalid approval mode.")
+    normalized_argv: list[tuple[str, ...]] = []
+    for command in required_verification_argv:
+        if not isinstance(command, (list, tuple)) or not command or any(
+            not isinstance(argument, str) or not argument or "\x00" in argument
+            for argument in command
+        ):
+            raise ControllerError("INVALID_POLICY", "Verification argv must be nonempty string arrays.")
+        normalized_argv.append(tuple(command))
+    if normalized_argv != sorted(normalized_argv) or len(set(normalized_argv)) != len(normalized_argv):
+        raise ControllerError("INVALID_POLICY", "Verification argv arrays must be unique and canonically sorted.")
     normalized_gate_evidence = {
         gate: tuple(sorted(values)) for gate, values in sorted((gate_evidence or {}).items())
     }
@@ -191,6 +205,7 @@ def empty_projection(
         requirements_digest=requirements_digest,
         authority_snapshot_digest=authority_snapshot_digest,
         approval_mode=approval_mode,
+        required_verification_argv=tuple(normalized_argv),
     )
 
 
@@ -549,6 +564,7 @@ def replay(policy: Mapping[str, object], events: Sequence[Mapping[str, object]])
         requirements_digest=normalized.get("requirements_digest"),  # type: ignore[arg-type]
         authority_snapshot_digest=normalized.get("authority_snapshot_digest"),  # type: ignore[arg-type]
         approval_mode=normalized.get("approval_mode", "agentic"),  # type: ignore[arg-type]
+        required_verification_argv=normalized.get("required_verification_argv", ()),  # type: ignore[arg-type]
         gate_evidence=normalized.get("gate_evidence"),  # type: ignore[arg-type]
     )
     previous_hash: str | None = None
@@ -654,6 +670,14 @@ def completion_errors(projection: Projection) -> tuple[str, ...]:
             for change in changes
         ):
             errors.append(f"{requirement}:test_not_in_change")
+        if implementing and verifying and not any(
+            _has_edge(projection, code, "included_in", change)
+            and _has_edge(projection, test, "included_in", change)
+            for change in changes
+            for code in implementing
+            for test in verifying
+        ):
+            errors.append(f"{requirement}:code_and_test_not_in_same_change")
 
     if any(record.status == "open" for record in projection.finding_state.values()):
         errors.append("unresolved_findings")
@@ -694,6 +718,12 @@ def _has_current_receipt(projection: Projection, receipt_type: str, issuer: str)
         and record.issuer_skill == issuer
         for record in projection.receipt_records.values()
     )
+
+
+def _verification_receipt_id(argv: Sequence[str], cycle_id: int) -> str:
+    return "RCP-VERIFY-" + contract.canonical_digest(
+        {"argv": list(argv), "cycle_id": cycle_id}
+    )[7:19].upper()
 
 
 def _local_evidence_errors(projection: Projection) -> tuple[str, ...]:
@@ -760,14 +790,6 @@ def evaluate_gate(projection: Projection, gate: str) -> tuple[bool, tuple[str, .
             errors_list.append("G1:missing_frozen_requirements")
         if not _has_current_receipt(projection, "requirements", "gpt-pro-codex-loop"):
             errors_list.append("G1:missing_requirements_receipt")
-        approval_issuers = {"gpt-pro-codex-loop", "hotl-host-approval"}
-        if projection.approval_mode == "offline_manual":
-            approval_issuers.add("trusted-local-operator")
-        if not any(
-            _has_current_receipt(projection, "approval", issuer)
-            for issuer in sorted(approval_issuers)
-        ):
-            errors_list.append("G1:missing_approval_receipt")
         errors = tuple(errors_list)
     elif gate == "G2":
         requirements = _active_nodes(projection, "requirement")
@@ -784,11 +806,22 @@ def evaluate_gate(projection: Projection, gate: str) -> tuple[bool, tuple[str, .
         errors_list = list(_local_evidence_errors(projection))
         if not _has_current_receipt(projection, "verification", "hotl-local-verifier"):
             errors_list.append("G3:missing_verification_receipt")
+        for argv in projection.required_verification_argv:
+            if not any(
+                _receipt_is_current(projection, record)
+                and record.receipt_type == "verification"
+                and record.issuer_skill == "hotl-local-verifier"
+                and record.receipt_id == _verification_receipt_id(argv, projection.cycle_id)
+                for record in projection.receipt_records.values()
+            ):
+                errors_list.append("G3:missing_required_verification")
         errors = tuple(errors_list)
     else:
         errors_list = list(completion_errors(projection))
         if not _has_current_receipt(projection, "final", "gpt-pro-codex-loop"):
             errors_list.append("G4:missing_final_receipt")
+        if not _has_current_receipt(projection, "sol_audit", "orchestrate-gpt-pro-sol-advisor"):
+            errors_list.append("G4:missing_sol_audit_receipt")
         errors = tuple(errors_list)
     return not errors, errors
 
@@ -1348,6 +1381,7 @@ _INITIAL_POLICY_FIELDS = frozenset(
         "schema_version",
     }
 )
+_VERIFICATION_POLICY_FIELD = "required_verification_argv"
 _SUCCESSOR_POLICY_FIELDS = _INITIAL_POLICY_FIELDS | frozenset(
     {"initial_state", "requirements_digest"}
 )
@@ -1423,7 +1457,11 @@ def _exact_mapping(value: object, fields: frozenset[str], label: str) -> dict[st
 def _validated_base_policy(
     policy: Mapping[str, object], execution_id: str, fields: frozenset[str]
 ) -> dict[str, object]:
-    supplied = _exact_mapping(dict(policy), fields, "policy")
+    supplied = dict(policy)
+    if set(supplied) not in {fields, fields | {_VERIFICATION_POLICY_FIELD}}:
+        raise ControllerError("INVALID_FIELDS", "policy fields must match exactly.")
+    if _VERIFICATION_POLICY_FIELD not in supplied:
+        supplied[_VERIFICATION_POLICY_FIELD] = []
     if supplied["schema_version"] != 1 or isinstance(supplied["schema_version"], bool):
         raise ControllerError("INVALID_POLICY", "Policy schema_version must be integer 1.")
     if supplied["execution_id"] != execution_id:
@@ -1447,6 +1485,18 @@ def _validated_base_policy(
         not isinstance(host_digest, str) or contract.DIGEST.fullmatch(host_digest) is None
     ):
         raise ControllerError("INVALID_DIGEST", "Host approval evidence digest is invalid.")
+    commands = supplied[_VERIFICATION_POLICY_FIELD]
+    if not isinstance(commands, list) or any(
+        not isinstance(command, list) or not command or any(
+            not isinstance(argument, str) or not argument or "\x00" in argument
+            for argument in command
+        )
+        for command in commands
+    ):
+        raise ControllerError("INVALID_POLICY", "Policy verification argv is invalid.")
+    normalized_commands = [list(command) for command in commands]
+    if normalized_commands != sorted(normalized_commands) or len({tuple(command) for command in normalized_commands}) != len(normalized_commands):
+        raise ControllerError("INVALID_POLICY", "Policy verification argv must be unique and canonically sorted.")
     return supplied
 
 
@@ -1622,6 +1672,37 @@ def project_execution(repository: Path, execution_id: str) -> dict[str, object]:
         "event_count": len(events),
         "projection": _projection_value(replay(policy, events)),
     }
+
+
+def _governance_context_value(
+    policy: Mapping[str, object], projection: Projection
+) -> dict[str, object]:
+    body = {
+        "artifact_type": "hotl-governance-context",
+        "authority_snapshot_digest": projection.authority_snapshot_digest,
+        "cycle_id": projection.cycle_id,
+        "execution_id": projection.execution_id,
+        "policy_digest": contract.canonical_digest(policy),
+        "receipt_nonce": policy["receipt_nonce"],
+        "requirements_digest": projection.requirements_digest,
+        "schema_version": 1,
+        "snapshot_digest": projection.active_snapshot_digest,
+    }
+    if body["snapshot_digest"] is None:
+        raise ControllerError("CONTEXT_UNAVAILABLE", "HOTL governance context requires an active snapshot.")
+    context = dict(body) | {"artifact_digest": contract.canonical_digest(body)}
+    return _canonical_mapping(context)
+
+
+def export_governance_context(repository: Path, execution_id: str) -> dict[str, object]:
+    """Export a closed context for one explicit GPT Pro initialization."""
+    paths = store.resolve_run(repository, execution_id)
+    recovery = store.recovery_status(paths)
+    if recovery["recovery_required"]:
+        raise store.StoreError("RECOVERY_REQUIRED", "Run requires read-only recovery diagnosis.")
+    policy = _read_policy(paths)
+    events = store.load_events(paths)
+    return _governance_context_value(policy, replay(policy, events))
 
 
 def _canonical_source_receipt(raw: bytes) -> dict[str, object]:
@@ -1830,6 +1911,20 @@ def _validate_source_receipt(
     claims = source["claims"]
     if not isinstance(claims, dict):
         raise ControllerError("INVALID_RECEIPT", "Receipt claims must be an object.")
+    if gpt_external and "hotl_governance_context" in claims:
+        expected_context = _governance_context_value(policy, projection)
+        expected_context_digest = "sha256:" + hashlib.sha256(
+            contract.canonical_json_bytes(expected_context)
+        ).hexdigest()
+        if (
+            claims.get("hotl_governance_context") != expected_context
+            or claims.get("hotl_governance_context_digest") != expected_context_digest
+        ):
+            raise ControllerError("HOTL_CONTEXT_MISMATCH", "GPT receipt does not bind the current HOTL governance context.")
+        claims = {
+            key: value for key, value in claims.items()
+            if key not in {"hotl_governance_context", "hotl_governance_context_digest"}
+        }
     if receipt_type in {"requirements", "final", "material_change", "stop"}:
         _exact_mapping(claims, frozenset(), "receipt claims")
     elif receipt_type == "approval":
@@ -2040,6 +2135,18 @@ def _admitted_receipt_events(
             issuer_kind="skill",
             issuer_skill=str(source["issuer_skill"]),
         )
+        for evidence_id, record in sorted(projection.evidence_records.items()):
+            if (
+                record.status == "valid_current"
+                and record.cycle_id == projection.cycle_id
+                and record.snapshot_digest == projection.active_snapshot_digest
+            ):
+                add(
+                    "edge_declared",
+                    {"edge": "supports", "source_id": evidence_id, "target_id": review_id},
+                    subjects=[evidence_id, review_id],
+                    input_digest=receipt_digest,
+                )
         for finding in claims["findings"]:  # type: ignore[index]
             add(
                 "finding_recorded",
@@ -2073,6 +2180,14 @@ def _import_receipt_boundary(
     with store.run_lock(paths.lock):
         policy, old_events, projection = _load_locked(paths)
         source = _canonical_source_receipt(source_bytes)
+        if expected_type is None and source.get("receipt_type") in {
+            "implementation",
+            "verification",
+        }:
+            raise ControllerError(
+                "PRIVILEGED_RECEIPT_REQUIRES_CONTROLLER",
+                "Implementation and verification evidence require a controller-owned command.",
+            )
         if approval_command and source.get("issuer_skill") == "gpt-pro-codex-loop":
             raise ControllerError(
                 "APPROVAL_EVIDENCE_REQUIRED",
@@ -2116,16 +2231,241 @@ def import_receipt(
     )
 
 
+def _canonical_object_bytes(raw: bytes, label: str) -> tuple[dict[str, object], str]:
+    if not isinstance(raw, bytes):
+        raise ControllerError("INVALID_JSON", f"{label} must be UTF-8 JSON bytes.")
+    try:
+        value = contract.strict_json_loads(raw.decode("utf-8", errors="strict"))
+        canonical = contract.canonical_json_bytes(value)
+    except (UnicodeError, contract.ContractError) as error:
+        raise ControllerError("INVALID_JSON", f"{label} must be canonical UTF-8 JSON.") from error
+    if not isinstance(value, dict):
+        raise ControllerError("INVALID_SCHEMA", f"{label} must be an object.")
+    if canonical != raw:
+        raise ControllerError("NONCANONICAL_JSON", f"{label} must use canonical JSON bytes.")
+    return value, "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def record_implementation(
+    repository: Path,
+    execution_id: str,
+    manifest_bytes: bytes,
+    report_bytes: bytes,
+) -> dict[str, object]:
+    """Atomically admit content-addressed worker implementation evidence.
+
+    The worker may author the manifest and report, but the controller reads the
+    declared repository artifacts itself and creates the privileged receipt;
+    public receipt import cannot manufacture this record.
+    """
+    manifest, manifest_digest = _canonical_object_bytes(manifest_bytes, "implementation manifest")
+    report, report_digest = _canonical_object_bytes(report_bytes, "implementation report")
+    manifest_fields = frozenset({
+        "artifacts", "base_snapshot_digest", "edges", "nodes", "requirements_digest",
+        "schema_version", "snapshot_digest",
+    })
+    _exact_mapping(manifest, manifest_fields, "implementation manifest")
+    if manifest["schema_version"] != 1 or isinstance(manifest["schema_version"], bool):
+        raise ControllerError("INVALID_SCHEMA", "Implementation manifest schema_version must be integer 1.")
+    report_fields = frozenset({
+        "base_snapshot_digest", "manifest_digest", "requirements_digest", "schema_version", "snapshot_digest",
+    })
+    _exact_mapping(report, report_fields, "implementation report")
+    if report["schema_version"] != 1 or isinstance(report["schema_version"], bool):
+        raise ControllerError("INVALID_SCHEMA", "Implementation report schema_version must be integer 1.")
+    if report["manifest_digest"] != manifest_digest:
+        raise ControllerError("DIGEST_MISMATCH", "Implementation report does not bind the exact manifest bytes.")
+    for field in ("base_snapshot_digest", "requirements_digest", "snapshot_digest"):
+        if report[field] != manifest[field]:
+            raise ControllerError("DIGEST_MISMATCH", "Implementation report and manifest bindings differ.")
+        if not isinstance(manifest[field], str) or contract.DIGEST.fullmatch(manifest[field]) is None:
+            raise ControllerError("INVALID_DIGEST", f"Implementation {field} is invalid.")
+    claims = {"edges": manifest["edges"], "nodes": manifest["nodes"]}
+    _validate_claim_edges(claims, frozenset({"edges", "nodes"}))
+    nodes = claims["nodes"]
+    if not isinstance(nodes, list):
+        raise ControllerError("INVALID_SCHEMA", "Implementation nodes must be a list.")
+    for node in nodes:
+        _exact_mapping(node, frozenset({"node_id", "node_type"}), "receipt node")
+    node_types = {node.get("node_type") for node in nodes if isinstance(node, dict)}
+    if not {"code", "test", "change"}.issubset(node_types):
+        raise ControllerError("INVALID_IMPLEMENTATION", "Implementation requires code, test, and change nodes.")
+    artifacts = manifest["artifacts"]
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ControllerError("INVALID_IMPLEMENTATION", "Implementation requires exact worker artifact digests.")
+    captured: dict[str, bytes] = {manifest_digest: manifest_bytes, report_digest: report_bytes}
+    seen_paths: set[str] = set()
+    for ref in artifacts:
+        if not isinstance(ref, dict) or set(ref) != {"path", "sha256"}:
+            raise ControllerError("INVALID_SCHEMA", "Implementation artifact references are invalid.")
+        path = ref["path"]
+        digest = ref["sha256"]
+        if not isinstance(path, str) or not isinstance(digest, str) or contract.DIGEST.fullmatch(digest) is None:
+            raise ControllerError("INVALID_SCHEMA", "Implementation artifact references are invalid.")
+        if path in seen_paths:
+            raise ControllerError("INVALID_IMPLEMENTATION", "Implementation artifact paths must be unique.")
+        seen_paths.add(path)
+        content = store.read_repository_artifact(repository, path)
+        if "sha256:" + hashlib.sha256(content).hexdigest() != digest:
+            raise ControllerError("DIGEST_MISMATCH", "Implementation artifact bytes do not match the manifest.")
+        captured[digest] = content
+    paths = store.resolve_run(repository, execution_id)
+    with store.run_lock(paths.lock):
+        policy, old_events, projection = _load_locked(paths)
+        if manifest["requirements_digest"] != projection.requirements_digest or manifest["snapshot_digest"] != projection.active_snapshot_digest:
+            raise ControllerError("STALE_RECEIPT", "Implementation does not bind the active requirements and snapshot.")
+        source = {
+            "authority_snapshot_digest": projection.authority_snapshot_digest,
+            "claims": claims | {"manifest_digest": manifest_digest, "report_digest": report_digest},
+            "cycle_id": projection.cycle_id,
+            "evidence_set_digest": projection_evidence_set_digest(projection),
+            "execution_id": projection.execution_id,
+            "input_digest": manifest_digest,
+            "issued_at_unix": 0,
+            "issuer_skill": "codex",
+            "issuer_version": "1",
+            "nonce": policy["receipt_nonce"],
+            "output_digest": report_digest,
+            "receipt_id": "RCP-IMPL-" + manifest_digest[7:19].upper(),
+            "receipt_schema_version": 1,
+            "receipt_type": "implementation",
+            "requirements_digest": projection.requirements_digest,
+            "snapshot_digest": projection.active_snapshot_digest,
+            "transaction_id": "hotl-controller:" + manifest_digest[7:19],
+        }
+        source_bytes = contract.canonical_json_bytes(source)
+        receipt_digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+        if any(record.receipt_digest == receipt_digest for record in projection.receipt_records.values()):
+            raise ControllerError("REPLAYED_RECEIPT", "Implementation manifest was already recorded.")
+        batch, projected = _admitted_receipt_events(projection, old_events, source, receipt_digest, claims)
+        captured[receipt_digest] = source_bytes
+        return _append_locked(paths, policy, old_events, projected, batch, captured)
+
+
+def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> dict[str, object]:
+    """Run one frozen argv without a shell and retain exact zero-exit output bytes."""
+    try:
+        value = contract.strict_json_loads(argv_bytes.decode("utf-8", errors="strict"))
+        if contract.canonical_json_bytes(value) != argv_bytes:
+            raise ControllerError("NONCANONICAL_JSON", "Verification argv must use canonical JSON bytes.")
+    except UnicodeError as error:
+        raise ControllerError("INVALID_JSON", "Verification argv must be UTF-8 JSON.") from error
+    except contract.ContractError as error:
+        raise _controller_error(error) from error
+    if not isinstance(value, list) or not value or any(
+        not isinstance(argument, str) or not argument or "\x00" in argument
+        for argument in value
+    ):
+        raise ControllerError("INVALID_SCHEMA", "Verification argv must be a nonempty string array.")
+    argv = tuple(value)
+    paths = store.resolve_run(repository, execution_id)
+    with store.run_lock(paths.lock):
+        policy, old_events, projection = _load_locked(paths)
+        if argv not in projection.required_verification_argv:
+            raise ControllerError("VERIFICATION_NOT_REQUIRED", "Verification argv is not frozen by policy.")
+        try:
+            completed = subprocess.run(
+                list(argv), cwd=repository, shell=False, check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except OSError as error:
+            raise ControllerError("VERIFICATION_EXECUTION_FAILED", "Verification argv could not be started.") from error
+        if completed.returncode != 0:
+            raise ControllerError("VERIFICATION_FAILED", "Verification argv exited nonzero.")
+        stdout_digest = "sha256:" + hashlib.sha256(completed.stdout).hexdigest()
+        stderr_digest = "sha256:" + hashlib.sha256(completed.stderr).hexdigest()
+        argv_digest = contract.canonical_digest(list(argv))
+        edges = [
+            {"edge": "proves", "source_id": evidence_id, "target_id": record.test_id}
+            for evidence_id, record in sorted(projection.evidence_records.items())
+            if record.status == "valid_current"
+            and record.cycle_id == projection.cycle_id
+            and record.snapshot_digest == projection.active_snapshot_digest
+        ]
+        source = {
+            "authority_snapshot_digest": projection.authority_snapshot_digest,
+            "claims": {"argv": list(argv), "argv_digest": argv_digest, "edges": edges, "exit_status": 0, "stderr_digest": stderr_digest, "stdout_digest": stdout_digest},
+            "cycle_id": projection.cycle_id,
+            "evidence_set_digest": projection_evidence_set_digest(projection),
+            "execution_id": projection.execution_id,
+            "input_digest": argv_digest,
+            "issued_at_unix": 0,
+            "issuer_skill": "hotl-local-verifier",
+            "issuer_version": "1",
+            "nonce": policy["receipt_nonce"],
+            "output_digest": contract.canonical_digest({"stderr": stderr_digest, "stdout": stdout_digest}),
+            "receipt_id": _verification_receipt_id(argv, projection.cycle_id),
+            "receipt_schema_version": 1,
+            "receipt_type": "verification",
+            "requirements_digest": projection.requirements_digest,
+            "snapshot_digest": projection.active_snapshot_digest,
+            "transaction_id": "hotl-controller:" + argv_digest[7:19],
+        }
+        source_bytes = contract.canonical_json_bytes(source)
+        receipt_digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+        if any(record.receipt_id == source["receipt_id"] for record in projection.receipt_records.values()):
+            raise ControllerError("REPLAYED_RECEIPT", "Verification argv was already recorded for this cycle.")
+        batch, projected = _admitted_receipt_events(projection, old_events, source, receipt_digest, source["claims"])
+        return _append_locked(
+            paths, policy, old_events, projected, batch,
+            {receipt_digest: source_bytes, stdout_digest: completed.stdout, stderr_digest: completed.stderr},
+        )
+
+
+def import_sol_receipt(repository: Path, execution_id: str, raw: bytes) -> dict[str, object]:
+    """Import exact canonical Task 7 audit bytes; this is never approval authority."""
+    try:
+        value = contract.strict_json_loads(raw.decode("utf-8", errors="strict"))
+        task7_bytes = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    except (UnicodeError, ValueError, contract.ContractError) as error:
+        raise ControllerError("INVALID_SOL_RECEIPT", "Sol receipt must be canonical Task 7 JSON.") from error
+    if not isinstance(value, dict) or task7_bytes != raw:
+        raise ControllerError("INVALID_SOL_RECEIPT", "Sol receipt must preserve exact Task 7 bytes.")
+    raw_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    receipt_type = value.get("receipt_type")
+    expected_fields = {
+        "consultation": frozenset({"authority_snapshot_digest", "binding", "disposition", "execution_id", "input_digest", "invocation_id", "issued_at_unix", "issuer_skill", "issuer_version", "nonce", "output_digest", "receipt_id", "receipt_schema_version", "receipt_type", "scenario_digest"}),
+        "no-consultation": frozenset({"authority_snapshot_digest", "execution_id", "input_digest", "invocation_id", "issued_at_unix", "issuer_skill", "issuer_version", "nonce", "output_digest", "reason_code", "receipt_id", "receipt_schema_version", "receipt_type", "scenario_digest"}),
+    }
+    if receipt_type not in expected_fields or set(value) != expected_fields[receipt_type]:
+        raise ControllerError("INVALID_SOL_RECEIPT", "Sol receipt does not use the closed Task 7 schema.")
+    identity = dict(value)
+    receipt_id = identity.pop("receipt_id")
+    if not isinstance(receipt_id, str) or receipt_id != "RCP-SOL-" + hashlib.sha256(json.dumps(identity, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()[:20].upper():
+        raise ControllerError("INVALID_SOL_RECEIPT", "Sol receipt identity is invalid.")
+    paths = store.resolve_run(repository, execution_id)
+    with store.run_lock(paths.lock):
+        policy, old_events, projection = _load_locked(paths)
+        if any(value[field] != expected for field, expected in (("execution_id", projection.execution_id), ("authority_snapshot_digest", projection.authority_snapshot_digest), ("nonce", policy["receipt_nonce"]))):
+            raise ControllerError("INVALID_SOL_RECEIPT", "Sol receipt identity does not bind this execution.")
+        source = {
+            "authority_snapshot_digest": projection.authority_snapshot_digest, "claims": {},
+            "cycle_id": projection.cycle_id, "evidence_set_digest": projection_evidence_set_digest(projection),
+            "execution_id": projection.execution_id, "input_digest": raw_digest, "issued_at_unix": 0,
+            "issuer_skill": "orchestrate-gpt-pro-sol-advisor", "issuer_version": "1", "nonce": policy["receipt_nonce"],
+            "output_digest": raw_digest, "receipt_id": receipt_id, "receipt_schema_version": 1,
+            "receipt_type": "sol_audit", "requirements_digest": projection.requirements_digest,
+            "snapshot_digest": projection.active_snapshot_digest, "transaction_id": "hotl-sol:" + raw_digest[7:19],
+        }
+        source_bytes = contract.canonical_json_bytes(source)
+        digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+        batch, projected = _admitted_receipt_events(projection, old_events, source, digest, {})
+        return _append_locked(paths, policy, old_events, projected, batch, {digest: source_bytes, raw_digest: raw})
+
+
 def approve_execution(
     repository: Path, execution_id: str, source_bytes: bytes
 ) -> dict[str, object]:
-    """Admit only host-bound or explicitly policy-bound offline approval evidence."""
-    return _import_receipt_boundary(
-        repository,
-        execution_id,
-        source_bytes,
-        expected_type="approval",
-        approval_command=True,
+    """Reject worker-supplied approval assertions at the public boundary.
+
+    Agentic G1 authority is the exact GPT requirements receipt imported through
+    ``import-receipt``. A repository-local JSON assertion cannot prove it came
+    from a non-worker human or host, even if a policy pre-binds its hash.
+    """
+    del repository, execution_id, source_bytes
+    raise ControllerError(
+        "UNTRUSTED_APPROVAL",
+        "approve does not accept worker-created evidence; import an accepted GPT requirements receipt.",
     )
 
 
@@ -2236,6 +2576,15 @@ def verify_execution(repository: Path, execution_id: str) -> dict[str, object]:
 def status_execution(repository: Path, execution_id: str) -> dict[str, object]:
     """Return deterministic status, or a read-only recovery hard stop."""
     paths = store.resolve_run(repository, execution_id)
+    if not paths.root.exists():
+        return {
+            "execution_id": execution_id,
+            "state": "UNINITIALIZED",
+            "event_count": 0,
+            "cycle_id": 0,
+            "allowed_transitions": [],
+            "recovery": {"recovery_required": False, "reasons": []},
+        }
     recovery = store.recovery_status(paths)
     if recovery["recovery_required"]:
         return {

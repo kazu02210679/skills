@@ -260,7 +260,10 @@ REQUIRED_STATE_FIELDS = (
     "nonce_derivation_key",
     "approved_existing_paths",
 )
-OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
+OPTIONAL_STATE_FIELDS: tuple[str, ...] = (
+    "hotl_governance_context",
+    "hotl_governance_context_digest",
+)
 PRO_CLASS_MODEL_LABEL = "GPT-5.6 Sol"
 PRO_CLASS_REASONING_LABEL = "Pro"
 PRO_CLASS_PLAN_LABELS = frozenset({"Pro", "Business", "Enterprise"})
@@ -1764,6 +1767,20 @@ def _validate_state_fields(
             errors.append(
                 f"{name}.approved_existing_paths: must be sorted unique safe repository-relative paths"
             )
+    context = state.get("hotl_governance_context")
+    context_digest = state.get("hotl_governance_context_digest")
+    if (context is None) != (context_digest is None):
+        errors.append(f"{name}.hotl_governance_context: context and digest must be present together")
+    if context is not None:
+        context_fields = {
+            "artifact_digest", "artifact_type", "authority_snapshot_digest", "cycle_id",
+            "execution_id", "policy_digest", "receipt_nonce", "requirements_digest",
+            "schema_version", "snapshot_digest",
+        }
+        if not isinstance(context, dict) or set(context) != context_fields:
+            errors.append(f"{name}.hotl_governance_context: must use the closed HOTL context schema")
+        if not isinstance(context_digest, str) or not DIGEST_PATTERN.fullmatch(context_digest):
+            errors.append(f"{name}.hotl_governance_context_digest: must be a lowercase sha256 digest")
     blocker_fingerprints = state.get("blocker_fingerprints")
     if "blocker_fingerprints" in state and (
         not isinstance(blocker_fingerprints, list)

@@ -1137,6 +1137,15 @@ If context files did not intentionally change, omit them from `git add`.
 
 ## Final Protocol Verification
 
+### Task 10 governance corrections
+
+G1 consumes the accepted GPT requirements receipt; G2/G3 receipts are created
+only by `record-implementation` and shell-free, policy-frozen
+`run-verification`; G4 also requires an exact Task 7 Sol audit receipt. A
+HOTL context is an explicit GPT initialization input, never authority. An
+absent run is `UNINITIALIZED`; a damaged run is successor-only. Completion
+requires code and test in one change, and public JSON rejects lone surrogates.
+
 Before implementation in combined mode:
 
 1. Observe `get_setup_status`, `get_preferences`, and the exact `sol_advisor_advisor` role in a fresh Codex task.

@@ -20,6 +20,10 @@ COMMANDS = (
     "record",
     "approve",
     "import-receipt",
+    "record-implementation",
+    "run-verification",
+    "import-sol-receipt",
+    "export-governance-context",
     "evaluate",
     "project",
     "verify-log",
@@ -68,6 +72,23 @@ def _parser() -> argparse.ArgumentParser:
     receipt = subparsers.add_parser("import-receipt", add_help=False)
     _run_arguments(receipt)
     receipt.add_argument("--receipt", required=True)
+
+    implementation = subparsers.add_parser("record-implementation", add_help=False)
+    _run_arguments(implementation)
+    implementation.add_argument("--manifest", required=True)
+    implementation.add_argument("--report", required=True)
+
+    verification = subparsers.add_parser("run-verification", add_help=False)
+    _run_arguments(verification)
+    verification.add_argument("--argv", required=True)
+
+    sol = subparsers.add_parser("import-sol-receipt", add_help=False)
+    _run_arguments(sol)
+    sol.add_argument("--receipt", required=True)
+
+    context = subparsers.add_parser("export-governance-context", add_help=False)
+    _run_arguments(context)
+    context.add_argument("--output", required=True)
 
     evaluate = subparsers.add_parser("evaluate", add_help=False)
     _run_arguments(evaluate)
@@ -152,6 +173,8 @@ def _record_artifacts(repository: Path, event: dict[str, object]) -> dict[str, b
 
 def _next_commands(status: dict[str, object]) -> list[str]:
     state = status["state"]
+    if state == "UNINITIALIZED":
+        return ["init"]
     if state == controller.State.RECOVERY_REQUIRED.value or state in {
         member.value for member in controller.TERMINAL_STATES
     }:
@@ -205,6 +228,27 @@ def _dispatch(arguments: argparse.Namespace) -> dict[str, object]:
         return controller.import_receipt(
             repository, arguments.execution, _read_bytes(arguments.receipt)
         )
+    if command == "record-implementation":
+        return controller.record_implementation(
+            repository,
+            arguments.execution,
+            _read_bytes(arguments.manifest),
+            _read_bytes(arguments.report),
+        )
+    if command == "run-verification":
+        return controller.run_verification(
+            repository, arguments.execution, _read_bytes(arguments.argv)
+        )
+    if command == "import-sol-receipt":
+        return controller.import_sol_receipt(repository, arguments.execution, _read_bytes(arguments.receipt))
+    if command == "export-governance-context":
+        context = controller.export_governance_context(repository, arguments.execution)
+        payload = contract.canonical_json_bytes(context)
+        try:
+            Path(arguments.output).write_bytes(payload)
+        except OSError as error:
+            raise controller.ControllerError("OUTPUT_WRITE_ERROR", "Could not write governance context artifact.") from error
+        return {"context_file_digest": "sha256:" + hashlib.sha256(payload).hexdigest()}
     if command == "evaluate":
         return controller.commit_transition(
             repository, arguments.execution, arguments.gate

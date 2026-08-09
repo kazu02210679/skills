@@ -58,6 +58,7 @@ RECEIPT_TYPE_ISSUERS = MappingProxyType({
     "material_change": frozenset({"gpt-pro-codex-loop"}),
     "stop": frozenset({"gpt-pro-codex-loop"}),
     "lineage": frozenset({"hotl-governance-lineage"}),
+    "sol_audit": frozenset({"orchestrate-gpt-pro-sol-advisor"}),
 })
 TRANSITION_DECISIONS = frozenset(
     {
@@ -184,7 +185,11 @@ def strict_json_loads(raw: str) -> object:
 
 
 def _validate_json_tree(value: object) -> None:
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise ContractError("INVALID_JSON", "JSON strings must not contain lone Unicode surrogates.")
         return
     if isinstance(value, float):
         raise ContractError("FLOAT_FORBIDDEN", "Floating-point values are forbidden.")
@@ -196,6 +201,8 @@ def _validate_json_tree(value: object) -> None:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ContractError("NON_STRING_KEY", "JSON object keys must be strings.")
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in key):
+                raise ContractError("INVALID_JSON", "JSON keys must not contain lone Unicode surrogates.")
             _validate_json_tree(item)
         return
     raise ContractError("INVALID_JSON_VALUE", f"Unsupported JSON value: {type(value).__name__}")

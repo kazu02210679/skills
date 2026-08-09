@@ -42,10 +42,10 @@ predicate emits no transition.
 
 | Gate | From | Required predicate | To |
 | --- | --- | --- | --- |
-| G1 | REQUIREMENTS | active frozen requirements plus current `requirements` and `approval` receipts from `gpt-pro-codex-loop`, bound to the policy authority and requirements digest | IMPLEMENT |
-| G2 | IMPLEMENT | implementation links exist and a current `implementation` receipt from `codex` binds authority, requirements, snapshot, evidence set, and cycle | LOCAL_VERIFY |
-| G3 | LOCAL_VERIFY | exact typed current-cycle local evidence exists and a current `verification` receipt from `hotl-local-verifier` binds the same authority, requirements, snapshot, evidence set, and cycle | SEMANTIC_REVIEW |
-| G4 | SEMANTIC_REVIEW | a current accepted review backed by a current `semantic_review` receipt, a current `final` receipt from `gpt-pro-codex-loop`, and complete active-requirement coverage | COMPLETE |
+| G1 | REQUIREMENTS | active frozen requirements plus the exact accepted GPT Pro `requirements` receipt, bound to policy authority and requirements digest | IMPLEMENT |
+| G2 | IMPLEMENT | controller-owned `record-implementation` receipt binds a re-read change manifest, worker report, base identity, snapshot, requirements, code/test/change graph, and exact artifact digests | LOCAL_VERIFY |
+| G3 | LOCAL_VERIFY | exact current-cycle local evidence plus controller-owned zero-exit receipts for every policy-frozen canonical argv, each executed with no shell | SEMANTIC_REVIEW |
+| G4 | SEMANTIC_REVIEW | current accepted review, GPT Pro final receipt, exact Task 7 Sol consultation/disposition or no-consultation audit receipt, and complete active-requirement coverage | COMPLETE |
 
 Only `evaluate` may advance a gate. `record` and `import-receipt` append validated evidence but leave state unchanged. A failed predicate emits no transition; it never creates an implicit repair path.
 
@@ -82,9 +82,12 @@ closed projection:
 
 The type-to-issuer allowlist is exact: `requirements`, `approval`,
 `semantic_review`, `final`, `material_change`, and `stop` are issued by
-`gpt-pro-codex-loop`; `implementation` by `codex`; `verification` by
-`hotl-local-verifier`; and `lineage` by `hotl-governance-lineage`.
-Requirements and approval receipts bind authority and requirements only.
+`gpt-pro-codex-loop`; controller-owned `implementation` by `codex` and
+`verification` by `hotl-local-verifier`; `sol_audit` by
+`orchestrate-gpt-pro-sol-advisor`; and `lineage` by `hotl-governance-lineage`.
+Agentic G1 uses the requirements receipt as its approval boundary; `approve`
+fails closed unless a non-worker-writable provider exists. Requirements and
+approval receipts bind authority and requirements only.
 Implementation, verification, review, and final receipts bind authority,
 requirements, snapshot, evidence set, and cycle. Material-change and stop
 receipts also bind the evidence set and cycle, while their snapshot is optional
@@ -159,7 +162,7 @@ Node IDs are execution-local and typed (`REQ-`, `CODE-`, `TEST-`, `CMD-`, `EVID-
 
 ## Completion predicate
 
-For every active requirement, require an active code node that implements it, an active test node that verifies it, and a command that executes the test and produces valid current evidence proving it. Require an accepted review that reviews the requirement and is bound to the current evidence set. Require the active code and test to be included in an active change.
+For every active requirement, require active code that implements it and active test that verifies it in the *same* active change, plus a command that executes the test and produces valid current evidence proving it. Require an accepted review bound to the current evidence set.
 
 For a bound outer protocol, run the GPT Pro controller's `final-verify`, export its final governance receipt, import that receipt into HOTL, and only then evaluate G4. G4 may commit only when all active requirements meet this predicate and no unresolved findings remain. After `COMPLETE`, run `verify-log` to revalidate the event chain, witness, projection, and artifact integrity.
 
@@ -175,7 +178,7 @@ When code, tests, or the active snapshot change, append `evidence_invalidated` a
 
 Artifact references are repository-relative canonical POSIX paths. Reject absolute paths, empty paths, `.` or `..` segments, NUL, repository escapes, symlink/reparse-point escapes, and non-canonical aliases. Bind every artifact reference to a SHA-256 digest. Treat historical observations as immutable even when the current mutable file later changes.
 
-Canonical JSON uses UTF-8, sorted object keys, no BOM, finite integers only, and no duplicate or unknown fields. Timestamps, display labels, and diagnostics cannot affect transitions or replay.
+Canonical JSON uses UTF-8, sorted object keys, no BOM, finite integers only, no lone Unicode surrogates, and no duplicate or unknown fields. Timestamps, display labels, and diagnostics cannot affect transitions or replay.
 
 ## Threat model
 

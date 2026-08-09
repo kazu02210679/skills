@@ -22,7 +22,7 @@ SHA-256 digest of the exact canonical persisted `requirements.json` bytes,
 including the terminal LF. HOTL can initialize from that exact artifact while
 retaining its closed list of typed requirement IDs.
 
-For HOTL-bound completion, preserve this exact ordering:
+For an explicit HOTL-bound run, initialize GPT with the exact deterministic HOTL governance-context artifact; it binds execution, policy, authority, snapshot, nonce, and digest but grants no authority. The accepted requirements receipt is the GPT-bound G1 approval boundary. Preserve this completion ordering:
 `final-verify` -> export the final receipt -> import the receipt into HOTL ->
 evaluate G4. Receipt export does not authorize commits, pushes, pull requests,
 deployments, requirements changes, or other external actions. Standalone use

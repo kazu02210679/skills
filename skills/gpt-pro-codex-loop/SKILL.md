@@ -27,10 +27,10 @@ Use `scripts/gpc_loop.py` for the normal loop. Run `status` before each mutation
 python skills/gpt-pro-codex-loop/scripts/gpc_loop.py inspect-init --repo REPOSITORY --task TASK --write-approval-manifest ..\REPOSITORY-TASK-approved-existing-paths.json
 ```
 
-Review the complete manifest and obtain explicit user approval. Manifest generation is inspection, not approval. Then write the bounded request and repository-context inputs and initialize with the exact approved manifest:
+Review the manifest and obtain explicit user approval. Then initialize with bounded inputs and the approved manifest. For HOTL, pass only HOTL's exact `--governance-context`; it binds identity, not authority:
 
 ```powershell
-python skills/gpt-pro-codex-loop/scripts/gpc_loop.py init --repo REPOSITORY --task TASK --request REQUEST.md --repository-context CONTEXT.md --model-policy PRO_CLASS --approved-existing-path-manifest ..\REPOSITORY-TASK-approved-existing-paths.json
+python skills/gpt-pro-codex-loop/scripts/gpc_loop.py init --repo REPOSITORY --task TASK --request REQUEST.md --repository-context CONTEXT.md --model-policy PRO_CLASS --approved-existing-path-manifest ..\REPOSITORY-TASK-approved-existing-paths.json [--governance-context HOTL-CONTEXT.json]
 ```
 
 For a small set, repeat `--approved-existing-path PATH` instead. Never combine per-path approval with `--approved-existing-path-manifest`. Init re-inspects under its lock, so a stale, changed, mismatched, malformed, or non-canonical manifest fails before state publication. `PREFLIGHT_APPROVAL_REQUIRED` and manifest errors return at most 20 preview paths plus total/omitted counts, the set digest, and JSON argv for generating a fresh manifest and retrying.
@@ -64,13 +64,11 @@ python skills/gpt-pro-codex-loop/scripts/gpc_loop.py export-governance-receipt -
 python skills/gpt-pro-codex-loop/scripts/gpc_loop.py export-governance-receipt --repo REPOSITORY --task TASK --type final
 ```
 
-The requirements receipt deliberately carries two distinct digests.
+For agentic HOTL, the accepted requirements receipt is G1 authority; its two digests differ.
 `output_digest` identifies the semantic requirements transition output
 (`active_requirements_digest`); `requirements_digest` identifies the exact
 canonical `requirements.json` artifact bytes, including their terminal LF.
-An outer HOTL run can bind that artifact digest while preserving the GPT Pro
-transition provenance. This export interface is optional: standalone GPT Pro
-controller behavior is unchanged.
+An explicit valid HOTL context binds identity in governance claims, grants no authority, and is absent for standalone runs.
 
 Every issued requirements receipt is also retained append-only under
 `governance-receipt-history/`; the fixed requirements receipt path is only the

@@ -15,14 +15,17 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "skills" / "hotl-governance" / "scripts"
 GPT_SCRIPTS = ROOT / "skills" / "gpt-pro-codex-loop" / "scripts"
+SOL_SCRIPTS = ROOT / "skills" / "orchestrate-gpt-pro-sol-advisor" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(GPT_SCRIPTS))
+sys.path.insert(0, str(SOL_SCRIPTS))
 
 import gpc_loop_controller as gpt_controller
 import hotl_contract as contract
 import hotl_controller as controller
 import hotl_governance as cli
 import hotl_store as store
+import governance_receipt as sol_receipts
 
 
 EXECUTION = "EXEC-C6EBD51734DE"
@@ -305,14 +308,6 @@ class HotlCliTests(unittest.TestCase):
         self.authority_snapshot_digest = str(receipt["authority_snapshot_digest"])
         self.receipt_nonce = str(receipt["nonce"])
         self.gpt_binding = dict(receipt["binding"])
-        host_approval_evidence = {
-            "approval_schema_version": 1,
-            "authority_snapshot_digest": self.authority_snapshot_digest,
-            "decision": "approve",
-            "execution_id": self.execution,
-            "host_id": "hotl-e2e-host",
-            "target_digest": receipt["requirements_digest"],
-        }
         requirements = self._write(
             "gpt-requirements.json",
             {
@@ -331,10 +326,9 @@ class HotlCliTests(unittest.TestCase):
                 "authority_snapshot_digest": self.authority_snapshot_digest,
                 "cycle_id": 1,
                 "execution_id": self.execution,
-                "host_approval_evidence_digest": contract.canonical_digest(
-                    host_approval_evidence
-                ),
+                "host_approval_evidence_digest": None,
                 "receipt_nonce": self.receipt_nonce,
+                "required_verification_argv": [[sys.executable, "-c", "print('verified')"]],
                 "schema_version": 1,
             },
         )
@@ -407,7 +401,6 @@ class HotlCliTests(unittest.TestCase):
             ]
         )
         self.assertTrue(imported["ok"], imported)
-        self.host_approval_evidence = host_approval_evidence
         return receipt
 
     def _init(
@@ -415,23 +408,27 @@ class HotlCliTests(unittest.TestCase):
         *,
         approval_mode: str = "agentic",
         host_approval_evidence_digest: str | None = None,
+        required_verification_argv: list[list[str]] | None = None,
         execution: str = EXECUTION,
     ) -> dict[str, object]:
         requirements = self._write(
             f"requirements-{execution}.json", {"requirements": ["REQ-1"]}
         )
+        policy_value = {
+            "active_snapshot_digest": SNAPSHOT,
+            "approval_mode": approval_mode,
+            "authority_snapshot_digest": AUTHORITY,
+            "cycle_id": 1,
+            "execution_id": execution,
+            "host_approval_evidence_digest": host_approval_evidence_digest,
+            "receipt_nonce": NONCE,
+            "schema_version": 1,
+        }
+        if required_verification_argv is not None:
+            policy_value["required_verification_argv"] = required_verification_argv
         policy = self._write(
             f"policy-{execution}.json",
-            {
-                "active_snapshot_digest": SNAPSHOT,
-                "approval_mode": approval_mode,
-                "authority_snapshot_digest": AUTHORITY,
-                "cycle_id": 1,
-                "execution_id": execution,
-                "host_approval_evidence_digest": host_approval_evidence_digest,
-                "receipt_nonce": NONCE,
-                "schema_version": 1,
-            },
+            policy_value,
         )
         return cli.main_json(
             [
@@ -594,65 +591,18 @@ class HotlCliTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
 
     def _reach_semantic_review(self) -> None:
-        self._init()
+        self._init(required_verification_argv=[[sys.executable, "-c", "print('verified')"]])
         self.assertTrue(
             self._import(
                 self._receipt("requirements", "RCP-REQ-SETUP"),
                 "setup-requirements.json",
             )["ok"]
         )
-        self.assertTrue(
-            self._import(
-                self._receipt("approval", "RCP-APP-SETUP"),
-                "setup-approval.json",
-            )["ok"]
-        )
         self.assertTrue(self._evaluate("G1")["ok"])
-        implementation_claims = {
-            "edges": [
-                {"edge": "implements", "source_id": "CODE-1", "target_id": "REQ-1"},
-                {"edge": "verifies", "source_id": "TEST-1", "target_id": "REQ-1"},
-                {"edge": "executes", "source_id": "CMD-1", "target_id": "TEST-1"},
-                {"edge": "produces", "source_id": "CMD-1", "target_id": "EVID-1"},
-                {"edge": "included_in", "source_id": "CODE-1", "target_id": "CHG-1"},
-                {"edge": "included_in", "source_id": "TEST-1", "target_id": "CHG-1"},
-            ],
-            "nodes": [
-                {"node_id": "CHG-1", "node_type": "change"},
-                {"node_id": "CMD-1", "node_type": "command"},
-                {"node_id": "CODE-1", "node_type": "code"},
-                {"node_id": "EVID-1", "node_type": "evidence"},
-                {"node_id": "TEST-1", "node_type": "test"},
-            ],
-        }
-        self.assertTrue(
-            self._import(
-                self._receipt(
-                    "implementation", "RCP-IMPL-SETUP", claims=implementation_claims
-                ),
-                "setup-implementation.json",
-            )["ok"]
-        )
+        self._record_controller_implementation()
         self.assertTrue(self._evaluate("G2")["ok"])
         self._record_proof()
-        self.assertTrue(
-            self._import(
-                self._receipt(
-                    "verification",
-                    "RCP-VERIFY-SETUP",
-                    claims={
-                        "edges": [
-                            {
-                                "edge": "proves",
-                                "source_id": "EVID-1",
-                                "target_id": "TEST-1",
-                            }
-                        ]
-                    },
-                ),
-                "setup-verification.json",
-            )["ok"]
-        )
+        self._run_current_verification()
         self.assertTrue(self._evaluate("G3")["ok"])
 
     @staticmethod
@@ -713,6 +663,66 @@ class HotlCliTests(unittest.TestCase):
             "nodes": sorted(nodes, key=lambda node: str(node["node_id"])),
         }
 
+    def _record_controller_implementation(self, *, evidence_id: str = "EVID-1") -> None:
+        """Use the controller-owned manifest ingress, never a worker receipt."""
+        code = self.repository / "example.py"
+        test = self.repository / "test_example.py"
+        code.write_bytes(b"value = 1\n")
+        test.write_bytes(b"assert True\n")
+        projection = self._projection()
+        claims = self._implementation_claims(evidence_id=evidence_id)
+        if evidence_id != "EVID-1":
+            claims = {
+                "nodes": [
+                    {"node_id": "CHG-2", "node_type": "change"},
+                    {"node_id": "CMD-2", "node_type": "command"},
+                    {"node_id": "CODE-2", "node_type": "code"},
+                    {"node_id": evidence_id, "node_type": "evidence"},
+                    {"node_id": "TEST-2", "node_type": "test"},
+                ],
+                "edges": [
+                    {"edge": "implements", "source_id": "CODE-2", "target_id": "REQ-1"},
+                    {"edge": "verifies", "source_id": "TEST-2", "target_id": "REQ-1"},
+                    {"edge": "executes", "source_id": "CMD-2", "target_id": "TEST-1"},
+                    {"edge": "produces", "source_id": "CMD-2", "target_id": evidence_id},
+                    {"edge": "included_in", "source_id": "CODE-2", "target_id": "CHG-2"},
+                    {"edge": "included_in", "source_id": "TEST-2", "target_id": "CHG-2"},
+                ],
+            }
+        manifest = {
+            "artifacts": [
+                {"path": "example.py", "sha256": "sha256:" + hashlib.sha256(code.read_bytes()).hexdigest()},
+                {"path": "test_example.py", "sha256": "sha256:" + hashlib.sha256(test.read_bytes()).hexdigest()},
+            ],
+            "base_snapshot_digest": SNAPSHOT,
+            "edges": claims["edges"],
+            "nodes": claims["nodes"],
+            "requirements_digest": projection["requirements_digest"],
+            "schema_version": 1,
+            "snapshot_digest": projection["active_snapshot_digest"],
+        }
+        report = {
+            "base_snapshot_digest": SNAPSHOT,
+            "manifest_digest": contract.canonical_digest(manifest),
+            "requirements_digest": projection["requirements_digest"],
+            "schema_version": 1,
+            "snapshot_digest": projection["active_snapshot_digest"],
+        }
+        result = cli.main_json([
+            "record-implementation", "--repo", str(self.repository), "--execution", self.execution,
+            "--manifest", str(self._write("controller-implementation-manifest.json", manifest)),
+            "--report", str(self._write("controller-implementation-report.json", report)),
+        ])
+        self.assertTrue(result["ok"], result)
+
+    def _run_current_verification(self) -> None:
+        argv = [sys.executable, "-c", "print('verified')"]
+        result = cli.main_json([
+            "run-verification", "--repo", str(self.repository), "--execution", self.execution,
+            "--argv", str(self._write("controller-verification-argv.json", argv)),
+        ])
+        self.assertTrue(result["ok"], result)
+
     def _host_approval_receipt(self) -> dict[str, object]:
         projection = self._projection()
         evidence = self.host_approval_evidence
@@ -749,32 +759,9 @@ class HotlCliTests(unittest.TestCase):
         self.assertIsNone(requirements_receipt["snapshot_digest"])
         self.assertIsNone(requirements_receipt["evidence_set_digest"])
         self.assertIsNone(requirements_receipt["cycle_id"])
-        approval_path = self._write(
-            "e2e-host-approval.json", self._host_approval_receipt()
-        )
-        approval = cli.main_json(
-            [
-                "approve",
-                "--repo",
-                str(self.repository),
-                "--execution",
-                self.execution,
-                "--evidence",
-                str(approval_path),
-            ]
-        )
-        self.assertTrue(approval["ok"], approval)
         gate_one = self._evaluate("G1")
         self.assertTrue(gate_one["ok"], gate_one)
-        implementation = self._import(
-            self._receipt(
-                "implementation",
-                "RCP-E2E-IMPLEMENTATION",
-                claims=self._implementation_claims(),
-            ),
-            "e2e-implementation.json",
-        )
-        self.assertTrue(implementation["ok"], implementation)
+        self._record_controller_implementation()
         gate_two = self._evaluate("G2")
         self.assertTrue(gate_two["ok"], gate_two)
         return requirements_receipt
@@ -818,55 +805,33 @@ class HotlCliTests(unittest.TestCase):
             review_bytes, f"{evidence_id.lower()}-gpt-review.json"
         )
         self.assertEqual(review, imported_review)
-        review_id = imported_review["claims"]["review_id"]
-        support = self._import(
-            self._receipt(
-                "implementation",
-                f"RCP-E2E-SUPPORT-{evidence_id}",
-                claims={
-                    "edges": [
-                        {
-                            "edge": "supports",
-                            "source_id": evidence_id,
-                            "target_id": review_id,
-                        }
-                    ],
-                    "nodes": [],
-                },
-            ),
-            f"{evidence_id.lower()}-review-support.json",
-        )
-        self.assertTrue(support["ok"], support)
         imported_final = self._import_receipt_bytes(
             final_bytes, f"{evidence_id.lower()}-gpt-final.json"
         )
         self.assertEqual(final, imported_final)
+        scenario = {
+            "authority_snapshot_digest": self.authority_snapshot_digest,
+            "execution_id": self.execution,
+            "input_digest": str(final["input_digest"]),
+            "intent": "gpt-pro-only",
+            "invocation_id": "INV-" + evidence_id,
+            "nonce": self.receipt_nonce,
+            "output_digest": str(final["output_digest"]),
+        }
+        sol = sol_receipts.governance_receipt(scenario, sol_receipts.route(scenario), None)
+        path = self.inputs / f"{evidence_id.lower()}-sol.json"
+        path.write_bytes(json.dumps(sol, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        result = cli.main_json(["import-sol-receipt", "--repo", str(self.repository), "--execution", self.execution, "--receipt", str(path)])
+        self.assertTrue(result["ok"], result)
 
     def _record_current_verification(
         self,
         *,
         evidence_id: str = "EVID-1",
-        receipt_id: str = "RCP-E2E-VERIFICATION",
         proof_name: str = "proof.txt",
     ) -> None:
         self._record_proof(evidence_id=evidence_id, proof_name=proof_name)
-        verification = self._import(
-            self._receipt(
-                "verification",
-                receipt_id,
-                claims={
-                    "edges": [
-                        {
-                            "edge": "proves",
-                            "source_id": evidence_id,
-                            "target_id": "TEST-1",
-                        }
-                    ]
-                },
-            ),
-            f"{evidence_id.lower()}-verification.json",
-        )
-        self.assertTrue(verification["ok"], verification)
+        self._run_current_verification()
 
     def _imported_source_receipts(self) -> list[dict[str, object]]:
         paths = store.resolve_run(self.repository, self.execution)
@@ -883,16 +848,13 @@ class HotlCliTests(unittest.TestCase):
 
     def _assert_authoritative_privileged_ingress(self) -> None:
         sources = self._imported_source_receipts()
-        approval = next(
-            source for source in sources if source["receipt_type"] == "approval"
-        )
         review = next(
             source
             for source in sources
             if source["receipt_type"] == "semantic_review"
         )
         final = next(source for source in sources if source["receipt_type"] == "final")
-        self.assertEqual("hotl-host-approval", approval["issuer_skill"])
+        self.assertFalse(any(source["receipt_type"] == "approval" for source in sources))
         self.assertEqual(
             "gpc-loop-hotl-e2e:review-01", review["transaction_id"]
         )
@@ -903,15 +865,9 @@ class HotlCliTests(unittest.TestCase):
     def test_stable_command_set_and_parser_errors_never_raise_system_exit(self) -> None:
         self.assertEqual(
             (
-                "init",
-                "status",
-                "record",
-                "approve",
-                "import-receipt",
-                "evaluate",
-                "project",
-                "verify-log",
-                "start-successor",
+                "init", "status", "record", "approve", "import-receipt",
+                "record-implementation", "run-verification", "import-sol-receipt",
+                "export-governance-context", "evaluate", "project", "verify-log", "start-successor",
             ),
             cli.COMMANDS,
         )
@@ -1177,6 +1133,38 @@ class HotlCliTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(["import-receipt"], result["result"]["next_commands"])
 
+    def test_absent_execution_status_advertises_init_not_recovery(self) -> None:
+        """Changing absence handling back to recovery must make this fail."""
+        result = cli.main_json(
+            ["status", "--repo", str(self.repository), "--execution", self.execution]
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("UNINITIALIZED", result["result"]["state"])
+        self.assertEqual(["init"], result["result"]["next_commands"])
+
+    def test_export_governance_context_writes_a_closed_execution_bound_artifact(self) -> None:
+        """Removing controller export must make the explicit context command unavailable."""
+        self._init()
+        output = self.inputs / "hotl-governance-context.json"
+        result = cli.main_json([
+            "export-governance-context", "--repo", str(self.repository),
+            "--execution", self.execution, "--output", str(output),
+        ])
+        self.assertTrue(result["ok"], result)
+        context = contract.strict_json_loads(output.read_text(encoding="utf-8"))
+        self.assertIsInstance(context, dict)
+        assert isinstance(context, dict)
+        body = {key: context[key] for key in context if key != "artifact_digest"}
+        self.assertEqual("hotl-governance-context", context["artifact_type"])
+        self.assertEqual(self.execution, context["execution_id"])
+        self.assertEqual(
+            contract.canonical_digest(body), context["artifact_digest"]
+        )
+        self.assertEqual(
+            "sha256:" + hashlib.sha256(output.read_bytes()).hexdigest(),
+            result["result"]["context_file_digest"],
+        )
+
     def test_status_advertises_approve_only_for_a_configured_safe_channel(self) -> None:
         self._init(approval_mode="offline_manual")
         result = cli.main_json(
@@ -1439,7 +1427,7 @@ class HotlCliTests(unittest.TestCase):
             ]
         )
         self.assertFalse(result["ok"])
-        self.assertEqual("UNTRUSTED_LOCAL_APPROVAL", result["error"]["code"])
+        self.assertEqual("UNTRUSTED_APPROVAL", result["error"]["code"])
 
     def test_approve_requires_host_or_explicit_manual_channel_not_gpt_import(self) -> None:
         self._init()
@@ -1458,7 +1446,7 @@ class HotlCliTests(unittest.TestCase):
         )
         self.assertFalse(approval_result["ok"])
         self.assertEqual(
-            "APPROVAL_EVIDENCE_REQUIRED", approval_result["error"]["code"]
+            "UNTRUSTED_APPROVAL", approval_result["error"]["code"]
         )
         import_result = cli.main_json(
             [
@@ -1473,7 +1461,7 @@ class HotlCliTests(unittest.TestCase):
         )
         self.assertTrue(import_result["ok"], import_result)
 
-    def test_host_approval_requires_frozen_authority_and_target_evidence_digest(self) -> None:
+    def test_approve_rejects_worker_created_host_evidence_in_agentic_mode(self) -> None:
         target = contract.canonical_digest({"requirements": ["REQ-1"]})
         evidence = {
             "approval_schema_version": 1,
@@ -1492,25 +1480,7 @@ class HotlCliTests(unittest.TestCase):
             issuer="hotl-host-approval",
             claims={"approval_evidence": evidence},
         )
-        bad = dict(receipt) | {
-            "claims": {
-                "approval_evidence": evidence
-                | {"target_digest": "sha256:" + "d" * 64}
-            }
-        }
         rejected = cli.main_json(
-            [
-                "approve",
-                "--repo",
-                str(self.repository),
-                "--execution",
-                self.execution,
-                "--evidence",
-                str(self._write("host-bad.json", bad)),
-            ]
-        )
-        self.assertEqual("HOST_APPROVAL_MISMATCH", rejected["error"]["code"])
-        accepted = cli.main_json(
             [
                 "approve",
                 "--repo",
@@ -1521,7 +1491,134 @@ class HotlCliTests(unittest.TestCase):
                 str(self._write("host-good.json", receipt)),
             ]
         )
-        self.assertTrue(accepted["ok"], accepted)
+        self.assertFalse(rejected["ok"], rejected)
+        self.assertEqual("UNTRUSTED_APPROVAL", rejected["error"]["code"])
+
+    def test_public_receipt_import_cannot_mint_worker_verification_authority(self) -> None:
+        """Replacing the closed ingress check with generic import must fail."""
+        self._init()
+        self.assertTrue(self._import(self._receipt("requirements", "RCP-REQ-CLOSED"))["ok"])
+        self.assertTrue(self._evaluate("G1")["ok"])
+        forged = self._import(
+            self._receipt(
+                "verification",
+                "RCP-FORGED-VERIFY",
+                claims={"edges": []},
+            ),
+            "forged-verification.json",
+        )
+        self.assertFalse(forged["ok"], forged)
+        self.assertEqual("PRIVILEGED_RECEIPT_REQUIRES_CONTROLLER", forged["error"]["code"])
+
+    def test_controller_records_content_addressed_implementation_manifest_and_report(self) -> None:
+        """Replacing controller ingress with public receipt import must fail this gate."""
+        self._init()
+        self.assertTrue(self._import(self._receipt("requirements", "RCP-REQ-IMPL"))["ok"])
+        self.assertTrue(self._evaluate("G1")["ok"])
+        code = self.repository / "example.py"
+        test = self.repository / "test_example.py"
+        code.write_bytes(b"value = 1\n")
+        test.write_bytes(b"assert True\n")
+        code_digest = "sha256:" + hashlib.sha256(code.read_bytes()).hexdigest()
+        test_digest = "sha256:" + hashlib.sha256(test.read_bytes()).hexdigest()
+        projection = self._projection()
+        manifest = {
+            "artifacts": [
+                {"path": "example.py", "sha256": code_digest},
+                {"path": "test_example.py", "sha256": test_digest},
+            ],
+            "base_snapshot_digest": SNAPSHOT,
+            "edges": [
+                {"edge": "implements", "source_id": "CODE-1", "target_id": "REQ-1"},
+                {"edge": "verifies", "source_id": "TEST-1", "target_id": "REQ-1"},
+                {"edge": "included_in", "source_id": "CODE-1", "target_id": "CHG-1"},
+                {"edge": "included_in", "source_id": "TEST-1", "target_id": "CHG-1"},
+            ],
+            "nodes": [
+                {"node_id": "CHG-1", "node_type": "change"},
+                {"node_id": "CODE-1", "node_type": "code"},
+                {"node_id": "TEST-1", "node_type": "test"},
+            ],
+            "requirements_digest": projection["requirements_digest"],
+            "schema_version": 1,
+            "snapshot_digest": SNAPSHOT,
+        }
+        manifest_path = self._write("implementation-manifest.json", manifest)
+        report_path = self._write(
+            "implementation-report.json",
+            {
+                "base_snapshot_digest": SNAPSHOT,
+                "manifest_digest": contract.canonical_digest(manifest),
+                "requirements_digest": projection["requirements_digest"],
+                "schema_version": 1,
+                "snapshot_digest": SNAPSHOT,
+            },
+        )
+        recorded = cli.main_json(
+            [
+                "record-implementation",
+                "--repo", str(self.repository), "--execution", self.execution,
+                "--manifest", str(manifest_path), "--report", str(report_path),
+            ]
+        )
+        self.assertTrue(recorded["ok"], recorded)
+        self.assertTrue(self._evaluate("G2")["ok"])
+        paths = store.resolve_run(self.repository, self.execution)
+        self.assertEqual(contract.canonical_json_bytes(manifest), (paths.evidence / contract.canonical_digest(manifest)[7:]).read_bytes())
+        self.assertEqual(report_path.read_bytes(), (paths.evidence / contract.canonical_digest(contract.strict_json_loads(report_path.read_text(encoding="utf-8")))[7:]).read_bytes())
+
+    def test_init_freezes_canonical_verification_argv_policy(self) -> None:
+        """Dropping the frozen argv field must make init reject this policy."""
+        requirements = self._write("argv-requirements.json", {"requirements": ["REQ-1"]})
+        policy = self._write(
+            "argv-policy.json",
+            {
+                "active_snapshot_digest": SNAPSHOT,
+                "approval_mode": "agentic",
+                "authority_snapshot_digest": AUTHORITY,
+                "cycle_id": 1,
+                "execution_id": self.execution,
+                "host_approval_evidence_digest": None,
+                "receipt_nonce": NONCE,
+                "required_verification_argv": [[sys.executable, "-c", "print('verified')"]],
+                "schema_version": 1,
+            },
+        )
+        result = cli.main_json(
+            ["init", "--repo", str(self.repository), "--execution", self.execution, "--policy", str(policy), "--requirements", str(requirements)]
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([[sys.executable, "-c", "print('verified')"]], self._projection().get("required_verification_argv"))
+
+    def test_controller_runs_only_exact_frozen_argv_without_a_shell(self) -> None:
+        """Removing controller argv execution must turn this into an argument error."""
+        argv = [sys.executable, "-c", "print('verified')"]
+        self._init(required_verification_argv=[argv])
+        result = cli.main_json(
+            [
+                "run-verification", "--repo", str(self.repository), "--execution", self.execution,
+                "--argv", str(self._write("verify-argv.json", argv)),
+            ]
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("REQUIREMENTS", result["result"]["state"])
+
+    def test_import_sol_receipt_accepts_exact_task7_no_consultation_bytes(self) -> None:
+        """Replacing this closed adapter with generic receipt import must fail."""
+        self._init()
+        scenario = {
+            "authority_snapshot_digest": AUTHORITY, "execution_id": self.execution,
+            "input_digest": SNAPSHOT, "intent": "gpt-pro-only", "invocation_id": "INV-HOTL",
+            "nonce": NONCE, "output_digest": SNAPSHOT,
+        }
+        receipt = sol_receipts.governance_receipt(scenario, sol_receipts.route(scenario), None)
+        receipt_path = self.inputs / "task7-sol.json"
+        receipt_path.write_bytes(json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        result = cli.main_json([
+            "import-sol-receipt", "--repo", str(self.repository), "--execution", self.execution,
+            "--receipt", str(receipt_path),
+        ])
+        self.assertTrue(result["ok"], result)
 
     def test_host_approval_rejects_invalid_provenance_identity_even_when_prebound(self) -> None:
         target = contract.canonical_digest({"requirements": ["REQ-1"]})
@@ -1554,7 +1651,7 @@ class HotlCliTests(unittest.TestCase):
             ]
         )
         self.assertFalse(result["ok"])
-        self.assertEqual("INVALID_HOST_APPROVAL", result["error"]["code"])
+        self.assertEqual("UNTRUSTED_APPROVAL", result["error"]["code"])
 
     def test_offline_manual_approval_is_explicitly_policy_and_target_bound(self) -> None:
         self._init(approval_mode="offline_manual")
@@ -1579,7 +1676,7 @@ class HotlCliTests(unittest.TestCase):
                 str(self._write("offline-bad.json", wrong_target)),
             ]
         )
-        self.assertEqual("REQUIREMENTS_MISMATCH", rejected["error"]["code"])
+        self.assertEqual("UNTRUSTED_APPROVAL", rejected["error"]["code"])
         accepted = cli.main_json(
             [
                 "approve",
@@ -1591,7 +1688,8 @@ class HotlCliTests(unittest.TestCase):
                 str(self._write("offline-good.json", receipt)),
             ]
         )
-        self.assertTrue(accepted["ok"], accepted)
+        self.assertFalse(accepted["ok"], accepted)
+        self.assertEqual("UNTRUSTED_APPROVAL", accepted["error"]["code"])
 
     def test_failed_gate_emits_no_transition(self) -> None:
         self._init()
@@ -1603,43 +1701,18 @@ class HotlCliTests(unittest.TestCase):
         self.assertEqual(before, paths.events.read_bytes())
 
     def test_all_four_gates_complete_only_after_bound_evidence(self) -> None:
-        self._init()
+        self._init(required_verification_argv=[[sys.executable, "-c", "print('verified')"]])
         self.assertTrue(self._import(self._receipt("requirements", "RCP-REQ-1"), "requirements.json")["ok"])
-        self.assertTrue(self._import(self._receipt("approval", "RCP-APP-1"), "approval.json")["ok"])
         self.assertEqual("IMPLEMENT", self._evaluate("G1")["result"]["state"])
-
-        implementation_claims = {
-            "edges": [
-                {"edge": "implements", "source_id": "CODE-1", "target_id": "REQ-1"},
-                {"edge": "verifies", "source_id": "TEST-1", "target_id": "REQ-1"},
-                {"edge": "executes", "source_id": "CMD-1", "target_id": "TEST-1"},
-                {"edge": "produces", "source_id": "CMD-1", "target_id": "EVID-1"},
-                {"edge": "included_in", "source_id": "CODE-1", "target_id": "CHG-1"},
-                {"edge": "included_in", "source_id": "TEST-1", "target_id": "CHG-1"},
-            ],
-            "nodes": [
-                {"node_id": "CHG-1", "node_type": "change"},
-                {"node_id": "CMD-1", "node_type": "command"},
-                {"node_id": "CODE-1", "node_type": "code"},
-                {"node_id": "EVID-1", "node_type": "evidence"},
-                {"node_id": "TEST-1", "node_type": "test"},
-            ],
-        }
-        self.assertTrue(self._import(self._receipt("implementation", "RCP-IMPL-1", claims=implementation_claims), "implementation.json")["ok"])
+        self._record_controller_implementation()
         self.assertEqual("LOCAL_VERIFY", self._evaluate("G2")["result"]["state"])
 
         self._record_proof()
-        verification_claims = {
-            "edges": [
-                {"edge": "proves", "source_id": "EVID-1", "target_id": "TEST-1"}
-            ]
-        }
-        self.assertTrue(self._import(self._receipt("verification", "RCP-VERIFY-1", claims=verification_claims), "verification.json")["ok"])
+        self._run_current_verification()
         self.assertEqual("SEMANTIC_REVIEW", self._evaluate("G3")["result"]["state"])
 
         review_claims = {
             "edges": [
-                {"edge": "supports", "source_id": "EVID-1", "target_id": "REV-1"},
                 {"edge": "reviews", "source_id": "REV-1", "target_id": "REQ-1"},
             ],
             "findings": [],
@@ -1649,6 +1722,12 @@ class HotlCliTests(unittest.TestCase):
         }
         self.assertTrue(self._import(self._receipt("semantic_review", "RCP-REV-1", claims=review_claims), "review.json")["ok"])
         self.assertTrue(self._import(self._receipt("final", "RCP-FINAL-1"), "final.json")["ok"])
+        scenario = {"authority_snapshot_digest": self.authority_snapshot_digest, "execution_id": self.execution, "input_digest": SNAPSHOT, "intent": "gpt-pro-only", "invocation_id": "INV-ALL-GATES", "nonce": self.receipt_nonce, "output_digest": SNAPSHOT}
+        receipt = sol_receipts.governance_receipt(scenario, sol_receipts.route(scenario), None)
+        path = self.inputs / "all-gates-sol.json"
+        path.write_bytes(json.dumps(receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        imported_sol = cli.main_json(["import-sol-receipt", "--repo", str(self.repository), "--execution", self.execution, "--receipt", str(path)])
+        self.assertTrue(imported_sol["ok"], imported_sol)
         result = self._evaluate("G4")
         self.assertTrue(result["ok"], result)
         self.assertEqual("COMPLETE", result["result"]["state"])
@@ -1712,22 +1791,9 @@ class HotlCliTests(unittest.TestCase):
         self.assertFalse(closed_after_change["ok"], closed_after_change)
         self.assertEqual("GATE_FAILED", closed_after_change["error"]["code"])
 
-        replacement_graph = self._import(
-            self._receipt(
-                "implementation",
-                "RCP-E2E-REPLACEMENT-GRAPH",
-                claims=self._implementation_claims(
-                    evidence_id="EVID-2", include_core=False
-                ),
-            ),
-            "e2e-replacement-graph.json",
-        )
-        self.assertTrue(replacement_graph["ok"], replacement_graph)
-        self._record_current_verification(
-            evidence_id="EVID-2",
-            receipt_id="RCP-E2E-REPLACEMENT-VERIFICATION",
-            proof_name="replacement-proof.txt",
-        )
+        self._record_controller_implementation(evidence_id="EVID-2")
+        self._record_proof(evidence_id="EVID-2", proof_name="replacement-proof.txt")
+        self._run_current_verification()
         closed_without_review = self._evaluate("G4")
         self.assertFalse(closed_without_review["ok"], closed_without_review)
         self.assertEqual("GATE_FAILED", closed_without_review["error"]["code"])
@@ -1748,7 +1814,7 @@ class HotlCliTests(unittest.TestCase):
         )
         result = self._import(stale, "stale.json")
         self.assertFalse(result["ok"])
-        self.assertEqual("STALE_RECEIPT", result["error"]["code"])
+        self.assertEqual("PRIVILEGED_RECEIPT_REQUIRES_CONTROLLER", result["error"]["code"])
 
     def test_null_snapshot_terminal_receipts_can_stop_after_snapshot_activation(self) -> None:
         for index, (receipt_type, gate) in enumerate(
@@ -1805,7 +1871,7 @@ class HotlCliTests(unittest.TestCase):
             result = self._import(receipt, "rejected-review.json")
         self.assertTrue(result["ok"], result)
         self.assertEqual(
-            [["receipt_imported", "node_declared", "review_recorded", "finding_recorded"]],
+            [["receipt_imported", "node_declared", "review_recorded", "edge_declared", "finding_recorded"]],
             batches,
         )
         projection = self._projection()
@@ -1979,18 +2045,7 @@ class HotlCliTests(unittest.TestCase):
 
     def test_verify_log_separates_historical_observation_from_integrity(self) -> None:
         self._init()
-        implementation = self._receipt(
-            "implementation",
-            "RCP-IMPL-HISTORY",
-            claims={
-                "edges": [],
-                "nodes": [
-                    {"node_id": "EVID-1", "node_type": "evidence"},
-                    {"node_id": "TEST-1", "node_type": "test"},
-                ],
-            },
-        )
-        self.assertTrue(self._import(implementation, "history-impl.json")["ok"])
+        self._record_controller_implementation()
         self._record_proof()
         controller.activate_snapshot(
             self.repository, self.execution, "sha256:" + "f" * 64

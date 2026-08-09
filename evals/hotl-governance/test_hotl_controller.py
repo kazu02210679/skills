@@ -5,7 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -178,6 +178,7 @@ def fixture_receipt(
         "material_change": "gpt-pro-codex-loop",
         "stop": "gpt-pro-codex-loop",
         "lineage": "hotl-governance-lineage",
+        "sol_audit": "orchestrate-gpt-pro-sol-advisor",
     }
     current_bound = receipt_type not in {"requirements", "approval", "lineage"}
     return fixture_event(
@@ -307,6 +308,9 @@ def projection_bytes(projection: controller.Projection) -> bytes:
     value["gate_evidence"] = {
         gate: list(records) for gate, records in projection.gate_evidence.items()
     }
+    value["required_verification_argv"] = [
+        list(argv) for argv in projection.required_verification_argv
+    ]
     return contract.canonical_json_bytes(value)
 
 
@@ -336,7 +340,7 @@ class ProjectionTests(unittest.TestCase):
                 self.assertEqual(("STOPPED",), controller.allowed_transitions(admitted))
 
     def test_offline_approval_is_gate_eligible_only_in_frozen_manual_mode(self) -> None:
-        for approval_mode, expected in (("agentic", False), ("offline_manual", True)):
+        for approval_mode, expected in (("agentic", True), ("offline_manual", True)):
             with self.subTest(approval_mode=approval_mode):
                 projection = fixture_projection(
                     "REQUIREMENTS", approval_mode=approval_mode
@@ -363,7 +367,8 @@ class ProjectionTests(unittest.TestCase):
                 projection = controller.project_event(projection, approval)
                 self.assertEqual(expected, controller.evaluate_gate(projection, "G1")[0])
 
-    def test_host_approval_is_a_distinct_exact_gate_authority(self) -> None:
+    def test_exact_gpt_requirements_receipt_is_the_agentic_g1_authority(self) -> None:
+        """Restoring a local approval requirement must make this fail."""
         projection = fixture_projection("REQUIREMENTS")
         projection = controller.project_event(
             projection, fixture_node("REQ-1", "requirement")
@@ -374,17 +379,8 @@ class ProjectionTests(unittest.TestCase):
                 projection, "requirements", "RCP-REQ-1", receipt_digest=DIGEST_ONE
             ),
         )
-        projection = controller.project_event(
-            projection,
-            fixture_receipt(
-                projection,
-                "approval",
-                "RCP-HOST-1",
-                issuer_skill="hotl-host-approval",
-                receipt_digest=DIGEST_TWO,
-            ),
-        )
-        self.assertTrue(controller.evaluate_gate(projection, "G1")[0])
+        passed, errors = controller.evaluate_gate(projection, "G1")
+        self.assertTrue(passed, errors)
 
     def test_evidence_event_never_advances_state(self) -> None:
         projection = fixture_projection("REQUIREMENTS")
@@ -784,6 +780,12 @@ class CompletionTests(unittest.TestCase):
                 projection, "final", "RCP-FINAL-1", receipt_digest=DIGEST_THREE
             ),
         )
+        projection = controller.project_event(
+            projection,
+            fixture_receipt(
+                projection, "sol_audit", "RCP-SOL-1", receipt_digest=DIGEST_ONE
+            ),
+        )
         return projection
 
     def test_incomplete_typed_provenance_cannot_satisfy_g4(self) -> None:
@@ -804,6 +806,17 @@ class CompletionTests(unittest.TestCase):
 
         self.assertEqual((), controller.completion_errors(projection))
         self.assertEqual((True, ()), controller.evaluate_gate(projection, "G4"))
+
+    def test_code_and_test_in_independent_changes_do_not_complete_requirement(self) -> None:
+        """Changing the common-change predicate to two independent checks must fail."""
+        projection = self._complete_projection()
+        nodes = dict(projection.nodes) | {"CHG-2": controller.NodeRecord("CHG-2", "change")}
+        edges = tuple(
+            (source, edge, "CHG-2") if (source, edge, target) == ("TEST-1", "included_in", "CHG-1") else (source, edge, target)
+            for source, edge, target in projection.edges
+        )
+        split = replace(projection, nodes=nodes, edges=edges)
+        self.assertIn("REQ-1:code_and_test_not_in_same_change", controller.completion_errors(split))
 
     def test_prior_cycle_evidence_is_historical_and_cannot_satisfy_g4(self) -> None:
         projection = self._complete_projection()
