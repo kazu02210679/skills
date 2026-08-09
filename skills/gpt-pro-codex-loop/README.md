@@ -8,6 +8,14 @@ Use the read-only `export-governance-receipt --type requirements|review|final`
 command to export and revalidate the persisted bytes. Repeated export is
 byte-stable and does not read the clock or modify the run.
 
+Requirements receipt history is append-only under
+`governance-receipt-history/`; the fixed receipt filename is the current export
+copy. Export rejects noncanonical requirements bytes, missing or altered
+history, orphan transactions, and artifacts that change between stability
+reads. Complete nonempty conversation/model/reasoning/plan provenance is
+required to issue a receipt; standalone transitions without it remain valid
+but have nothing to export.
+
 The requirements receipt's `output_digest` is the semantic GPT Pro transition
 output (`active_requirements_digest`). Its `requirements_digest` is instead the
 SHA-256 digest of the exact canonical persisted `requirements.json` bytes,

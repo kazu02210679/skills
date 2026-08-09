@@ -72,6 +72,14 @@ An outer HOTL run can bind that artifact digest while preserving the GPT Pro
 transition provenance. This export interface is optional: standalone GPT Pro
 controller behavior is unchanged.
 
+Every issued requirements receipt is also retained append-only under
+`governance-receipt-history/`; the fixed requirements receipt path is only the
+current export copy. Export fails closed and remains read-only when receipt
+history, canonical requirements bytes, or transaction stability is ambiguous.
+Governance publication requires nonempty observed conversation, model,
+reasoning, and plan labels. A standalone legacy or `EXACT_LABEL` transition
+without all four still completes normally but publishes no governance receipt.
+
 For a HOTL-bound completion, the exact order is: run GPT Pro `final-verify`,
 export the final receipt, import it into HOTL, then evaluate G4. A receipt is
 evidence only; it does not authorize commit, push, pull request, deployment,

@@ -1382,6 +1382,38 @@ _GPT_BINDING_FIELDS = frozenset(
     }
 )
 _GPT_TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
+
+
+def gpt_governance_execution_id(task_slug: str) -> str:
+    """Recompute the GPT governance execution identity for the closed v1 domain."""
+    if not isinstance(task_slug, str) or _GPT_TASK_SLUG.fullmatch(task_slug) is None:
+        raise ControllerError("INVALID_RECEIPT_BINDING", "GPT Pro task slug is invalid.")
+    identity = contract.canonical_json_bytes(
+        {
+            "issuer_skill": "gpt-pro-codex-loop",
+            "run_id": f"gpc-loop-{task_slug}",
+            "task_slug": task_slug,
+        }
+    )
+    return "EXEC-" + hashlib.sha256(identity).hexdigest()[:12].upper()
+
+
+def gpt_governance_nonce(binding: Mapping[str, object]) -> str:
+    """Recompute the domain-separated GPT governance nonce for v1."""
+    value = contract.canonical_json_bytes(
+        {
+            "binding": dict(binding),
+            "purpose": "gpt-pro-governance-receipt-nonce-v1",
+        }
+    )
+    return hashlib.sha256(value).hexdigest()[:32]
+
+
+def gpt_governance_authority_digest(binding: Mapping[str, object]) -> str:
+    """Recompute the GPT authority snapshot digest from its exact binding."""
+    return contract.canonical_digest(dict(binding))
+
+
 def _exact_mapping(value: object, fields: frozenset[str], label: str) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != fields:
         raise ControllerError("INVALID_FIELDS", f"{label} fields must match exactly.")
@@ -1465,6 +1497,41 @@ def _validated_requirements(
     if actual_digest != source_digest:
         raise ControllerError(
             "DIGEST_MISMATCH", "External requirements artifact does not match source_digest."
+        )
+    source_artifact = requirements_value["source_artifact"]
+    source_items = (
+        source_artifact.get("requirements")
+        if isinstance(source_artifact, dict)
+        else None
+    )
+    if not isinstance(source_items, list) or not source_items:
+        raise ControllerError(
+            "INVALID_REQUIREMENTS",
+            "External GPT requirements artifact requires typed requirement items.",
+        )
+    source_identifiers: list[str] = []
+    for item in source_items:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"id", "statement"}
+            or not isinstance(item.get("id"), str)
+            or contract.NODE_ID.fullmatch(item["id"]) is None
+            or not item["id"].startswith("REQ-")
+            or not isinstance(item.get("statement"), str)
+            or not item["statement"].strip()
+        ):
+            raise ControllerError(
+                "INVALID_REQUIREMENTS",
+                "External GPT requirement items must be exact nonempty id/statement objects.",
+            )
+        source_identifiers.append(item["id"])
+    if (
+        source_identifiers != sorted(set(source_identifiers))
+        or source_identifiers != identifiers
+    ):
+        raise ControllerError(
+            "INVALID_REQUIREMENTS",
+            "External GPT requirement IDs do not match the typed ID manifest.",
         )
     return requirements_value, identifiers, source_digest, {
         identifier_digest: identifier_bytes,
@@ -1580,7 +1647,9 @@ def _canonical_source_receipt(raw: bytes) -> dict[str, object]:
     )
 
 
-def _validate_gpt_binding(source: Mapping[str, object]) -> None:
+def _validate_gpt_binding(
+    source: Mapping[str, object], *, recompute_governance_identity: bool
+) -> None:
     binding = source.get("binding")
     if not isinstance(binding, dict):
         raise ControllerError(
@@ -1618,16 +1687,13 @@ def _validate_gpt_binding(source: Mapping[str, object]) -> None:
     model = binding.get("model_label")
     reasoning = binding.get("reasoning_label")
     plan = binding.get("plan_label")
-    if not isinstance(model, str) or not model.strip():
-        raise ControllerError(
-            "INVALID_RECEIPT_BINDING", "GPT Pro model binding is invalid."
-        )
     if any(
-        value is not None and (not isinstance(value, str) or not value.strip())
-        for value in (reasoning, plan)
+        not isinstance(value, str) or not value.strip()
+        for value in (model, reasoning, plan)
     ):
         raise ControllerError(
-            "INVALID_RECEIPT_BINDING", "GPT Pro model attestation binding is invalid."
+            "INVALID_RECEIPT_BINDING",
+            "GPT Pro model, reasoning, and plan bindings must be nonempty.",
         )
     if model == "GPT-5.6 Sol" and (
         reasoning != "Pro" or plan not in {"Pro", "Business", "Enterprise"}
@@ -1635,9 +1701,19 @@ def _validate_gpt_binding(source: Mapping[str, object]) -> None:
         raise ControllerError(
             "INVALID_RECEIPT_BINDING", "GPT Pro model attestation is not canonical."
         )
-    if contract.canonical_digest(binding) != source.get("authority_snapshot_digest"):
+    expected_execution = gpt_governance_execution_id(task_slug)
+    expected_nonce = gpt_governance_nonce(binding)
+    expected_authority = gpt_governance_authority_digest(binding)
+    if source.get("authority_snapshot_digest") != expected_authority or (
+        recompute_governance_identity
+        and (
+            source.get("execution_id") != expected_execution
+            or source.get("nonce") != expected_nonce
+        )
+    ):
         raise ControllerError(
-            "AUTHORITY_MISMATCH", "GPT Pro provenance does not match its authority digest."
+            "GPT_IDENTITY_MISMATCH",
+            "GPT Pro identity does not match its deterministic provenance binding.",
         )
 
 
@@ -1677,7 +1753,11 @@ def _validate_source_receipt(
     if issuer not in allowed:
         raise ControllerError("ISSUER_MISMATCH", "Receipt issuer is not allowed for its type.")
     if issuer == "gpt-pro-codex-loop":
-        _validate_gpt_binding(source)
+        _validate_gpt_binding(
+            source,
+            recompute_governance_identity=receipt_type
+            in {"requirements", "semantic_review", "final"},
+        )
     elif "binding" in source:
         raise ControllerError(
             "INVALID_RECEIPT_BINDING",

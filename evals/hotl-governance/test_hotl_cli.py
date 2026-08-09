@@ -21,9 +21,9 @@ import hotl_governance as cli
 import hotl_store as store
 
 
-EXECUTION = "EXEC-123456789ABC"
+EXECUTION = "EXEC-C6EBD51734DE"
 SNAPSHOT = "sha256:" + "b" * 64
-NONCE = "c" * 32
+NONCE = "d6869e970ce7ce7dec3b0ca23b9e282e"
 GPT_BINDING = {
     "conversation_url": "https://chatgpt.com/c/hotl-fixture",
     "model_label": "GPT-5.6 Sol",
@@ -500,6 +500,72 @@ class HotlCliTests(unittest.TestCase):
                     store.resolve_run(self.repository, execution).root.exists()
                 )
 
+    def test_external_requirements_typed_ids_must_match_exact_gpt_items(self) -> None:
+        cases = (
+            (["REQ-2"], {"requirements": [{"id": "REQ-1", "statement": "One."}]}),
+            (["REQ-1"], {"schema_version": 1}),
+            (["REQ-1"], {"requirements": [{"id": "REQ-1"}]}),
+            (
+                ["REQ-1"],
+                {
+                    "requirements": [
+                        {"id": "REQ-1", "statement": "One.", "unknown": True}
+                    ]
+                },
+            ),
+            (
+                ["REQ-1"],
+                {
+                    "requirements": [
+                        {"id": "REQ-1", "statement": "One."},
+                        {"id": "REQ-1", "statement": "Duplicate."},
+                    ]
+                },
+            ),
+        )
+        for index, (identifiers, source) in enumerate(cases, 1):
+            with self.subTest(index=index):
+                execution = f"EXEC-0000000003{index:02d}"
+                source_bytes = contract.canonical_json_bytes(source)
+                source_digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+                requirements = self._write(
+                    f"external-typed-bad-{index}.json",
+                    {
+                        "requirements": identifiers,
+                        "source_artifact": source,
+                        "source_digest": source_digest,
+                    },
+                )
+                policy = self._write(
+                    f"external-typed-policy-{index}.json",
+                    {
+                        "active_snapshot_digest": SNAPSHOT,
+                        "approval_mode": "agentic",
+                        "authority_snapshot_digest": AUTHORITY,
+                        "cycle_id": 1,
+                        "execution_id": execution,
+                        "host_approval_evidence_digest": None,
+                        "receipt_nonce": NONCE,
+                        "schema_version": 1,
+                    },
+                )
+                result = cli.main_json(
+                    [
+                        "init",
+                        "--repo",
+                        str(self.repository),
+                        "--execution",
+                        execution,
+                        "--policy",
+                        str(policy),
+                        "--requirements",
+                        str(requirements),
+                    ]
+                )
+                self.assertFalse(result["ok"], result)
+                self.assertEqual("INVALID_REQUIREMENTS", result["error"]["code"])
+                self.assertFalse(store.resolve_run(self.repository, execution).root.exists())
+
     def test_status_is_read_only_and_lists_only_executable_safe_commands(self) -> None:
         self._init()
         before = snapshot_tree(self.repository / ".hotl")
@@ -621,6 +687,62 @@ class HotlCliTests(unittest.TestCase):
             "INVALID_FIELDS",
             self._import(unknown, "gpt-binding-unknown.json")["error"]["code"],
         )
+
+        incomplete = dict(receipt)
+        incomplete_binding = dict(
+            receipt["binding"],
+            model_label="Legacy Exact",
+            reasoning_label=None,
+            plan_label=None,
+        )
+        incomplete.update(
+            binding=incomplete_binding,
+            authority_snapshot_digest=controller.gpt_governance_authority_digest(
+                incomplete_binding
+            ),
+            nonce=controller.gpt_governance_nonce(incomplete_binding),
+        )
+        self.assertEqual(
+            "INVALID_RECEIPT_BINDING",
+            self._import(incomplete, "gpt-binding-incomplete.json")["error"]["code"],
+        )
+
+    def test_gpt_identity_derivation_is_domain_separated_and_recomputed(self) -> None:
+        self.assertEqual(
+            "EXEC-C6EBD51734DE",
+            controller.gpt_governance_execution_id("hotl-fixture"),
+        )
+        self.assertEqual(
+            "d6869e970ce7ce7dec3b0ca23b9e282e",
+            controller.gpt_governance_nonce(GPT_BINDING),
+        )
+        self.assertEqual(AUTHORITY, controller.gpt_governance_authority_digest(GPT_BINDING))
+        changed = dict(
+            GPT_BINDING,
+            task_slug="hotl-fixture-2",
+            run_id="gpc-loop-hotl-fixture-2",
+        )
+        self.assertEqual(
+            "EXEC-595E64A78060",
+            controller.gpt_governance_execution_id("hotl-fixture-2"),
+        )
+        self.assertEqual(
+            "58576b717cadf982dd1131f9604cfd14",
+            controller.gpt_governance_nonce(changed),
+        )
+        self.assertNotEqual(
+            controller.gpt_governance_execution_id("hotl-fixture")[5:].lower(),
+            controller.gpt_governance_nonce(GPT_BINDING)[:12],
+        )
+
+        relabeled = "EXEC-000000000BAD"
+        self.execution = relabeled
+        initialized = self._init(execution=relabeled)
+        self.assertTrue(initialized["ok"], initialized)
+        receipt = self._receipt("requirements", "RCP-GPT-RELABEL")
+        rejected = self._import(receipt, "gpt-relabeled.json")
+        self.assertFalse(rejected["ok"], rejected)
+        self.assertEqual("GPT_IDENTITY_MISMATCH", rejected["error"]["code"])
 
     def test_gpt_requirements_receipt_keeps_frozen_null_admission_bindings(self) -> None:
         self._init()
@@ -1048,7 +1170,17 @@ class HotlCliTests(unittest.TestCase):
         lineage = self._write(
             "lineage.json", binding | {"lineage_receipt_digest": digest}
         )
-        successor = "EXEC-ABCDEF123456"
+        successor_binding = {
+            "conversation_url": "https://chatgpt.com/c/hotl-successor",
+            "model_label": "GPT-5.6 Sol",
+            "plan_label": "Pro",
+            "reasoning_label": "Pro",
+            "run_id": "gpc-loop-hotl-successor",
+            "task_slug": "hotl-successor",
+        }
+        successor = "EXEC-94B3AC020EA0"
+        successor_authority = "sha256:e02da02689a97dd32d198c7565e41e791507f04262c0f8fbc1971cdb3aa967fc"
+        successor_nonce = "17f5b236848290e9d4bfd815fa339e4b"
         successor_requirements_value = {"requirements": ["REQ-2"]}
         successor_requirements = self._write(
             "successor-requirements.json", successor_requirements_value
@@ -1058,12 +1190,12 @@ class HotlCliTests(unittest.TestCase):
             {
                 "active_snapshot_digest": SNAPSHOT,
                 "approval_mode": "agentic",
-                "authority_snapshot_digest": AUTHORITY,
+                "authority_snapshot_digest": successor_authority,
                 "cycle_id": 1,
                 "execution_id": successor,
                 "host_approval_evidence_digest": None,
                 "initial_state": "INIT",
-                "receipt_nonce": NONCE,
+                "receipt_nonce": successor_nonce,
                 "requirements_digest": contract.canonical_digest(
                     successor_requirements_value
                 ),
@@ -1107,15 +1239,29 @@ class HotlCliTests(unittest.TestCase):
         self.assertTrue(verification["result"]["immutable_evidence_integrity"])
 
         self.execution = successor
-        self.assertTrue(
-            self._import(
-                self._receipt("requirements", "RCP-SUCCESSOR-REQ"),
-                "successor-requirements-receipt.json",
-            )["ok"]
+        requirements_receipt = self._receipt(
+            "requirements", "RCP-SUCCESSOR-REQ"
+        )
+        requirements_receipt.update(
+            authority_snapshot_digest=successor_authority,
+            binding=successor_binding,
+            nonce=successor_nonce,
         )
         self.assertTrue(
             self._import(
-                self._receipt("approval", "RCP-SUCCESSOR-APP"),
+                requirements_receipt,
+                "successor-requirements-receipt.json",
+            )["ok"]
+        )
+        approval_receipt = self._receipt("approval", "RCP-SUCCESSOR-APP")
+        approval_receipt.update(
+            authority_snapshot_digest=successor_authority,
+            binding=successor_binding,
+            nonce=successor_nonce,
+        )
+        self.assertTrue(
+            self._import(
+                approval_receipt,
                 "successor-approval-receipt.json",
             )["ok"]
         )

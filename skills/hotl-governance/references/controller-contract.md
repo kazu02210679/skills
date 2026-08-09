@@ -105,6 +105,21 @@ the caller-held lock. Later lifecycle changes still make that admitted receipt
 non-current. Other issuers retain their existing closed schemas and binding
 rules.
 
+The deterministic GPT governance identity algorithm is closed as v1. Canonical
+JSON means UTF-8, sorted keys, compact separators, and exactly one terminal LF.
+For task slug `T`, `run_id` is the literal `gpc-loop-` + `T`.
+`execution_id` is `EXEC-` plus the first 12 uppercase hexadecimal characters of
+SHA-256 over the canonical bytes of
+`{"issuer_skill":"gpt-pro-codex-loop","run_id":RUN_ID,"task_slug":T}`.
+`authority_snapshot_digest` is `sha256:` plus SHA-256 over the canonical bytes
+of the exact six-field provenance binding. `nonce` is the first 32 lowercase
+hexadecimal characters of SHA-256 over the canonical bytes of
+`{"binding":BINDING,"purpose":"gpt-pro-governance-receipt-nonce-v1"}`.
+The distinct identity object and nonce purpose string provide domain
+separation. HOTL recomputes all three values from the binding before comparing
+them with its outer policy; a caller cannot make a relabeled receipt valid by
+changing the policy to match the relabeling.
+
 Generic `record` accepts only `evidence_recorded` from a tool issuer. It rejects
 all receipts, reviews, findings, transitions, snapshot changes, invalidations,
 nodes, and edges as privileged/controller-authored events. Task 4 deliberately

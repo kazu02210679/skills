@@ -332,6 +332,42 @@ class ControllerCase(unittest.TestCase):
         self.assertIsNone(receipt["evidence_set_digest"])
         self.assertIsNone(receipt["cycle_id"])
 
+    def test_incomplete_exact_label_provenance_freezes_without_receipt(self) -> None:
+        controller.initialize_run(
+            self.repository,
+            "controller-test",
+            self.request,
+            self.context,
+            [],
+            "EXACT_LABEL",
+            "Legacy Exact",
+            None,
+        )
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.input_directory / "exact-label-requirements.raw.md"
+        write_raw_envelope(raw, expected, valid_requirements())
+
+        result = controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            "Legacy Exact",
+            None,
+            None,
+        )
+
+        self.assertEqual("REQUIREMENTS_FROZEN", result["phase"])
+        self.assertFalse(
+            (self._run_dir() / "governance-receipt-requirements.json").exists()
+        )
+        with self.assertRaises(controller.ControllerError) as caught:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+        self.assertEqual("RECEIPT_NOT_AVAILABLE", caught.exception.code)
+
     def test_governance_receipt_export_is_read_only_and_byte_stable(self) -> None:
         self._freeze_initial_requirements()
         run = self._run_dir()
@@ -354,6 +390,49 @@ class ControllerCase(unittest.TestCase):
         stored = run / "governance-receipt-requirements.json"
         self.assertEqual(controller._canonical_json_bytes(first), stored.read_bytes())
 
+    def test_governance_receipt_export_rejects_orphan_transaction_read_only(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        orphan = run / "transactions" / "consume-interrupted"
+        orphan.mkdir()
+        (orphan / "manifest.json").write_bytes(b"preserve exactly\n")
+        before = file_tree(run)
+
+        with self.assertRaises(controller.ControllerError) as caught:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+
+        self.assertEqual("RECOVERY_REQUIRED", caught.exception.code)
+        self.assertEqual(before, file_tree(run))
+        self.assertFalse((run / ".lock").exists())
+
+    def test_governance_receipt_export_rejects_bytes_changed_between_reads(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        receipt_path = run / "governance-receipt-requirements.json"
+        before = file_tree(run)
+        original_read = Path.read_bytes
+        reads = 0
+
+        def unstable_read(path: Path) -> bytes:
+            nonlocal reads
+            raw = original_read(path)
+            if path == receipt_path:
+                reads += 1
+                if reads == 2:
+                    return raw + b" "
+            return raw
+
+        with patch.object(Path, "read_bytes", new=unstable_read):
+            with self.assertRaises(controller.ControllerError) as caught:
+                controller.export_governance_receipt(
+                    self.repository, "controller-test", "requirements"
+                )
+
+        self.assertEqual("RECOVERY_REQUIRED", caught.exception.code)
+        self.assertEqual(before, file_tree(run))
+
     def test_review_governance_receipt_is_published_only_for_accepted_review(self) -> None:
         self._accept_pass_review()
 
@@ -368,6 +447,30 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(
             self._state()["reviewed_snapshot_digest"], receipt["snapshot_digest"]
         )
+
+    def test_review_receipt_persistence_uses_export_claims_source(self) -> None:
+        claims = {
+            "edges": [
+                {
+                    "edge": "reviews",
+                    "source_id": "REV-GPC-CONSOLIDATED",
+                    "target_id": "REQ-1",
+                }
+            ],
+            "findings": [],
+            "review_id": "REV-GPC-CONSOLIDATED",
+            "root_cause_ids": [],
+            "status": "accepted",
+        }
+        with patch.object(
+            controller, "_review_receipt_claims", return_value=claims
+        ):
+            self._accept_pass_review()
+
+        persisted = controller.load_json(
+            self._run_dir() / "governance-receipt-review.json"
+        )
+        self.assertEqual(claims, persisted["claims"])
 
     def test_rejected_review_does_not_publish_governance_receipt(self) -> None:
         attempt = self._prepare_valid_review()
@@ -450,6 +553,143 @@ class ControllerCase(unittest.TestCase):
         )
         self.assertEqual(123456789, receipt["issued_at_unix"])
 
+    def test_requirements_receipt_history_preserves_prior_revision_bytes(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        current_path = run / "governance-receipt-requirements.json"
+        first_bytes = current_path.read_bytes()
+        first = controller.validate_packet.strict_json_loads(first_bytes.decode("utf-8"))
+        first_history = (
+            run
+            / "governance-receipt-history"
+            / f"requirements-{first['receipt_id']}.json"
+        )
+        self.assertEqual(first_bytes, first_history.read_bytes())
+        self.assertEqual(
+            [(current_path, first)],
+            controller._requirements_receipt_artifacts(
+                paths=controller.resolve_run(self.repository, "controller-test"),
+                receipt=first,
+            ),
+        )
+
+        self._seed_requirements_revision_pending()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=self._state()["active_requirements_digest"],
+                decision="NEED_USER_INPUT",
+                behavior_changed=True,
+                user_approval_required=True,
+                prior_evidence_invalidated=True,
+                review_round_reset=True,
+            ),
+            "history-revision.raw.md",
+        )
+        controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+        approval = self.repository / "history-approval.txt"
+        approval.write_text("Approved exact material proposal.\n", encoding="utf-8")
+        controller.approve_requirements(self.repository, "controller-test", approval)
+
+        second_bytes = current_path.read_bytes()
+        second = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+        second_history = (
+            run
+            / "governance-receipt-history"
+            / f"requirements-{second['receipt_id']}.json"
+        )
+        self.assertNotEqual(first_bytes, second_bytes)
+        self.assertEqual(first_bytes, first_history.read_bytes())
+        self.assertEqual(first["issued_at_unix"], controller.load_json(first_history)["issued_at_unix"])
+        self.assertEqual(second_bytes, second_history.read_bytes())
+
+    def test_requirements_receipt_history_collision_fails_closed(self) -> None:
+        self._freeze_initial_requirements()
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+        history = (
+            self._run_dir()
+            / "governance-receipt-history"
+            / f"requirements-{receipt['receipt_id']}.json"
+        )
+        changed = dict(receipt, issued_at_unix=receipt["issued_at_unix"] + 1)
+        controller.write_json_atomic(history, changed)
+
+        with self.assertRaises(controller.ControllerError) as caught:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+
+        self.assertEqual(
+            "GOVERNANCE_RECEIPT_HISTORY_COLLISION", caught.exception.code
+        )
+
+    def test_approved_revision_rollback_preserves_current_and_history(self) -> None:
+        self._freeze_initial_requirements()
+        self._seed_requirements_revision_pending()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=self._state()["active_requirements_digest"],
+                decision="NEED_USER_INPUT",
+                behavior_changed=True,
+                user_approval_required=True,
+                prior_evidence_invalidated=True,
+                review_round_reset=True,
+            ),
+            "history-rollback.raw.md",
+        )
+        controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+        paths = controller.resolve_run(self.repository, "controller-test")
+        current_before = (paths.run / "governance-receipt-requirements.json").read_bytes()
+        requirements_before = (paths.run / "requirements.json").read_bytes()
+        history_before = file_tree(paths.run / "governance-receipt-history")
+        state_before = paths.state.read_bytes()
+        approval = self.repository / "history-rollback-approval.txt"
+        approval.write_text("Approved exact material proposal.\n", encoding="utf-8")
+        replace = controller.os.replace
+
+        def fail_state_publish(source: object, destination: object) -> None:
+            if Path(destination) == paths.state:
+                raise OSError("injected state publish failure")
+            replace(source, destination)
+
+        with patch.object(controller.os, "replace", side_effect=fail_state_publish):
+            with self.assertRaises(controller.ControllerError):
+                controller.approve_requirements(
+                    self.repository, "controller-test", approval
+                )
+
+        self.assertEqual(state_before, paths.state.read_bytes())
+        self.assertEqual(requirements_before, (paths.run / "requirements.json").read_bytes())
+        self.assertEqual(
+            current_before,
+            (paths.run / "governance-receipt-requirements.json").read_bytes(),
+        )
+        self.assertEqual(
+            history_before, file_tree(paths.run / "governance-receipt-history")
+        )
+        self.assertEqual([], list(paths.transactions.iterdir()))
+
     def test_governance_receipt_export_fails_closed_for_tampering(self) -> None:
         self._freeze_initial_requirements()
         path = self._run_dir() / "governance-receipt-requirements.json"
@@ -508,6 +748,35 @@ class ControllerCase(unittest.TestCase):
                 self.repository, "controller-test", "requirements"
             )
         self.assertEqual("RECEIPT_NOT_AVAILABLE", missing.exception.code)
+
+    def test_export_rejects_noncanonical_requirements_artifact_bytes(self) -> None:
+        self._freeze_initial_requirements()
+        path = self._run_dir() / "requirements.json"
+        original = path.read_bytes()
+        value = controller.validate_packet.strict_json_loads(original.decode("utf-8"))
+        self.assertIsInstance(value, dict)
+        variants = (
+            json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+            + b"\n",
+            original.removesuffix(b"\n"),
+            json.dumps(
+                dict(reversed(list(value.items()))),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n",
+        )
+        for raw in variants:
+            with self.subTest(raw=raw[:40]):
+                path.write_bytes(raw)
+                with self.assertRaises(controller.ControllerError) as caught:
+                    controller.export_governance_receipt(
+                        self.repository, "controller-test", "requirements"
+                    )
+                self.assertEqual(
+                    "NONCANONICAL_REQUIREMENTS_ARTIFACT", caught.exception.code
+                )
+        path.write_bytes(original)
 
     def test_export_governance_receipt_rejects_wrong_task_type_and_state(self) -> None:
         self._accept_pass_review()
@@ -571,8 +840,15 @@ class ControllerCase(unittest.TestCase):
         receipt = controller.export_governance_receipt(
             self.repository, "controller-test", "requirements"
         )
-        requirements_artifact = controller.load_json(
-            self._run_dir() / "requirements.json"
+        requirements_bytes = (self._run_dir() / "requirements.json").read_bytes()
+        requirements_artifact = controller.validate_packet.strict_json_loads(
+            requirements_bytes.decode("utf-8")
+        )
+        self.assertEqual(
+            controller._canonical_json_bytes(requirements_artifact), requirements_bytes
+        )
+        self.assertEqual(
+            receipt["requirements_digest"], controller.sha256_bytes(requirements_bytes)
         )
         hotl_script = (
             Path(__file__).resolve().parents[2]
@@ -632,13 +908,13 @@ class ControllerCase(unittest.TestCase):
         self.assertTrue(initialized["ok"], initialized)
 
         cases = (
-            ("execution", {"execution_id": "EXEC-000000000BAD"}, "EXECUTION_MISMATCH"),
+            ("execution", {"execution_id": "EXEC-000000000BAD"}, "GPT_IDENTITY_MISMATCH"),
             (
                 "authority",
                 {"authority_snapshot_digest": "sha256:" + "d" * 64},
-                "AUTHORITY_MISMATCH",
+                "GPT_IDENTITY_MISMATCH",
             ),
-            ("nonce", {"nonce": "d" * 32}, "NONCE_MISMATCH"),
+            ("nonce", {"nonce": "d" * 32}, "GPT_IDENTITY_MISMATCH"),
             (
                 "requirements",
                 {"requirements_digest": "sha256:" + "d" * 64},
@@ -657,7 +933,7 @@ class ControllerCase(unittest.TestCase):
                         conversation_url="https://chatgpt.com/c/other",
                     )
                 },
-                "AUTHORITY_MISMATCH",
+                "GPT_IDENTITY_MISMATCH",
             ),
             ("unknown", {"unknown": True}, "INVALID_FIELDS"),
         )
