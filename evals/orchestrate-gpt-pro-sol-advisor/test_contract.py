@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -41,15 +43,88 @@ def valid_combined(**overrides: object) -> dict[str, object]:
     return scenario
 
 
+def public_observations(**overrides: object) -> dict[str, object]:
+    observed: dict[str, object] = {
+        "role": "sol_advisor_advisor",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "sandbox": "read-only",
+        "permission_profile": "managed",
+    }
+    observed.update(overrides)
+    return observed
+
+
+def inspector_output(
+    thread_id: str = "11111111-1111-7111-8111-111111111111",
+    **overrides: object,
+) -> dict[str, object]:
+    output: dict[str, object] = {
+        "thread_id": thread_id,
+        "parent_thread_id": "00000000-0000-7000-8000-000000000000",
+        "agent_role": "sol_advisor_advisor",
+        "agent_path": "agents/sol_advisor_advisor.toml",
+        "model_provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "sandbox_policy_type": "read-only",
+        "permission_profile_type": "managed",
+        "cwd": "/repo/current",
+    }
+    output.update(overrides)
+    return output
+
+
+def installed_plugin_root(codex_home: str | None = None) -> Path:
+    return (
+        Path(codex_home or os.environ["CODEX_HOME"])
+        / "plugins"
+        / "cache"
+        / "sol-advisor"
+        / "sol-advisor"
+        / "0.5.0"
+    )
+
+
+def inspector_evidence(
+    thread_id: str = "11111111-1111-7111-8111-111111111111",
+    **overrides: object,
+) -> dict[str, object]:
+    plugin_root = installed_plugin_root()
+    evidence: dict[str, object] = {
+        "runtime_inspector_exit_code": 0,
+        "runtime_inspector_origin_skill_path": str(
+            plugin_root / "skills" / "orchestration" / "SKILL.md"
+        ),
+        "runtime_inspector_script_path": str(
+            plugin_root / "scripts" / "inspect-agent-runtime.sh"
+        ),
+        "runtime_inspector_output": inspector_output(thread_id),
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def trusted_catalog_context(**overrides: object) -> dict[str, object]:
+    context: dict[str, object] = {
+        "selected_sol_advisor_orchestration_skill_path": str(
+            installed_plugin_root() / "skills" / "orchestration" / "SKILL.md"
+        )
+    }
+    context.update(overrides)
+    return context
+
+
 def attested_combined(**overrides: object) -> dict[str, object]:
+    public = public_observations()
+    for field, legacy_key in POLICY.RUNTIME_FIELDS.items():
+        if legacy_key in overrides:
+            public[field] = overrides.pop(legacy_key)
     evidence: dict[str, object] = {
         "advisor_invocation_succeeded": True,
-        "runtime_observation_trusted": True,
-        "observed_advisor_role": "sol_advisor_advisor",
-        "observed_advisor_model": "gpt-5.6-sol",
-        "observed_advisor_effort": "high",
-        "observed_advisor_sandbox": "read-only",
-        "observed_permission_profile": "managed",
+        "advisor_thread_id": "11111111-1111-7111-8111-111111111111",
+        "public_runtime_thread_id": "11111111-1111-7111-8111-111111111111",
+        "public_runtime_observations": public,
     }
     evidence.update(overrides)
     return valid_combined(**evidence)
@@ -58,9 +133,58 @@ def attested_combined(**overrides: object) -> dict[str, object]:
 class CompositionContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.codex_home = tempfile.TemporaryDirectory()
+        plugin_root = installed_plugin_root(cls.codex_home.name)
+        skill = plugin_root / "skills" / "orchestration" / "SKILL.md"
+        script = plugin_root / "scripts" / "inspect-agent-runtime.sh"
+        skill.parent.mkdir(parents=True)
+        script.parent.mkdir(parents=True)
+        skill.write_text("# installed orchestration\n", encoding="utf-8")
+        script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        stale_root = plugin_root.parent / "0.4.0"
+        stale_skill = stale_root / "skills" / "orchestration" / "SKILL.md"
+        stale_script = stale_root / "scripts" / "inspect-agent-runtime.sh"
+        stale_skill.parent.mkdir(parents=True)
+        stale_script.parent.mkdir(parents=True)
+        stale_skill.write_text("# stale orchestration\n", encoding="utf-8")
+        stale_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        cls.stale_paths = (str(stale_skill), str(stale_script))
+        cls.lookalike_root = tempfile.TemporaryDirectory()
+        lookalike = Path(cls.lookalike_root.name)
+        fake_skill = lookalike / "skills" / "orchestration" / "SKILL.md"
+        fake_script = lookalike / "scripts" / "inspect-agent-runtime.sh"
+        fake_skill.parent.mkdir(parents=True)
+        fake_script.parent.mkdir(parents=True)
+        fake_skill.write_text("# repo lookalike\n", encoding="utf-8")
+        fake_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        escaped_version = (
+            Path(cls.codex_home.name)
+            / "plugins"
+            / "cache"
+            / "sol-advisor"
+            / "sol-advisor"
+            / "0.6.0"
+        )
+        escaped_version.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            escaped_version.symlink_to(lookalike, target_is_directory=True)
+            cls.symlink_escape_paths = (
+                str(escaped_version / "skills" / "orchestration" / "SKILL.md"),
+                str(escaped_version / "scripts" / "inspect-agent-runtime.sh"),
+            )
+        except OSError:
+            cls.symlink_escape_paths = None
+        cls.env_patch = patch.dict(os.environ, {"CODEX_HOME": cls.codex_home.name})
+        cls.env_patch.start()
         cls.skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         cls.readme = (SKILL_ROOT / "README.md").read_text(encoding="utf-8")
         cls.cases = json.loads(CASES.read_text(encoding="utf-8"))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env_patch.stop()
+        cls.codex_home.cleanup()
+        cls.lookalike_root.cleanup()
 
     def test_routes_only_explicit_combined_mode(self) -> None:
         for phrase in (
@@ -349,7 +473,8 @@ class CompositionContractTests(unittest.TestCase):
     def test_runtime_attestation_is_required_before_advice_disposition(self) -> None:
         base = valid_combined(
             advisor_invocation_succeeded=True,
-            runtime_observation_trusted=True,
+            advisor_thread_id="11111111-1111-7111-8111-111111111111",
+            public_runtime_thread_id="11111111-1111-7111-8111-111111111111",
             codex_commitment_boundary=True,
             concrete_question=True,
             precise_question="Does this auth boundary preserve tenant isolation?",
@@ -357,7 +482,9 @@ class CompositionContractTests(unittest.TestCase):
             decision_value=True,
         )
         unavailable = POLICY.route(base)
-        self.assertEqual("advisor-attestation-unavailable", unavailable["terminal"])
+        self.assertEqual(
+            "advisor-attestation-provenance-invalid", unavailable["terminal"]
+        )
         self.assertEqual(1, unavailable["sol_calls"])
         self.assertFalse(unavailable["advice_accepted"])
 
@@ -393,7 +520,13 @@ class CompositionContractTests(unittest.TestCase):
         }
         for field, evidence in mismatches.items():
             with self.subTest(field=field):
-                result = POLICY.route({**base, **evidence})
+                public = {
+                    name: evidence[key]
+                    for name, key in POLICY.RUNTIME_FIELDS.items()
+                }
+                result = POLICY.route(
+                    {**base, "public_runtime_observations": public}
+                )
                 self.assertEqual("advisor-attestation-mismatch", result["terminal"])
                 self.assertEqual(field, result["attestation_failure"])
                 self.assertFalse(result["advice_accepted"])
@@ -406,16 +539,31 @@ class CompositionContractTests(unittest.TestCase):
             material_risk=True,
             decision_value=True,
         )
-        for key in POLICY.RUNTIME_FIELDS.values():
-            with self.subTest(missing=key):
-                result = POLICY.route({**base, key: None})
-                self.assertEqual("advisor-attestation-unavailable", result["terminal"])
+        for field in POLICY.RUNTIME_FIELDS:
+            with self.subTest(missing=field):
+                public = dict(base["public_runtime_observations"])
+                public.pop(field)
+                result = POLICY.route(
+                    {**base, "public_runtime_observations": public}
+                )
+                expected = (
+                    "advisor-attestation-provenance-invalid"
+                    if field == "role"
+                    else "advisor-attestation-inspector-unavailable"
+                )
+                self.assertEqual(expected, result["terminal"])
                 self.assertTrue(result["advice_discarded"])
                 self.assertEqual(0, result["downstream_advice_propagations"])
                 self.assertEqual(0, result["fallback_calls"])
 
-        malformed = POLICY.route({**base, "observed_advisor_model": ["gpt-5.6-sol"]})
-        self.assertEqual("advisor-attestation-unavailable", malformed["terminal"])
+        malformed_public = dict(base["public_runtime_observations"])
+        malformed_public["model"] = ["gpt-5.6-sol"]
+        malformed = POLICY.route(
+            {**base, "public_runtime_observations": malformed_public}
+        )
+        self.assertEqual(
+            "advisor-attestation-provenance-invalid", malformed["terminal"]
+        )
 
     def test_advisor_invocation_failure_discards_advice_without_fallback(self) -> None:
         base = attested_combined(
@@ -438,25 +586,328 @@ class CompositionContractTests(unittest.TestCase):
                 self.assertEqual(0, result["downstream_advice_propagations"])
                 self.assertEqual(0, result["fallback_calls"])
 
-    def test_runtime_observation_provenance_must_be_trusted(self) -> None:
-        base = attested_combined(
+    def test_caller_boolean_cannot_promote_or_veto_runtime_provenance(self) -> None:
+        public = attested_combined(
             codex_commitment_boundary=True,
             concrete_question=True,
-            precise_question="Can matching self-claims be trusted?",
+            precise_question="Can a caller Boolean decide provenance?",
             material_risk=True,
             decision_value=True,
-            advice_body="I promise these fields came from the runtime.",
         )
-        for trusted in (None, False, "true"):
-            with self.subTest(trusted=trusted):
+        for claimed in (None, False, True, "true"):
+            with self.subTest(claimed=claimed):
+                result = POLICY.route({**public, "runtime_observation_trusted": claimed})
+                self.assertEqual("primary-disposition", result["terminal"])
+                self.assertEqual(1, result["advice_admitted"])
+
+    def test_runtime_attestation_prefers_public_native_details(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        public = {
+            "role": "sol_advisor_advisor",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "sandbox": "read-only",
+            "permission_profile": "managed",
+        }
+        result = POLICY.route(
+            valid_combined(
+                advisor_invocation_succeeded=True,
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                public_runtime_observations=public,
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Do public native details prove the runtime route?",
+                material_risk=True,
+                decision_value=True,
+            )
+        )
+        self.assertEqual("primary-disposition", result["terminal"])
+        self.assertEqual(thread_id, result["advisor_thread_id"])
+        self.assertEqual(thread_id, result.get("public_runtime_thread_id"))
+        self.assertEqual(public, result["runtime_observations"])
+        self.assertEqual(
+            {field: "public-native-details" for field in POLICY.RUNTIME_FIELDS},
+            result["runtime_observation_sources"],
+        )
+
+    def test_public_details_are_bound_to_the_spawned_advisor_thread(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        base = attested_combined(
+            advisor_thread_id=thread_id,
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Are these public details from the spawned advisor?",
+            material_risk=True,
+            decision_value=True,
+        )
+        for public_thread_id in (
+            None,
+            "22222222-2222-7222-8222-222222222222",
+            "not-a-thread-id",
+        ):
+            with self.subTest(public_thread_id=public_thread_id):
                 result = POLICY.route(
-                    {**base, "runtime_observation_trusted": trusted}
+                    {**base, "public_runtime_thread_id": public_thread_id}
                 )
-                self.assertEqual("advisor-attestation-untrusted", result["terminal"])
-                self.assertTrue(result["advice_discarded"])
+                self.assertEqual(
+                    "advisor-attestation-thread-mismatch", result["terminal"]
+                )
                 self.assertEqual(0, result["advice_admitted"])
-                self.assertEqual(0, result["downstream_advice_propagations"])
-                self.assertEqual(0, result["fallback_calls"])
+                self.assertTrue(result["advice_discarded"])
+
+    def test_inspector_path_is_derived_from_the_installed_orchestration_skill(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        lookalike = Path(self.lookalike_root.name)
+        paths = (
+            (
+                "/plugins/sol-advisor/0.5.0/skills/orchestration/SKILL.md",
+                "/repo/scripts/inspect-agent-runtime.sh",
+            ),
+            (
+                str(lookalike / "skills" / "orchestration" / "SKILL.md"),
+                str(lookalike / "scripts" / "inspect-agent-runtime.sh"),
+            ),
+            (
+                "/plugins/ghost/9.9.9/skills/orchestration/SKILL.md",
+                "/plugins/ghost/9.9.9/scripts/inspect-agent-runtime.sh",
+            ),
+        )
+        for skill_path, script_path in paths:
+            with self.subTest(skill_path=skill_path, script_path=script_path):
+                result = POLICY.route(
+                    attested_combined(
+                        public_runtime_observations={"role": "sol_advisor_advisor"},
+                        advisor_thread_id=thread_id,
+                        public_runtime_thread_id=thread_id,
+                        runtime_inspector_exit_code=0,
+                        runtime_inspector_origin_skill_path=skill_path,
+                        runtime_inspector_script_path=script_path,
+                        runtime_inspector_output=inspector_output(thread_id),
+                        codex_commitment_boundary=True,
+                        concrete_question=True,
+                        precise_question="Is this the installed package inspector?",
+                        material_risk=True,
+                        decision_value=True,
+                    ),
+                    trusted_catalog=trusted_catalog_context(),
+                )
+                self.assertEqual(
+                    "advisor-attestation-inspector-unavailable", result["terminal"]
+                )
+                self.assertEqual(0, result["advice_admitted"])
+
+    def test_catalog_symlink_cannot_escape_to_a_repo_lookalike(self) -> None:
+        if self.symlink_escape_paths is None:
+            self.skipTest("file symlinks are unavailable on this Windows host")
+        skill_path, script_path = self.symlink_escape_paths
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        result = POLICY.route(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                runtime_inspector_exit_code=0,
+                runtime_inspector_origin_skill_path=skill_path,
+                runtime_inspector_script_path=script_path,
+                runtime_inspector_output=inspector_output(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can a catalog symlink escape its plugin root?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("advisor-attestation-inspector-unavailable", result["terminal"])
+        self.assertEqual(0, result["advice_admitted"])
+
+    def test_stale_cached_version_cannot_replace_catalog_selected_skill(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        stale_skill, stale_script = self.stale_paths
+        result = POLICY.route(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                **inspector_evidence(
+                    thread_id,
+                    runtime_inspector_origin_skill_path=stale_skill,
+                    runtime_inspector_script_path=stale_script,
+                ),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can a stale cached version replace the selected Skill?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("advisor-attestation-inspector-unavailable", result["terminal"])
+        self.assertEqual(0, result["advice_admitted"])
+
+    def test_paired_scenario_override_cannot_replace_trusted_catalog_identity(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        lookalike = Path(self.lookalike_root.name)
+        fake_skill = str(lookalike / "skills" / "orchestration" / "SKILL.md")
+        fake_script = str(lookalike / "scripts" / "inspect-agent-runtime.sh")
+        result = POLICY.route(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                catalog_selected_sol_advisor_orchestration_skill_path=fake_skill,
+                runtime_inspector_exit_code=0,
+                runtime_inspector_origin_skill_path=fake_skill,
+                runtime_inspector_script_path=fake_script,
+                runtime_inspector_output=inspector_output(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can paired scenario values override the catalog?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("advisor-attestation-inspector-unavailable", result["terminal"])
+        self.assertEqual(0, result["advice_admitted"])
+
+    def test_inspector_success_is_derived_from_exit_zero_and_exact_json(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        result = POLICY.route(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                **inspector_evidence(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Did the official inspector complete?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("primary-disposition", result["terminal"])
+        self.assertEqual(1, result["advice_admitted"])
+        self.assertEqual(1, result["runtime_inspector"]["rollout_count"])
+        self.assertEqual("complete", result["runtime_inspector"]["status"])
+
+    def test_runtime_attestation_uses_same_thread_inspector_only_for_omissions(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        inspector = {
+            "role": "sol_advisor_advisor",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "sandbox": "read-only",
+            "permission_profile": "managed",
+        }
+        result = POLICY.route(
+            valid_combined(
+                advisor_invocation_succeeded=True,
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                **inspector_evidence(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can omitted native details be filled safely?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("primary-disposition", result["terminal"])
+        self.assertEqual(inspector, result["runtime_observations"])
+        self.assertEqual("public-native-details", result["runtime_observation_sources"]["role"])
+        for field in ("model", "effort", "sandbox", "permission_profile"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    "local-runtime-inspector",
+                    result["runtime_observation_sources"][field],
+                )
+
+    def test_inspector_requires_official_path_exit_zero_and_exact_result(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        complete = {
+            "advisor_thread_id": thread_id,
+            "public_runtime_thread_id": thread_id,
+            **inspector_evidence(thread_id),
+        }
+        base = attested_combined(
+            public_runtime_observations={"role": "sol_advisor_advisor"},
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Is the local inspector result admissible?",
+            material_risk=True,
+            decision_value=True,
+        )
+        invalid = (
+            ("runtime_inspector_exit_code", None),
+            ("runtime_inspector_exit_code", 1),
+            ("runtime_inspector_exit_code", True),
+            ("runtime_inspector_origin_skill_path", None),
+            ("runtime_inspector_script_path", None),
+            ("runtime_inspector_script_path", "/repo/scripts/inspect-agent-runtime.sh"),
+            (
+                "runtime_inspector_output",
+                {key: value for key, value in inspector_output().items() if key != "cwd"},
+            ),
+            (
+                "runtime_inspector_output",
+                {**inspector_output(), "advice_body": "not allowlisted"},
+            ),
+        )
+        for field, value in invalid:
+            with self.subTest(field=field, value=value):
+                evidence = {**complete, field: value}
+                result = POLICY.route(
+                    {**base, **evidence},
+                    trusted_catalog=trusted_catalog_context(),
+                )
+                self.assertEqual(
+                    "advisor-attestation-inspector-unavailable", result["terminal"]
+                )
+                self.assertEqual(0, result["advice_admitted"])
+                self.assertTrue(result["advice_discarded"])
+
+    def test_self_claims_and_failed_inspector_cannot_satisfy_provenance(self) -> None:
+        gate = {
+            "codex_commitment_boundary": True,
+            "concrete_question": True,
+            "precise_question": "Can useful advice bypass runtime provenance?",
+            "material_risk": True,
+            "decision_value": True,
+        }
+        self_claim = POLICY.route(
+            valid_combined(
+                **gate,
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
+            )
+        )
+        self.assertEqual("advisor-attestation-provenance-invalid", self_claim["terminal"])
+        self.assertEqual(0, self_claim["advice_admitted"])
+        self.assertTrue(self_claim["advice_discarded"])
+
+        failed_inspector = POLICY.route(
+            attested_combined(
+                **gate,
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                runtime_inspector_exit_code=1,
+                advisor_thread_id="11111111-1111-7111-8111-111111111111",
+            )
+        )
+        self.assertEqual(
+            "advisor-attestation-inspector-unavailable",
+            failed_inspector["terminal"],
+        )
+        self.assertEqual(0, failed_inspector["advice_admitted"])
+        self.assertTrue(failed_inspector["advice_discarded"])
 
     def test_permission_profile_is_observed_but_not_a_saved_preference(self) -> None:
         for permission in (
@@ -494,9 +945,16 @@ class CompositionContractTests(unittest.TestCase):
         for permission in (None, "", "   "):
             with self.subTest(permission=permission):
                 result = POLICY.route(
-                    {**base, "observed_permission_profile": permission}
+                    {
+                        **base,
+                        "public_runtime_observations": public_observations(
+                            permission_profile=permission
+                        ),
+                    }
                 )
-                self.assertEqual("advisor-attestation-unavailable", result["terminal"])
+                self.assertEqual(
+                    "advisor-attestation-provenance-invalid", result["terminal"]
+                )
                 self.assertTrue(result["advice_discarded"])
 
         for sandbox in (
@@ -508,9 +966,16 @@ class CompositionContractTests(unittest.TestCase):
             "workspace-write",
         ):
             with self.subTest(sandbox=sandbox):
-                result = POLICY.route({**base, "observed_advisor_sandbox": sandbox})
+                result = POLICY.route(
+                    {
+                        **base,
+                        "public_runtime_observations": public_observations(
+                            sandbox=sandbox
+                        ),
+                    }
+                )
                 expected = (
-                    "advisor-attestation-unavailable"
+                    "advisor-attestation-provenance-invalid"
                     if sandbox in (None, "")
                     else "advisor-attestation-mismatch"
                 )
@@ -647,6 +1112,10 @@ class CompositionContractTests(unittest.TestCase):
                 "retained-implementer-config-is-rejected",
                 "runtime-permission-missing-is-rejected",
                 "runtime-permission-blank-is-rejected",
+                "public-native-attestation-is-preferred",
+                "inspector-fills-public-omissions",
+                "inspector-thread-mismatch-stops",
+                "self-claims-do-not-establish-provenance",
             },
             set(cases),
         )
@@ -655,8 +1124,20 @@ class CompositionContractTests(unittest.TestCase):
             with self.subTest(case_id=case_id):
                 scenario = case["scenario"]
                 if scenario.get("intent") == "combined":
+                    if scenario.get("runtime_inspector_output") is not None:
+                        output = scenario["runtime_inspector_output"]
+                        scenario = {
+                            **scenario,
+                            **inspector_evidence(
+                                str(scenario.get("advisor_thread_id"))
+                            ),
+                            "runtime_inspector_output": output,
+                        }
                     scenario = attested_combined(**scenario)
-                actual = POLICY.route(scenario)
+                actual = POLICY.route(
+                    scenario,
+                    trusted_catalog=trusted_catalog_context(),
+                )
                 for key, value in case["expect"].items():
                     self.assertEqual(value, actual.get(key), key)
 
@@ -730,8 +1211,13 @@ class CompositionContractTests(unittest.TestCase):
                 material_risk=True,
                 decision_value=True,
             ),
-            "pro-green-selfclaim": attested_combined(
-                runtime_observation_trusted=False,
+            "pro-green-selfclaim": valid_combined(
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
                 codex_commitment_boundary=True,
                 concrete_question=True,
                 precise_question="Can advice-body self-claims replace attestation?",
@@ -760,6 +1246,59 @@ class CompositionContractTests(unittest.TestCase):
                     "advice_admitted",
                     "advice_discarded",
                     "fallback_calls",
+                ):
+                    if key in trace:
+                        self.assertEqual(trace[key], actual.get(key), key)
+
+        provenance = results["provenance_hardening"]
+        self.assertEqual(3, len(provenance["baseline"]))
+        self.assertEqual(3, len(provenance["with_skill"]))
+        self.assertTrue(
+            all(item["contract_violation"] for item in provenance["baseline"])
+        )
+        provenance_replays = {
+            "provenance-green-public": attested_combined(
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does public metadata prove the route?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            "provenance-green-inspector": attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id="11111111-1111-7111-8111-111111111111",
+                **inspector_evidence(),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can the inspector fill omitted fields?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            "provenance-green-selfclaim": valid_combined(
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can self-claims establish provenance?",
+                material_risk=True,
+                decision_value=True,
+            ),
+        }
+        for trace in provenance["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = POLICY.route(
+                    provenance_replays[trace["sample"]],
+                    trusted_catalog=trusted_catalog_context(),
+                )
+                for key in (
+                    "advice_admitted",
+                    "advice_discarded",
+                    "terminal",
+                    "runtime_attestation_source",
                 ):
                     if key in trace:
                         self.assertEqual(trace[key], actual.get(key), key)
