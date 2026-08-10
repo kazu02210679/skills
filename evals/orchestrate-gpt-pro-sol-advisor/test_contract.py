@@ -258,46 +258,102 @@ class CompositionContractTests(unittest.TestCase):
                 self.assertIn(phrase, self.skill.lower())
 
     def test_luna_first_routing_has_bounded_terra_and_sol_escalation(self) -> None:
+        skill_text = " ".join(self.skill.lower().split())
         for phrase in (
             "implementation_policy: luna_first",
             "gpt-5.6-luna",
             "thinking: max",
             "gpt-5.6-terra",
-            "difficult or stuck implementation",
-            "max_parallel_tasks: 2",
-            "sol is not the default implementation worker",
-            "sol must remain read-only",
-            "one precise, bounded packet",
+            "difficult scope",
+            "at most two coarse-grained",
+            "dependency-unavailable",
+            "sol never edits",
         ):
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, self.skill.lower())
+                self.assertIn(phrase, skill_text)
 
         lane = SKILL_ROOT / "references" / "luna-implementation-lane.md"
         self.assertTrue(lane.is_file())
-        lane_text = lane.read_text(encoding="utf-8").lower()
+        lane_text = " ".join(lane.read_text(encoding="utf-8").lower().split())
         for phrase in (
             "clientthreadid",
+            "requirements_digest",
+            "task_status",
             "one precise correction to the same task",
             "sol_advisor_terra_implementer",
-            "do not create a replacement task",
+            "never silently fall back",
         ):
             with self.subTest(reference_phrase=phrase):
                 self.assertIn(phrase, lane_text)
 
     def test_verification_economy_is_explicit(self) -> None:
-        economy = (
-            SKILL_ROOT / "references" / "verification-economy.md"
-        ).read_text(encoding="utf-8").lower()
+        economy = " ".join(
+            (SKILL_ROOT / "references" / "verification-economy.md")
+            .read_text(encoding="utf-8")
+            .lower()
+            .split()
+        )
         for phrase in (
             "new_test_files = 0",
-            "one regression test per root cause",
+            "one regression witness per root cause",
             "observable behavior",
-            "l1  affected focused test",
-            "do not rerun an unchanged successful command",
-            "full log path and digest",
+            "test_delta",
+            "verification_input",
+            "unknown siblings are rejected",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, economy)
+
+    def test_standalone_gpc_does_not_own_worker_routing(self) -> None:
+        gpc = " ".join(
+            (ROOT / "skills" / "gpt-pro-codex-loop" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .lower()
+            .split()
+        )
+        self.assertIn("standalone use owns only the outer gpt pro protocol", gpc)
+        self.assertIn("does not select or invoke luna, terra, sol", gpc)
+        self.assertIn("orchestrate-gpt-pro-sol-advisor", gpc)
+        self.assertNotIn("default implementation worker", gpc)
+        self.assertNotIn("sol_advisor_terra_implementer", gpc)
+
+    def test_verification_skip_requires_the_complete_input_fingerprint(self) -> None:
+        self.assertEqual(
+            {"action": "skip", "reason": "unchanged-successful-input"},
+            POLICY.verification_reuse_decision(
+                "pytest tests/auth.py",
+                "sha256:same",
+                {
+                    "outcome": "PASS",
+                    "command": "pytest tests/auth.py",
+                    "verification_input_fingerprint": "sha256:same",
+                },
+            ),
+        )
+        for previous in (
+            {
+                "outcome": "FAIL",
+                "command": "pytest tests/auth.py",
+                "verification_input_fingerprint": "sha256:same",
+            },
+            {
+                "outcome": "PASS",
+                "command": "pytest tests/auth.py",
+                "verification_input_fingerprint": "sha256:old",
+            },
+            {
+                "outcome": "PASS",
+                "command": "pytest tests/other.py",
+                "verification_input_fingerprint": "sha256:same",
+            },
+        ):
+            with self.subTest(previous=previous):
+                self.assertEqual(
+                    {"action": "run", "reason": "verification-input-changed"},
+                    POLICY.verification_reuse_decision(
+                        "pytest tests/auth.py", "sha256:same", previous
+                    ),
+                )
 
     def test_combined_mode_does_not_invoke_sol_orchestration(self) -> None:
         lower = self.skill.lower()
@@ -1259,6 +1315,11 @@ class CompositionContractTests(unittest.TestCase):
                 "difficult-scope-starts-at-terra",
                 "terra-blocker-uses-sol-read-only-advice",
                 "test-economy-policy-is-explicit",
+                "luna-capability-missing-fails-closed",
+                "luna-wrong-model-fails-closed",
+                "luna-client-thread-handle-fails-closed",
+                "terra-capability-missing-fails-closed",
+                "terra-wrong-role-fails-closed",
             },
             set(cases),
         )
@@ -1445,6 +1506,66 @@ class CompositionContractTests(unittest.TestCase):
                 ):
                     if key in trace:
                         self.assertEqual(trace[key], actual.get(key), key)
+
+        implementation = results["implementation_preflight"]
+        self.assertEqual("deterministic-policy-replay", implementation["evaluation_mode"])
+        self.assertTrue(all(item["contract_violation"] for item in implementation["baseline"]))
+        implementation_replays = {
+            "luna-missing-capability": valid_combined(
+                implementation_request=True
+            ),
+            "luna-client-thread-only": valid_combined(
+                implementation_request=True,
+                luna_runtime_preflight={
+                    "source": "native-capability-preflight",
+                    "capabilities": [
+                        "list_projects",
+                        "create_thread",
+                        "list_threads",
+                        "wait_threads",
+                        "read_thread",
+                        "send_message_to_thread",
+                    ],
+                    "project_type": "git",
+                    "workspace_mode": "worktree",
+                    "model": "gpt-5.6-luna",
+                    "thinking": "max",
+                    "task_status": "clientThreadId-only",
+                },
+            ),
+            "terra-missing-role": valid_combined(
+                implementation_request=True, difficult_scope=True
+            ),
+        }
+        for trace in implementation["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = POLICY.route(implementation_replays[trace["sample"]])
+                self.assertFalse(trace["contract_violation"])
+                for key in ("terminal", "silent_downgrade"):
+                    if key in trace:
+                        self.assertEqual(trace[key], actual.get(key), key)
+
+        economy = results["verification_economy"]
+        self.assertEqual("deterministic-policy-replay", economy["evaluation_mode"])
+        self.assertTrue(all(item["contract_violation"] for item in economy["baseline"]))
+        verification_replays = {
+            "same-command-new-tree": POLICY.verification_reuse_decision(
+                "pytest tests/auth.py",
+                "sha256:new-tree",
+                {
+                    "outcome": "PASS",
+                    "command": "pytest tests/auth.py",
+                    "verification_input_fingerprint": "sha256:old-tree",
+                },
+            ),
+            "test-count-without-anchor": POLICY.test_witness_decision([]),
+        }
+        for trace in economy["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = verification_replays[trace["sample"]]
+                self.assertFalse(trace["contract_violation"])
+                self.assertEqual(trace["action"], actual["action"])
+                self.assertEqual(trace["reason"], actual["reason"])
 
     def test_has_human_and_codex_metadata(self) -> None:
         self.assertTrue((SKILL_ROOT / "README.md").is_file())

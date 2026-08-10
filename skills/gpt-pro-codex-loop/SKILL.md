@@ -9,47 +9,49 @@ ChatGPT Pro owns product requirements, acceptance criteria, and semantic review.
 
 **REQUIRED SUB-SKILL:** Use `browser:control-in-app-browser`.
 
-## Codex implementation routing and test economy
+## Standalone scope and local-evidence economy
 
-When the Codex-owned implementation phase delegates work, use the smallest
-bounded worker that can complete the frozen task:
+Standalone use owns only the outer GPT Pro protocol. It does not select or
+invoke Luna, Terra, Sol, or a native worker role. Combined routing belongs to
+`orchestrate-gpt-pro-sol-advisor`; do not infer combined mode from an
+installation or a casual mention of another model.
 
-- Default implementation worker: GPT-5.6 Luna / Max (`gpt-5.6-luna`, thinking
-  `max`) for specified features, UI, CRUD, API wiring, boilerplate, existing-
-  pattern refactors, test corrections, clearly specified algorithms, and
-  isolated worktrees.
-- Escalation worker: GPT-5.6 Terra / High for a difficult implementation,
-  concurrency, security-sensitive logic, migrations, shared state,
-  cross-workstream integration, difficult performance debugging, broad
-  blast-radius changes, or a Luna task that fails again for the same root
-  cause after one correction to the same task.
-- Sol is not an implementation worker. Use a fresh, bounded, read-only Sol
-  consultation only when Terra cannot resolve a high-impact architecture,
-  safety, or risk decision. Codex records the disposition and sends code work
-  back to Luna or Terra; Sol never changes frozen requirements, edits files,
-  waives verification, or decides completion.
+Codex still owns repository work, tests, snapshots, and every local
+verification claim. Keep verification economical: every added test maps to an
+acceptance criterion, material risk, or bug root cause; `new_test_files = 0`
+is the default; one regression witness per root cause is the default; and
+prefer observable contracts and table-driven witnesses over implementation
+details or speculative coverage. Use L0 diff/static inspection, L1 affected
+focused tests by default, L2 for shared/API/dependency changes, and L3 only
+for dependency, build-system, schema, shared-core, or release-critical work.
 
-Use coarse-grained tasks and at most two independent Luna tasks in parallel by
-default. Do not create one task per file or test, and do not run an unbounded
-Luna correction loop. Worker reports are claims: inspect the actual diff and
-rerun the lowest sufficient verification command once when relevant code, test,
-or configuration changed.
+The controller's `--local-evidence` input is a closed schema. Keep exactly
+these top-level fields and do not add metrics as sibling fields:
 
-Apply the verification-economy rules during every Codex build report:
+```json
+{
+  "schema_version": 1,
+  "changed_file_intents": {"example.py": "Implement AC-1."},
+  "intent_summary": "Implement and verify AC-1.",
+  "acceptance_evidence": {"AC-1": ["Focused test passed."]},
+  "test_commands": [{
+    "command": "python -m unittest test_example.py -v",
+    "outcome": "PASS",
+    "output_summary": "exit=0; tests=1; duration=0.2s; summary=focused test passed; verify_input=sha256:...; test_delta=files:0,cases:1,anchors:AC-1"
+  }],
+  "diff_evidence": ["example.py implements AC-1."],
+  "omissions": [],
+  "unresolved_risks_or_blockers": []
+}
+```
 
-- Every new test must map to an acceptance criterion, material risk, or bug
-  root cause. Default `new_test_files = 0`; add a file only with a recorded
-  reason an existing test file cannot express the contract.
-- Use one regression test per bug root cause by default, table-driven for
-  equivalent inputs, and test observable behavior/public contracts rather than
-  implementation details.
-- Use L0 diff/static inspection, L1 affected focused tests by default, L2 for
-  shared/API/dependency changes, and L3 full-suite only for dependency,
-  build-system, schema, shared-core, or release-critical changes.
-- Do not rerun an unchanged successful verification command. On success, pass
-  only command, exit code, test count, duration, and a one-line summary. On
-  failure, pass failed names, a relevant error excerpt, and the full log path
-  plus digest; do not copy successful full logs into the next model context.
+Encode bounded success metrics, test-delta anchors, and the verification-input
+fingerprint inside `output_summary`; never add `exit_code`, `test_count`,
+`duration`, `summary`, `test_delta`, or `fingerprint` fields to the object.
+On failure, keep only the command, exit code, failed names, relevant excerpt,
+and full-log path plus digest. Do not rerun an unchanged successful command:
+the skip key is the command plus the base/tree, relevant-file, lock/config,
+and material environment fingerprint—not the command string alone.
 
 For the normal controller loop, do not load
 [references/prompt-contract.md](references/prompt-contract.md) or

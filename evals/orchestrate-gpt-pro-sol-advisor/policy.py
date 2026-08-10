@@ -14,6 +14,16 @@ CODEX_ADVISOR_ROLE = "sol_advisor_advisor"
 TERRA_IMPLEMENTER_ROLE = "sol_advisor_terra_implementer"
 LUNA_MODEL = "gpt-5.6-luna"
 TERRA_MODEL = "gpt-5.6-terra"
+LUNA_REQUIRED_CAPABILITIES = frozenset(
+    {
+        "list_projects",
+        "create_thread",
+        "list_threads",
+        "wait_threads",
+        "read_thread",
+        "send_message_to_thread",
+    }
+)
 RUNTIME_FIELDS = {
     "role": "observed_advisor_role",
     "model": "observed_advisor_model",
@@ -373,6 +383,116 @@ def _runtime_attestation(
     }
 
 
+def _worker_preflight(
+    scenario: dict[str, Any], worker: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Require observed runtime capability before claiming an implementation route."""
+
+    field = f"{worker}_runtime_preflight"
+    value = scenario.get(field)
+    if not isinstance(value, dict):
+        return {}, [f"{field}: missing native runtime observation"]
+
+    if worker == "luna":
+        expected_keys = {
+            "source",
+            "capabilities",
+            "project_type",
+            "workspace_mode",
+            "model",
+            "thinking",
+            "task_status",
+        }
+        required_capabilities = LUNA_REQUIRED_CAPABILITIES
+        expected_values = {
+            "source": "native-capability-preflight",
+            "project_type": "git",
+            "workspace_mode": "worktree",
+            "model": LUNA_MODEL,
+            "thinking": "max",
+            "task_status": "ready",
+        }
+    elif worker == "terra":
+        expected_keys = {
+            "source",
+            "available_roles",
+            "role",
+            "model",
+            "effort",
+            "task_status",
+        }
+        expected_values = {
+            "source": "native-role-preflight",
+            "role": TERRA_IMPLEMENTER_ROLE,
+            "model": TERRA_MODEL,
+            "effort": "high",
+            "task_status": "ready",
+        }
+    else:
+        return {}, [f"{field}: unsupported worker"]
+
+    errors: list[str] = []
+    missing = sorted(expected_keys - set(value))
+    unknown = sorted(set(value) - expected_keys)
+    errors.extend(f"{field}: missing {item}" for item in missing)
+    errors.extend(f"{field}: unknown {item}" for item in unknown)
+    for key, expected in expected_values.items():
+        if value.get(key) != expected:
+            errors.append(f"{field}.{key}: expected {expected}")
+
+    if worker == "luna":
+        capabilities = value.get("capabilities")
+        if not isinstance(capabilities, list) or any(
+            not isinstance(item, str) or not item.strip() for item in capabilities
+        ):
+            errors.append(f"{field}.capabilities: must be a list of names")
+        else:
+            errors.extend(
+                f"{field}.capabilities: missing {item}"
+                for item in sorted(required_capabilities - set(capabilities))
+            )
+    else:
+        roles = value.get("available_roles")
+        if not isinstance(roles, list) or any(
+            not isinstance(item, str) or not item.strip() for item in roles
+        ):
+            errors.append(f"{field}.available_roles: must be a list of roles")
+        elif TERRA_IMPLEMENTER_ROLE not in roles:
+            errors.append(
+                f"{field}.available_roles: missing {TERRA_IMPLEMENTER_ROLE}"
+            )
+
+    if errors:
+        return {}, sorted(set(errors))
+    return {
+        "worker": worker,
+        "source": str(value["source"]),
+        "status": "ready",
+    }, []
+
+
+def _implementation_failure(
+    scenario: dict[str, Any], preserved: dict[str, Any], worker: str, errors: list[str]
+) -> dict[str, Any]:
+    return {
+        "selected_mode": "combined",
+        "implementation_request": True,
+        **preserved,
+        "sol_calls": 0,
+        "implementation_available": False,
+        "dependency": f"{worker}-implementation-runtime",
+        "preflight_errors": errors,
+        "advice_admitted": 0,
+        "advice_discarded": True,
+        "fallback_calls": 0,
+        "compatibility_fallback": False,
+        "silent_downgrade": False,
+        "terra_escalated": worker == "terra",
+        "luna_attempts": scenario.get("luna_attempts", 0),
+        "terminal": f"{worker}-capability-preflight-failed",
+    }
+
+
 def _implementation_route(
     scenario: dict[str, Any], preserved: dict[str, Any]
 ) -> dict[str, Any]:
@@ -392,6 +512,17 @@ def _implementation_route(
         or same_root_cause_failed
     )
     if terra_required:
+        preflight, errors = _worker_preflight(scenario, "terra")
+        if errors:
+            return _implementation_failure(scenario, preserved, "terra", errors)
+        if same_root_cause_failed:
+            luna_preflight, luna_errors = _worker_preflight(scenario, "luna")
+            if luna_errors:
+                return _implementation_failure(
+                    scenario, preserved, "luna", luna_errors
+                )
+        else:
+            luna_preflight = None
         return {
             **common,
             "implementation_lane": TERRA_IMPLEMENTER_ROLE,
@@ -399,8 +530,16 @@ def _implementation_route(
             "implementation_effort": "high",
             "luna_attempts": 2 if same_root_cause_failed else 0,
             "terra_escalated": True,
+            "implementation_available": True,
+            "implementation_preflight": {
+                "terra": preflight,
+                **({"luna": luna_preflight} if luna_preflight else {}),
+            },
             "terminal": "terra-implementation",
         }
+    preflight, errors = _worker_preflight(scenario, "luna")
+    if errors:
+        return _implementation_failure(scenario, preserved, "luna", errors)
     return {
         **common,
         "implementation_lane": "luna",
@@ -408,6 +547,8 @@ def _implementation_route(
         "implementation_thinking": "max",
         "luna_attempts": 1,
         "terra_escalated": False,
+        "implementation_available": True,
+        "implementation_preflight": {"luna": preflight},
         "terminal": "luna-implementation",
     }
 
@@ -427,6 +568,9 @@ def route(
         return {
             "selected_mode": intent,
             "test_anchor_required": True,
+            "test_delta_anchors_required": True,
+            "verification_input_fingerprint_required": True,
+            "skip_requires_same_fingerprint": True,
             "new_test_files_default": 0,
             "regression_tests_per_root_cause": 1,
             "default_verification_level": "L1",
@@ -519,6 +663,10 @@ def route(
     }
     if scenario.get("implementation_request") and not scenario.get("terra_blocked"):
         return _implementation_route(scenario, preserved)
+    if scenario.get("implementation_request") and scenario.get("terra_blocked"):
+        preflight, errors = _worker_preflight(scenario, "terra")
+        if errors:
+            return _implementation_failure(scenario, preserved, "terra", errors)
     if scenario.get("mandatory_final_sol_review"):
         return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
@@ -605,3 +753,32 @@ def evaluate_advice(advice: dict[str, Any]) -> dict[str, str]:
     if advice.get("useful_subset"):
         return {"disposition": "partially accept", "rationale": "Use only the compatible, evidence-supported subset."}
     return {"disposition": "accept", "rationale": "Advice is compatible with frozen requirements and verified evidence."}
+
+
+def verification_reuse_decision(
+    command: Any, current_fingerprint: Any, previous: Any
+) -> dict[str, str]:
+    """Skip only an unchanged successful verification, never by command text alone."""
+
+    if not isinstance(command, str) or not command.strip():
+        return {"action": "run", "reason": "invalid-command"}
+    if not isinstance(current_fingerprint, str) or not current_fingerprint.strip():
+        return {"action": "run", "reason": "missing-current-fingerprint"}
+    if (
+        isinstance(previous, dict)
+        and previous.get("outcome") == "PASS"
+        and previous.get("command") == command
+        and previous.get("verification_input_fingerprint") == current_fingerprint
+    ):
+        return {"action": "skip", "reason": "unchanged-successful-input"}
+    return {"action": "run", "reason": "verification-input-changed"}
+
+
+def test_witness_decision(anchors: Any) -> dict[str, str]:
+    """Require a bounded acceptance/risk/root-cause anchor for each new witness."""
+
+    if not isinstance(anchors, list) or not anchors or any(
+        not isinstance(anchor, str) or not anchor.strip() for anchor in anchors
+    ):
+        return {"action": "reject-test-addition", "reason": "missing-test-anchor"}
+    return {"action": "allow-minimal-witness", "reason": "anchored-witness"}

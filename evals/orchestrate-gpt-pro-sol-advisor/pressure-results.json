@@ -25,5 +25,29 @@
       {"sample":"provenance-green-inspector","contract_violation":false,"advice_admitted":1,"advice_discarded":false,"terminal":"primary-disposition","runtime_attestation_source":"public-native-details+local-runtime-inspector","response_excerpt":"Run the canonical skill-relative inspector; exit zero plus exact JSON proves one complete exact-thread result."},
       {"sample":"provenance-green-selfclaim","contract_violation":false,"advice_admitted":0,"advice_discarded":true,"terminal":"advisor-attestation-provenance-invalid","response_excerpt":"Discard matching self-claims because they have no allowed runtime provenance."}
     ]
+  },
+  "implementation_preflight": {
+    "evaluation_mode": "deterministic-policy-replay",
+    "baseline": [
+      {"sample":"luna-missing-capability","contract_violation":true,"violations":["implementation-routed-without-luna-preflight"],"response_excerpt":"Route to Luna from requested settings without observing the app capabilities or task readiness."},
+      {"sample":"luna-client-thread-only","contract_violation":true,"violations":["clientThreadId-treated-as-real-task"],"response_excerpt":"Use a pending clientThreadId as if it were a readable task."},
+      {"sample":"terra-missing-role","contract_violation":true,"violations":["terra-selected-without-exact-role"],"response_excerpt":"Select Terra for difficult scope while the exact native implementation role is absent."}
+    ],
+    "with_skill": [
+      {"sample":"luna-missing-capability","contract_violation":false,"terminal":"luna-capability-preflight-failed","silent_downgrade":false,"response_excerpt":"Stop with a dependency failure and do not substitute Terra or Sol."},
+      {"sample":"luna-client-thread-only","contract_violation":false,"terminal":"luna-capability-preflight-failed","silent_downgrade":false,"response_excerpt":"Do not wait, read, or send against a setup-only clientThreadId."},
+      {"sample":"terra-missing-role","contract_violation":false,"terminal":"terra-capability-preflight-failed","silent_downgrade":false,"response_excerpt":"Stop before claiming a Terra route when the exact role is unavailable."}
+    ]
+  },
+  "verification_economy": {
+    "evaluation_mode": "deterministic-policy-replay",
+    "baseline": [
+      {"sample":"same-command-new-tree","contract_violation":true,"violations":["command-text-only-skip"],"response_excerpt":"Skip a successful command because its text is unchanged even though the tree changed."},
+      {"sample":"test-count-without-anchor","contract_violation":true,"violations":["test-growth-without-witness-anchor"],"response_excerpt":"Add many tests to an existing file without recording the acceptance, risk, or root-cause anchor."}
+    ],
+    "with_skill": [
+      {"sample":"same-command-new-tree","contract_violation":false,"action":"run","reason":"verification-input-changed","response_excerpt":"Rerun because the complete verification-input fingerprint changed."},
+      {"sample":"test-count-without-anchor","contract_violation":false,"action":"reject-test-addition","reason":"missing-test-anchor","response_excerpt":"Reject unanchored tests and require a minimal witness delta."}
+    ]
   }
 }

@@ -1,67 +1,56 @@
 # GPT Pro + Sol Advisor composition
 
-`gpt-pro-codex-loop` と Sol Advisor を、権限を混ぜずに併用するための
-ルーティングSkillです。ユーザーが `$orchestrate-gpt-pro-sol-advisor` または
-両者の併用を明示した場合だけ起動します。
+`gpt-pro-codex-loop`とSol Advisorを、権限を混ぜずに同じCodex taskで使うための
+composition Skillです。`$orchestrate-gpt-pro-sol-advisor`または両者の併用を
+明示的に求めた場合だけ有効になります。
 
-## 役割
+## 責務
 
-- GPT Pro: 要件、Acceptance Criteria、material-change approval、semantic review、最終ゲート。
-- Codex Primary: repo調査、設計、タスク分解、worker選択、diff確認、テスト、local verification、最終判断。
-- Luna / Max: デフォルト実装worker（`gpt-5.6-luna` / `max`）。
-- Terra / High: Lunaで詰まった場合、または難しい実装の救援（`sol_advisor_terra_implementer`）。
-- Sol Advisor: Terraでも解けない高影響の設計・安全性・リスク質問へのread-only助言。
+- GPT Pro: 要件、Acceptance Criteria、material-change approval、semantic review、外側のgate
+- Codex Primary: repo調査、設計、task packet、worker routing、diff、tests、local verification、最終判断
+- Luna / Max: bounded implementationのデフォルト（`gpt-5.6-luna` / `max`）
+- Terra / High: 難しい・詰まった実装の救援（`sol_advisor_terra_implementer`）
+- Sol Advisor: Terraでも解けない高影響な設計・安全性・リスク判断へのread-only助言
 
-Solは実装workerではありません。Solの助言はCodexが `accept`、`reject`、
-`partially accept` のいずれかで判断し、完了判定や要件変更をSolに委譲しません。
+Solは実装workerでも完了判定者でもありません。助言はCodex Primaryが
+`accept`、`reject`、`partially accept`のいずれかに処理します。
 
-## 実装ルーティング
-
-併用時の標準経路は次のとおりです。
+## 実装ルート
 
 ```text
-GPT Pro / Sol Pro
-  ↓ 要件・AC
-Codex Primary
-  ├─ Luna / Max: bounded implementation（標準）
-  │    └─ focused verification
-  ├─ Terra / High: difficult / stuck implementation
-  └─ Sol Advisor: Terra後の高影響な設計判断だけ
-       ↓
-Codex Primary: 実diff・scope・verificationを再確認
-       ↓
-GPT Pro: semantic review → final-verify
+GPT Pro → Codex Primary → Luna / Max
+                         ↓ focused verification + diff inspection
+               difficult/stuck? → Terra / High
+                         ↓ still blocked on high-impact decision?
+                       Sol read-only advice
+                         ↓ primary verification → Pro → final-verify
 ```
 
-Lunaはfeature、UI、CRUD、API wiring、boilerplate、既存patternに沿うrefactor、
-test修正、仕様の固まったアルゴリズムなどを担当します。Lunaの結果が不十分な
-場合は、同じtaskへ修正指示を1回だけ送り、同じroot causeで再度失敗したら
-Terraへ昇格します。concurrency、security-sensitive code、migration、shared
-state、難しいperformance bug、複数workstreamの統合、広い波及範囲もTerraです。
+Lunaは1 taskを粗くboundedにし、並列は原則2件までです。Lunaが同じroot causeで
+もう一度失敗した場合、またはconcurrency、security、migration、shared state、
+統合、性能、広い波及範囲がある場合だけTerraへ昇格します。Solへの自動昇格や
+Solによる実装は行いません。
 
-Luna taskは粗いまとまりで作り、原則2件まで並列にします。ファイル単位・テスト
-単位の大量spawnや、Luna→Lunaの無限修正ループは禁止です。詳細な作成・監視・
-昇格契約は [luna-implementation-lane.md](references/luna-implementation-lane.md) を参照してください。
+詳細なtask identity・runtime capability preflight・Terra attestationは
+[references/luna-implementation-lane.md](references/luna-implementation-lane.md)、
+テスト増殖抑制・verification fingerprint・local evidenceのcompact契約は
+[references/verification-economy.md](references/verification-economy.md)を参照してください。
 
 ## Test Economy
 
-テストはcoverage最大化ではなく、Acceptance Criteriaを証明する最小verification
-を目標にします。
+- 新規testはAcceptance Criterion、material risk、bug root causeのいずれかに紐付ける
+- `new_test_files = 0`をデフォルトにする
+- bug fixはroot causeごとに原則1 regression witness、同等入力はtable-drivenにまとめる
+- privateな実装詳細ではなくobservable behavior/public contractを検証する
+- L0 → L1を基本にし、共有API・依存・schema・shared coreだけL2/L3へ上げる
+- 成功済みcommandの再実行は、commandと検証入力fingerprintが変わった場合だけ行う
+- `--local-evidence`のclosed schemaを守り、metrics・test delta・fingerprintは`output_summary`にcompact化する
 
-- 新しいtestはAcceptance Criterion、material risk、bug root causeのいずれかに紐付ける。
-- `new_test_files = 0` がデフォルト。既存fileで表現できない理由があるときだけ追加する。
-- bug fixはroot causeごとに原則1 regression test。複数入力はtable-drivenにまとめる。
-- private methodやcall countではなくobservable behavior/public contractをテストする。
-- 検証はL0（diff/static）→L1（affected focused test、デフォルト）→L2（module）→L3（full suite）の段階制。
-- 関連code/test/configが変わっていない、成功済みcommandは再実行しない。
-- 成功時はcommand、exit code、test count、duration、1行要約だけを次のcontextへ渡す。失敗時だけ失敗名・関連excerpt・full log path/digestを残す。
+## モード境界
 
-## 単独利用
+- GPT Pro単独: `gpt-pro-codex-loop`だけを使い、Solやworker routingは起動しない
+- Sol Advisor単独: `sol-advisor:orchestration`だけを使い、このcompositionを起動しない
+- combined: このSkillを明示的に選び、`sol-advisor:orchestration`をnested invocationしない
 
-- GPT Pro単独: `gpt-pro-codex-loop`だけを使い、Solは起動しません。
-- Sol単独: `sol-advisor:orchestration`だけを使い、GPT Pro loopやこのcompositionは起動しません。
-- 曖昧な言及やインストール済みという事実だけでは併用にしません。
-
-併用モードでも、`sol-advisor:orchestration`をnested invocationしません。設定済み
-advisorのattestationに失敗した場合は相談結果を捨て、モデルやroleを黙って代替せず、
-依存関係エラーとして停止します。
+workerの結果は主タスクがdiff・scope・local evidenceを確認するまで受入れません。
+commit、push、PR、deployment、権限変更、破壊的操作はworkerに委譲しません。

@@ -34,10 +34,13 @@ audit evidence, authority, bounded recurrence, and fail-closed dependency
 handling.
 
 The routing cases also verify Luna / Max as the default implementation worker,
-one-correction Terra / High escalation for difficult or stuck work, Sol
-read-only escalation only after Terra is blocked, and the explicit Test Economy
-defaults. The implementation references keep app-task identity and compact
-verification rules separate from the main router.
+one-correction Terra / High escalation for difficult or stuck work, fail-closed
+Luna/Terra capability preflight, Sol read-only escalation only after Terra is
+blocked, and the explicit Test Economy defaults. Deterministic adversarial
+replays cover missing roles, wrong models, setup-only `clientThreadId`, command
+text-only verification skips, and unanchored test growth. The implementation
+references keep app-task identity and compact verification rules separate from
+the main router.
 
 Run:
 
