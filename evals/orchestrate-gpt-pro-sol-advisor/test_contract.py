@@ -128,6 +128,85 @@ def trusted_host_context(
     return context
 
 
+def luna_runtime_context(**overrides: object) -> dict[str, object]:
+    runtime: dict[str, object] = {
+        "source": "native-capability-preflight",
+        "capabilities": [
+            "list_projects",
+            "create_thread",
+            "list_threads",
+            "wait_threads",
+            "read_thread",
+            "send_message_to_thread",
+        ],
+        "project_type": "git",
+        "workspace_mode": "worktree",
+        "project_id": "project-123",
+        "thread_id": "11111111-1111-7111-8111-111111111111",
+        "host_id": "host-123",
+        "identity_source": "native-create-thread",
+        "task_state": "created",
+        "requested_model": "gpt-5.6-luna",
+        "requested_thinking": "max",
+    }
+    runtime.update(overrides)
+    return runtime
+
+
+def terra_runtime_context(**overrides: object) -> dict[str, object]:
+    runtime: dict[str, object] = {
+        "source": "native-role-preflight",
+        "available_roles": ["sol_advisor_terra_implementer"],
+        "requested_role": "sol_advisor_terra_implementer",
+        "role": "sol_advisor_terra_implementer",
+        "model": "gpt-5.6-terra",
+        "effort": "high",
+        "project_id": "project-123",
+        "thread_id": "22222222-2222-7222-8222-222222222222",
+        "host_id": "host-123",
+        "identity_source": "native-role-spawn",
+        "task_state": "created",
+        "role_template_path": "roles/sol_advisor_terra_implementer.toml",
+        "role_template_status": "exact",
+        "role_template_digest": "sha256:" + "a" * 64,
+        "shipped_role_template_digest": "sha256:" + "a" * 64,
+    }
+    runtime.update(overrides)
+    return runtime
+
+
+def execution_context(
+    thread_id: str,
+    *,
+    outcome: str,
+    **overrides: object,
+) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "source": "native-task-result",
+        "project_id": "project-123",
+        "thread_id": thread_id,
+        "host_id": "host-123",
+        "outcome": outcome,
+    }
+    if outcome == "blocked":
+        evidence.update(
+            {
+                "high_impact_decision_pending": True,
+                "decision_key": "auth-boundary-invariant",
+            }
+        )
+    else:
+        evidence.update(
+            {
+                "root_cause_key": "auth-expiry",
+                "correction_count": 2,
+                "same_root_cause": True,
+            }
+        )
+    evidence.update(overrides)
+    return evidence
+
+
 _RAW_ROUTE = POLICY.route
 _DEFAULT_TRUSTED_HOST = object()
 
@@ -137,6 +216,10 @@ def _route_with_trusted_host(
     *,
     trusted_catalog: dict[str, object] | None = None,
     trusted_host: dict[str, object] | None | object = _DEFAULT_TRUSTED_HOST,
+    trusted_luna_runtime: dict[str, object] | None = None,
+    trusted_terra_runtime: dict[str, object] | None = None,
+    trusted_luna_execution: dict[str, object] | None = None,
+    trusted_terra_execution: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if trusted_host is _DEFAULT_TRUSTED_HOST:
         thread_id = scenario.get(
@@ -147,6 +230,10 @@ def _route_with_trusted_host(
         scenario,
         trusted_catalog=trusted_catalog,
         trusted_host=trusted_host if isinstance(trusted_host, dict) else None,
+        trusted_luna_runtime=trusted_luna_runtime,
+        trusted_terra_runtime=trusted_terra_runtime,
+        trusted_luna_execution=trusted_luna_execution,
+        trusted_terra_execution=trusted_terra_execution,
     )
 
 
@@ -268,6 +355,10 @@ class CompositionContractTests(unittest.TestCase):
             "at most two coarse-grained",
             "dependency-unavailable",
             "sol never edits",
+            "outside the routing scenario",
+            "optional",
+            "role template",
+            "execution evidence",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, skill_text)
@@ -277,8 +368,11 @@ class CompositionContractTests(unittest.TestCase):
         lane_text = " ".join(lane.read_text(encoding="utf-8").lower().split())
         for phrase in (
             "clientthreadid",
+            "project_id",
+            "identity_source",
+            "task_state",
             "requirements_digest",
-            "task_status",
+            "task_state",
             "one precise correction to the same task",
             "sol_advisor_terra_implementer",
             "never silently fall back",
@@ -298,6 +392,10 @@ class CompositionContractTests(unittest.TestCase):
             "one regression witness per root cause",
             "observable behavior",
             "test_delta",
+            "primary_anchor",
+            "also_proves",
+            "five cases",
+            "verification_fingerprint.py",
             "verification_input",
             "unknown siblings are rejected",
         ):
@@ -318,42 +416,174 @@ class CompositionContractTests(unittest.TestCase):
         self.assertNotIn("sol_advisor_terra_implementer", gpc)
 
     def test_verification_skip_requires_the_complete_input_fingerprint(self) -> None:
+        trusted_fingerprint = "sha256:" + "a" * 64
         self.assertEqual(
             {"action": "skip", "reason": "unchanged-successful-input"},
             POLICY.verification_reuse_decision(
                 "pytest tests/auth.py",
-                "sha256:same",
                 {
                     "outcome": "PASS",
                     "command": "pytest tests/auth.py",
-                    "verification_input_fingerprint": "sha256:same",
+                    "verification_input_fingerprint": trusted_fingerprint,
                 },
+                trusted_fingerprint=trusted_fingerprint,
             ),
         )
         for previous in (
             {
                 "outcome": "FAIL",
                 "command": "pytest tests/auth.py",
-                "verification_input_fingerprint": "sha256:same",
+                "verification_input_fingerprint": trusted_fingerprint,
             },
             {
                 "outcome": "PASS",
                 "command": "pytest tests/auth.py",
-                "verification_input_fingerprint": "sha256:old",
+                "verification_input_fingerprint": "sha256:" + "b" * 64,
             },
             {
                 "outcome": "PASS",
                 "command": "pytest tests/other.py",
-                "verification_input_fingerprint": "sha256:same",
+                "verification_input_fingerprint": trusted_fingerprint,
             },
         ):
             with self.subTest(previous=previous):
                 self.assertEqual(
                     {"action": "run", "reason": "verification-input-changed"},
                     POLICY.verification_reuse_decision(
-                        "pytest tests/auth.py", "sha256:same", previous
+                        "pytest tests/auth.py",
+                        previous,
+                        trusted_fingerprint=trusted_fingerprint,
                     ),
                 )
+
+    def test_worker_runtime_evidence_must_be_external_and_identity_bound(self) -> None:
+        self_claim = POLICY.route(
+            valid_combined(
+                implementation_request=True,
+                luna_runtime_preflight=luna_runtime_context(),
+            )
+        )
+        self.assertEqual("luna-capability-preflight-failed", self_claim["terminal"])
+
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(),
+        )
+        self.assertEqual("luna-implementation", accepted["terminal"])
+        self.assertEqual("project-123", accepted["implementation_preflight"]["luna"]["project_id"])
+        self.assertEqual("host-123", accepted["implementation_preflight"]["luna"]["host_id"])
+        self.assertEqual(
+            "11111111-1111-7111-8111-111111111111",
+            accepted["implementation_preflight"]["luna"]["thread_id"],
+        )
+
+    def test_luna_model_observation_is_optional_but_mismatch_is_rejected(self) -> None:
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(),
+        )
+        self.assertTrue(accepted["implementation_available"])
+
+        mismatched = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(
+                observed_model="gpt-5.6-terra",
+                observed_thinking="max",
+            ),
+        )
+        self.assertEqual("luna-capability-preflight-failed", mismatched["terminal"])
+
+    def test_luna_escalation_requires_separate_execution_evidence(self) -> None:
+        scenario = valid_combined(
+            implementation_request=True,
+            luna_same_root_cause_failed=True,
+        )
+        missing_execution = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("luna-execution-evidence-failed", missing_execution["terminal"])
+
+        escalated = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_luna_execution=execution_context(
+                "11111111-1111-7111-8111-111111111111", outcome="failed"
+            ),
+        )
+        self.assertEqual("terra-implementation", escalated["terminal"])
+
+    def test_terra_requires_exact_shipped_role_template_provenance(self) -> None:
+        missing_template = POLICY.route(
+            valid_combined(implementation_request=True, difficult_scope=True),
+            trusted_terra_runtime=terra_runtime_context(
+                role_template_status="stale"
+            ),
+        )
+        self.assertEqual("terra-capability-preflight-failed", missing_template["terminal"])
+
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True, difficult_scope=True),
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("terra-implementation", accepted["terminal"])
+
+    def test_terra_to_sol_escalation_requires_blocked_execution_evidence(self) -> None:
+        scenario = attested_combined(
+            implementation_request=True,
+            terra_blocked=True,
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Which safety invariant must Terra preserve?",
+            material_risk=True,
+            decision_value=True,
+        )
+        missing_execution = POLICY.route(
+            scenario,
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("terra-execution-evidence-failed", missing_execution["terminal"])
+
+        admitted = POLICY.route(
+            scenario,
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_terra_execution=execution_context(
+                "22222222-2222-7222-8222-222222222222", outcome="blocked"
+            ),
+        )
+        self.assertEqual("primary-disposition", admitted["terminal"])
+        self.assertEqual(1, admitted["sol_calls"])
+
+    def test_test_witnesses_have_one_primary_anchor_and_bounded_growth(self) -> None:
+        self.assertEqual(
+            {"action": "allow-minimal-witness", "reason": "anchored-witness"},
+            POLICY.test_witness_decision(
+                [
+                    {
+                        "primary_anchor": "AC-3",
+                        "also_proves": ["RISK-1", "BUG-auth-expiry"],
+                        "case_count": 2,
+                    }
+                ]
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unbounded-anchor-growth"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-3", "also_proves": [], "case_count": 20}]
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "duplicate-primary-anchor"},
+            POLICY.test_witness_decision(
+                [
+                    {"primary_anchor": "AC-3", "also_proves": [], "case_count": 1},
+                    {"primary_anchor": "AC-3", "also_proves": [], "case_count": 1},
+                ]
+            ),
+        )
 
     def test_combined_mode_does_not_invoke_sol_orchestration(self) -> None:
         lower = self.skill.lower()
@@ -1338,9 +1568,23 @@ class CompositionContractTests(unittest.TestCase):
                             "runtime_inspector_output": output,
                         }
                     scenario = attested_combined(**scenario)
+                trusted_runtime = case.get("trusted_runtime", {})
+                trusted_execution = case.get("trusted_execution", {})
                 actual = POLICY.route(
                     scenario,
                     trusted_catalog=trusted_catalog_context(),
+                    trusted_luna_runtime=trusted_runtime.get("luna")
+                    if isinstance(trusted_runtime, dict)
+                    else None,
+                    trusted_terra_runtime=trusted_runtime.get("terra")
+                    if isinstance(trusted_runtime, dict)
+                    else None,
+                    trusted_luna_execution=trusted_execution.get("luna")
+                    if isinstance(trusted_execution, dict)
+                    else None,
+                    trusted_terra_execution=trusted_execution.get("terra")
+                    if isinstance(trusted_execution, dict)
+                    else None,
                 )
                 for key, value in case["expect"].items():
                     self.assertEqual(value, actual.get(key), key)
@@ -1530,7 +1774,7 @@ class CompositionContractTests(unittest.TestCase):
                     "workspace_mode": "worktree",
                     "model": "gpt-5.6-luna",
                     "thinking": "max",
-                    "task_status": "clientThreadId-only",
+                    "task_state": "ready",
                 },
             ),
             "terra-missing-role": valid_combined(
@@ -1545,20 +1789,33 @@ class CompositionContractTests(unittest.TestCase):
                     if key in trace:
                         self.assertEqual(trace[key], actual.get(key), key)
 
+        trust_boundary = results["worker_trust_boundary"]
+        self.assertEqual(5, len(trust_boundary["baseline"]))
+        self.assertEqual(5, len(trust_boundary["with_skill"]))
+        self.assertTrue(all(item["contract_violation"] for item in trust_boundary["baseline"]))
+        self.assertTrue(all(not item["contract_violation"] for item in trust_boundary["with_skill"]))
+
+        fresh_pressure = results["fresh_context_pressure_prompts"]
+        self.assertFalse(fresh_pressure["executed_here"])
+        self.assertEqual(5, len(fresh_pressure["prompts"]))
+        self.assertTrue(fresh_pressure["required_observations"])
+
         economy = results["verification_economy"]
         self.assertEqual("deterministic-policy-replay", economy["evaluation_mode"])
         self.assertTrue(all(item["contract_violation"] for item in economy["baseline"]))
         verification_replays = {
             "same-command-new-tree": POLICY.verification_reuse_decision(
                 "pytest tests/auth.py",
-                "sha256:new-tree",
                 {
                     "outcome": "PASS",
                     "command": "pytest tests/auth.py",
-                    "verification_input_fingerprint": "sha256:old-tree",
+                    "verification_input_fingerprint": "sha256:" + "b" * 64,
                 },
+                trusted_fingerprint="sha256:" + "c" * 64,
             ),
-            "test-count-without-anchor": POLICY.test_witness_decision([]),
+            "test-count-without-anchor": POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-1", "also_proves": [], "case_count": 20}]
+            ),
         }
         for trace in economy["with_skill"]:
             with self.subTest(sample=trace["sample"]):

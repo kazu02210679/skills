@@ -1,66 +1,61 @@
 # Luna-first implementation lane
 
-This contract applies only after the user explicitly selects combined mode.
-It is owned by the Codex primary task; it is not a nested invocation of
-`sol-advisor:orchestration` and it does not transfer authority to Luna.
+This contract applies only after explicit combined-mode selection. The Codex
+primary task owns it; it is not a nested `sol-advisor:orchestration` call.
 
-## Runtime capability preflight
+## Runtime capability and identity
 
-Before routing, observe the app surface rather than trusting requested settings
-or model output. For a Git project, require all of these:
+Read these values from the native/app adapter as trusted inputs outside the
+routing scenario. A scenario cannot promote a self-described native JSON object:
 
-- `list_projects` identifies the target project as a Git repository.
-- `create_thread`, `list_threads`, `wait_threads`, `read_thread`, and
+- `list_projects` identifies the selected project as a Git repository, and
+  `create_thread`, `list_threads`, `wait_threads`, `read_thread`, and
   `send_message_to_thread` are available.
-- The creation result resolves to a real task/thread identity. A pending
-  `clientThreadId` is only a setup handle; do not call wait/read/send against it.
-- The task observes exactly `gpt-5.6-luna` with `thinking: max`, and the
-  preflight record contains `task_status: ready` before work is accepted.
+- The accepted Luna route has real `project_id`, `thread_id`, and `host_id`, an
+  allowed `identity_source`, and `task_state` `created` or `ready`.
+- A `clientThreadId` is a setup handle, not a task identity; never wait/read/send
+  against it. The accepted request is exactly `gpt-5.6-luna` / `thinking: max`.
+  Returned model/thinking metadata is optional, but a returned mismatch fails.
 
-If any check fails, stop with `dependency-unavailable`. Never silently fall back
-to Terra or Sol and never call a stale or guessed thread.
+Missing capability, identity, or route evidence is `dependency-unavailable`.
+Never silently fall back to Terra or Sol, and never use a guessed or stale
+thread.
 
 ## Task packet
 
-Use one coarse-grained, independently verifiable responsibility per task. Keep
-the packet bounded. Pass:
+Use one coarse, independently verifiable responsibility per task. Pass only:
 
-- `requirements_digest` and only the relevant requirement/Acceptance Criterion IDs
-- the objective, owned file scope, interfaces, cross-cutting constraints, and base commit
-- the focused verification command and the Test Economy anchors
-- the no-push/no-PR boundary and a structured return contract
+- `requirements_digest` plus relevant requirement/Acceptance Criterion IDs;
+- objective, owned files, interfaces, cross-cutting constraints, and base commit;
+- focused verification command, Test Economy anchors, and no-push/no-PR boundary;
+- structured return fields for changed files, tests, blockers, and task identity.
 
-Do not copy the complete frozen requirements into every task. The digest, relevant
-IDs, and task-specific constraints preserve the boundary with less context. The
-primary task retains the complete frozen packet and owns acceptance.
+Do not copy complete frozen requirements into every packet. Use the digest and
+IDs; the primary retains the full frozen packet and acceptance authority. Use
+isolated Git worktrees, at most two independent Luna tasks, and no task per file
+or test.
 
-Use the app's default isolated worktree for Git projects. Keep at most two
-independent Luna tasks in parallel by default. Serialize shared files, dependent
-stacks, and integration work; do not spawn one task per file or test.
+## Correction, Terra, and Sol
 
-## Correction and Terra escalation
+If Luna is incomplete, send **one precise correction to the same task**. Inspect
+the actual worktree, branch, owned scope, and diff in the primary task.
 
-If the first Luna result is incomplete, send one precise correction to the same
-task. Inspect the actual worktree, branch, owned scope, and diff in the
-primary task; a worker report is not acceptance evidence.
+Routing attestation and execution outcome are separate. A same-root-cause Terra
+escalation requires trusted native task-result/wait evidence bound to the Luna
+`project_id`, `thread_id`, and `host_id`, reporting two corrections and one
+repeated root-cause key.
 
-Escalate to the exact native role `sol_advisor_terra_implementer` only when:
+For difficult scope, a stuck/repeated Luna result, or concurrency, security,
+migration, shared state, cross-workstream, performance, or broad-blast-radius
+work, preflight the exact native role
+`sol_advisor_terra_implementer`. Require real project/thread/host identity,
+observed `gpt-5.6-terra` / `high`, and exact role-template status with matching
+role-template and shipped-template SHA-256 digests. If any role, identity,
+template, or execution evidence is missing, stop with `dependency-unavailable`;
+never silently fall back.
 
-- Luna fails again for the same root cause or remains stuck;
-- the work needs concurrency, security-sensitive logic, a migration, shared
-  state, cross-workstream integration, difficult performance debugging, or a
-  broad-blast-radius change; or
-- multiple Luna worktrees need integration and the primary cannot establish a
-  safe bounded plan.
-
-Before accepting Terra, independently preflight that the native role is exposed,
-the task is ready, and the observed role/model/effort are exactly
-`sol_advisor_terra_implementer` / `gpt-5.6-terra` / `high`. If the exact role is
-missing or mismatched, stop with `dependency-unavailable`; do not substitute a
-role, add per-spawn overrides, or fall back silently.
-
-If Terra still cannot resolve one high-impact architecture, safety, or risk
-question, consult `sol_advisor_advisor` once with a bounded read-only packet.
-Sol cannot edit, implement, approve, waive verification, or decide completion.
-After the primary records `accept`, `reject`, or `partially accept`, return code
-work to Luna/Terra and re-verify.
+Only a trusted Terra result bound to that identity and blocked on one
+high-impact architecture, safety, or risk decision permits one bounded,
+read-only `sol_advisor_advisor` consultation. Sol cannot edit, implement,
+approve, waive verification, or decide completion. Return work to Luna/Terra
+and re-verify after the primary records the disposition.

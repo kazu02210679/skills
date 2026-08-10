@@ -29,7 +29,13 @@ GPT Pro → Codex Primary → Luna / Max
 Lunaは1 taskを粗くboundedにし、並列は原則2件までです。Lunaが同じroot causeで
 もう一度失敗した場合、またはconcurrency、security、migration、shared state、
 統合、性能、広い波及範囲がある場合だけTerraへ昇格します。Solへの自動昇格や
-Solによる実装は行いません。
+Solによる実装は行いません。workerのruntime証拠はscenario内の自己申告ではなく、
+native/app adapterから別入力で受け取ります。Lunaは実project/thread/host identityを
+必須とし、`clientThreadId`だけでは進めません。返却model/thinkingは省略可能ですが、
+返却された場合の不一致は拒否します。Terraはrole/model/effortに加えて、shipped role
+templateとの一致digestを要求します。routing attestationとexecution outcomeを分離し、
+同じroot causeの再試行やTerraからSolへの昇格には、task identityにbindしたnative
+execution evidenceを要求します。
 
 詳細なtask identity・runtime capability preflight・Terra attestationは
 [references/luna-implementation-lane.md](references/luna-implementation-lane.md)、
@@ -41,9 +47,12 @@ Solによる実装は行いません。
 - 新規testはAcceptance Criterion、material risk、bug root causeのいずれかに紐付ける
 - `new_test_files = 0`をデフォルトにする
 - bug fixはroot causeごとに原則1 regression witness、同等入力はtable-drivenにまとめる
+- witnessは`primary_anchor`を1つだけ持ち、必要なら`also_proves`を追加する
+- 1つのprimary anchorに5件を超えるtestを付ける場合は、materially-distinctな理由を記録する
 - privateな実装詳細ではなくobservable behavior/public contractを検証する
 - L0 → L1を基本にし、共有API・依存・schema・shared coreだけL2/L3へ上げる
-- 成功済みcommandの再実行は、commandと検証入力fingerprintが変わった場合だけ行う
+- 成功済みcommandの再実行は、`scripts/verification_fingerprint.py`が現treeから生成した
+  fingerprintが変わった場合だけ行う。前回値の転記は証拠にしない
 - `--local-evidence`のclosed schemaを守り、metrics・test delta・fingerprintは`output_summary`にcompact化する
 
 ## モード境界

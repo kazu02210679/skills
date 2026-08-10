@@ -24,6 +24,13 @@ LUNA_REQUIRED_CAPABILITIES = frozenset(
         "send_message_to_thread",
     }
 )
+WORKER_IDENTITY_SOURCES = {
+    "luna": frozenset({"native-create-thread", "native-thread-discovery"}),
+    "terra": frozenset({"native-role-spawn", "native-role-discovery"}),
+}
+WORKER_TASK_STATES = frozenset({"created", "ready"})
+EXECUTION_SOURCES = frozenset({"native-task-result", "native-wait", "native-details"})
+DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUNTIME_FIELDS = {
     "role": "observed_advisor_role",
     "model": "observed_advisor_model",
@@ -384,75 +391,98 @@ def _runtime_attestation(
 
 
 def _worker_preflight(
-    scenario: dict[str, Any], worker: str
+    trusted_runtime: Any, worker: str
 ) -> tuple[dict[str, Any], list[str]]:
-    """Require observed runtime capability before claiming an implementation route."""
+    """Validate native worker routing evidence supplied outside the scenario."""
 
     field = f"{worker}_runtime_preflight"
-    value = scenario.get(field)
-    if not isinstance(value, dict):
-        return {}, [f"{field}: missing native runtime observation"]
+    if not isinstance(trusted_runtime, dict):
+        return {}, [f"{field}: missing trusted native runtime observation"]
 
+    identity_keys = {
+        "project_id",
+        "thread_id",
+        "host_id",
+        "identity_source",
+        "task_state",
+    }
     if worker == "luna":
-        expected_keys = {
+        required_keys = {
             "source",
             "capabilities",
             "project_type",
             "workspace_mode",
-            "model",
-            "thinking",
-            "task_status",
+            "requested_model",
+            "requested_thinking",
+            *identity_keys,
         }
-        required_capabilities = LUNA_REQUIRED_CAPABILITIES
+        allowed_keys = required_keys | {
+            "client_thread_id",
+            "observed_model",
+            "observed_thinking",
+        }
         expected_values = {
             "source": "native-capability-preflight",
             "project_type": "git",
             "workspace_mode": "worktree",
-            "model": LUNA_MODEL,
-            "thinking": "max",
-            "task_status": "ready",
+            "requested_model": LUNA_MODEL,
+            "requested_thinking": "max",
         }
     elif worker == "terra":
-        expected_keys = {
+        required_keys = {
             "source",
             "available_roles",
+            "requested_role",
             "role",
             "model",
             "effort",
-            "task_status",
+            "role_template_path",
+            "role_template_status",
+            "role_template_digest",
+            "shipped_role_template_digest",
+            *identity_keys,
         }
+        allowed_keys = required_keys
         expected_values = {
             "source": "native-role-preflight",
+            "requested_role": TERRA_IMPLEMENTER_ROLE,
             "role": TERRA_IMPLEMENTER_ROLE,
             "model": TERRA_MODEL,
             "effort": "high",
-            "task_status": "ready",
+            "role_template_status": "exact",
         }
     else:
         return {}, [f"{field}: unsupported worker"]
 
     errors: list[str] = []
-    missing = sorted(expected_keys - set(value))
-    unknown = sorted(set(value) - expected_keys)
+    missing = sorted(required_keys - set(trusted_runtime))
+    unknown = sorted(set(trusted_runtime) - allowed_keys)
     errors.extend(f"{field}: missing {item}" for item in missing)
     errors.extend(f"{field}: unknown {item}" for item in unknown)
     for key, expected in expected_values.items():
-        if value.get(key) != expected:
+        if trusted_runtime.get(key) != expected:
             errors.append(f"{field}.{key}: expected {expected}")
 
+    capabilities = trusted_runtime.get("capabilities")
     if worker == "luna":
-        capabilities = value.get("capabilities")
         if not isinstance(capabilities, list) or any(
             not isinstance(item, str) or not item.strip() for item in capabilities
-        ):
-            errors.append(f"{field}.capabilities: must be a list of names")
-        else:
+        ) or len(capabilities) != len(set(capabilities)):
+            errors.append(f"{field}.capabilities: must be a unique list of names")
+        elif not LUNA_REQUIRED_CAPABILITIES.issubset(set(capabilities)):
             errors.extend(
                 f"{field}.capabilities: missing {item}"
-                for item in sorted(required_capabilities - set(capabilities))
+                for item in sorted(LUNA_REQUIRED_CAPABILITIES - set(capabilities))
             )
+        for optional, expected in (
+            ("observed_model", LUNA_MODEL),
+            ("observed_thinking", "max"),
+        ):
+            observed = trusted_runtime.get(optional)
+            if observed is not None and observed != expected:
+                errors.append(f"{field}.{optional}: expected {expected}")
     else:
-        roles = value.get("available_roles")
+        roles = trusted_runtime.get("available_roles")
         if not isinstance(roles, list) or any(
             not isinstance(item, str) or not item.strip() for item in roles
         ):
@@ -461,13 +491,147 @@ def _worker_preflight(
             errors.append(
                 f"{field}.available_roles: missing {TERRA_IMPLEMENTER_ROLE}"
             )
+        if trusted_runtime.get("role_template_digest") != trusted_runtime.get(
+            "shipped_role_template_digest"
+        ):
+            errors.append(f"{field}: role template digest mismatch")
+        for key in ("role_template_path", "role_template_digest", "shipped_role_template_digest"):
+            if not isinstance(trusted_runtime.get(key), str) or not trusted_runtime[key].strip():
+                errors.append(f"{field}.{key}: must be non-empty")
+        for key in ("role_template_digest", "shipped_role_template_digest"):
+            value = trusted_runtime.get(key)
+            if isinstance(value, str) and DIGEST_PATTERN.fullmatch(value) is None:
+                errors.append(f"{field}.{key}: must be a sha256 digest")
+
+    for key in ("project_id", "host_id", "identity_source"):
+        value = trusted_runtime.get(key)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{field}.{key}: must be non-empty")
+    thread_id = trusted_runtime.get("thread_id")
+    if not isinstance(thread_id, str) or THREAD_ID_PATTERN.fullmatch(thread_id) is None:
+        errors.append(f"{field}.thread_id: must be a real thread identity")
+    if trusted_runtime.get("identity_source") not in WORKER_IDENTITY_SOURCES[worker]:
+        errors.append(f"{field}.identity_source: unsupported native identity source")
+    if trusted_runtime.get("task_state") not in WORKER_TASK_STATES:
+        errors.append(f"{field}.task_state: must be a routing-ready state")
+    client_thread_id = trusted_runtime.get("client_thread_id")
+    if client_thread_id is not None and (
+        not isinstance(client_thread_id, str)
+        or not client_thread_id.strip()
+        or client_thread_id == thread_id
+    ):
+        errors.append(f"{field}.client_thread_id: setup handle cannot be task identity")
 
     if errors:
         return {}, sorted(set(errors))
-    return {
+    result = {
         "worker": worker,
-        "source": str(value["source"]),
+        "source": str(trusted_runtime["source"]),
         "status": "ready",
+        "project_id": str(trusted_runtime["project_id"]),
+        "thread_id": str(trusted_runtime["thread_id"]),
+        "host_id": str(trusted_runtime["host_id"]),
+        "identity_source": str(trusted_runtime["identity_source"]),
+        "task_state": str(trusted_runtime["task_state"]),
+    }
+    if worker == "luna":
+        result.update(
+            {
+                "requested_model": str(trusted_runtime["requested_model"]),
+                "requested_thinking": str(trusted_runtime["requested_thinking"]),
+            }
+        )
+        for key in ("observed_model", "observed_thinking"):
+            if key in trusted_runtime:
+                result[key] = str(trusted_runtime[key])
+    else:
+        result.update(
+            {
+                "role": str(trusted_runtime["role"]),
+                "model": str(trusted_runtime["model"]),
+                "effort": str(trusted_runtime["effort"]),
+                "role_template_path": str(trusted_runtime["role_template_path"]),
+                "role_template_status": str(trusted_runtime["role_template_status"]),
+                "role_template_digest": str(trusted_runtime["role_template_digest"]),
+            }
+        )
+    return result, []
+
+
+def _execution_evidence(
+    trusted_execution: Any,
+    worker: str,
+    route_evidence: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Validate native task outcome separately from routing attestation."""
+
+    field = f"{worker}_execution_evidence"
+    if not isinstance(trusted_execution, dict):
+        return {}, [f"{field}: missing trusted native task result"]
+    if worker == "luna":
+        required_keys = {
+            "source",
+            "project_id",
+            "thread_id",
+            "host_id",
+            "outcome",
+            "root_cause_key",
+            "correction_count",
+            "same_root_cause",
+        }
+        expected_outcomes = {"failed", "partial", "blocked"}
+    elif worker == "terra":
+        required_keys = {
+            "source",
+            "project_id",
+            "thread_id",
+            "host_id",
+            "outcome",
+            "high_impact_decision_pending",
+            "decision_key",
+        }
+        expected_outcomes = {"blocked"}
+    else:
+        return {}, [f"{field}: unsupported worker"]
+
+    errors: list[str] = []
+    missing = sorted(required_keys - set(trusted_execution))
+    unknown = sorted(set(trusted_execution) - required_keys)
+    errors.extend(f"{field}: missing {item}" for item in missing)
+    errors.extend(f"{field}: unknown {item}" for item in unknown)
+    if trusted_execution.get("source") not in EXECUTION_SOURCES:
+        errors.append(f"{field}.source: unsupported native task result")
+    if trusted_execution.get("outcome") not in expected_outcomes:
+        errors.append(f"{field}.outcome: unsupported execution outcome")
+    for key in ("project_id", "thread_id", "host_id"):
+        if trusted_execution.get(key) != route_evidence.get(key):
+            errors.append(f"{field}.{key}: does not bind to routed task")
+    if worker == "luna":
+        if type(trusted_execution.get("correction_count")) is not int or trusted_execution["correction_count"] < 2:
+            errors.append(f"{field}.correction_count: must prove two corrections")
+        if trusted_execution.get("same_root_cause") is not True:
+            errors.append(f"{field}.same_root_cause: must be true")
+        if not isinstance(trusted_execution.get("root_cause_key"), str) or not trusted_execution["root_cause_key"].strip():
+            errors.append(f"{field}.root_cause_key: must be non-empty")
+    else:
+        if trusted_execution.get("high_impact_decision_pending") is not True:
+            errors.append(f"{field}.high_impact_decision_pending: must be true")
+        if not isinstance(trusted_execution.get("decision_key"), str) or not trusted_execution["decision_key"].strip():
+            errors.append(f"{field}.decision_key: must be non-empty")
+    if errors:
+        return {}, sorted(set(errors))
+    return {
+        "source": str(trusted_execution["source"]),
+        "outcome": str(trusted_execution["outcome"]),
+        "thread_id": str(trusted_execution["thread_id"]),
+        **(
+            {
+                "root_cause_key": str(trusted_execution["root_cause_key"]),
+                "correction_count": int(trusted_execution["correction_count"]),
+            }
+            if worker == "luna"
+            else {"decision_key": str(trusted_execution["decision_key"])}
+        ),
     }, []
 
 
@@ -493,8 +657,38 @@ def _implementation_failure(
     }
 
 
+def _execution_failure(
+    scenario: dict[str, Any],
+    preserved: dict[str, Any],
+    worker: str,
+    errors: list[str],
+) -> dict[str, Any]:
+    return {
+        "selected_mode": "combined",
+        "implementation_request": True,
+        **preserved,
+        "sol_calls": 0,
+        "implementation_available": False,
+        "dependency": f"{worker}-execution-runtime",
+        "execution_errors": errors,
+        "advice_admitted": 0,
+        "advice_discarded": True,
+        "fallback_calls": 0,
+        "compatibility_fallback": False,
+        "silent_downgrade": False,
+        "terra_escalated": worker == "terra",
+        "luna_attempts": scenario.get("luna_attempts", 0),
+        "terminal": f"{worker}-execution-evidence-failed",
+    }
+
+
 def _implementation_route(
-    scenario: dict[str, Any], preserved: dict[str, Any]
+    scenario: dict[str, Any],
+    preserved: dict[str, Any],
+    *,
+    trusted_luna_runtime: dict[str, Any] | None,
+    trusted_terra_runtime: dict[str, Any] | None,
+    trusted_luna_execution: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Route a Codex-owned implementation without invoking Sol advisory logic."""
 
@@ -511,18 +705,24 @@ def _implementation_route(
         or scenario.get("difficult_scope")
         or same_root_cause_failed
     )
+    luna_preflight: dict[str, Any] | None = None
+    luna_execution: dict[str, Any] | None = None
+    if same_root_cause_failed:
+        luna_preflight, luna_errors = _worker_preflight(trusted_luna_runtime, "luna")
+        if luna_errors:
+            return _implementation_failure(scenario, preserved, "luna", luna_errors)
+        luna_execution, execution_errors = _execution_evidence(
+            trusted_luna_execution, "luna", luna_preflight
+        )
+        if execution_errors:
+            return _execution_failure(
+                scenario, preserved, "luna", execution_errors
+            )
+
     if terra_required:
-        preflight, errors = _worker_preflight(scenario, "terra")
+        preflight, errors = _worker_preflight(trusted_terra_runtime, "terra")
         if errors:
             return _implementation_failure(scenario, preserved, "terra", errors)
-        if same_root_cause_failed:
-            luna_preflight, luna_errors = _worker_preflight(scenario, "luna")
-            if luna_errors:
-                return _implementation_failure(
-                    scenario, preserved, "luna", luna_errors
-                )
-        else:
-            luna_preflight = None
         return {
             **common,
             "implementation_lane": TERRA_IMPLEMENTER_ROLE,
@@ -535,9 +735,10 @@ def _implementation_route(
                 "terra": preflight,
                 **({"luna": luna_preflight} if luna_preflight else {}),
             },
+            **({"luna_execution": luna_execution} if luna_execution else {}),
             "terminal": "terra-implementation",
         }
-    preflight, errors = _worker_preflight(scenario, "luna")
+    preflight, errors = _worker_preflight(trusted_luna_runtime, "luna")
     if errors:
         return _implementation_failure(scenario, preserved, "luna", errors)
     return {
@@ -558,6 +759,10 @@ def route(
     *,
     trusted_catalog: dict[str, Any] | None = None,
     trusted_host: dict[str, Any] | None = None,
+    trusted_luna_runtime: dict[str, Any] | None = None,
+    trusted_terra_runtime: dict[str, Any] | None = None,
+    trusted_luna_execution: dict[str, Any] | None = None,
+    trusted_terra_execution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     intent = scenario["intent"]
     if intent == "gpt-pro-only":
@@ -568,6 +773,10 @@ def route(
         return {
             "selected_mode": intent,
             "test_anchor_required": True,
+            "primary_anchor_required": True,
+            "also_proves_allowed": True,
+            "max_unjustified_cases_per_anchor": 5,
+            "materially_distinct_justification_required": True,
             "test_delta_anchors_required": True,
             "verification_input_fingerprint_required": True,
             "skip_requires_same_fingerprint": True,
@@ -661,12 +870,26 @@ def route(
         "local_verification_retained": True,
         "pro_review_retained": True,
     }
+    terra_blocked_execution: dict[str, Any] | None = None
     if scenario.get("implementation_request") and not scenario.get("terra_blocked"):
-        return _implementation_route(scenario, preserved)
+        return _implementation_route(
+            scenario,
+            preserved,
+            trusted_luna_runtime=trusted_luna_runtime,
+            trusted_terra_runtime=trusted_terra_runtime,
+            trusted_luna_execution=trusted_luna_execution,
+        )
     if scenario.get("implementation_request") and scenario.get("terra_blocked"):
-        preflight, errors = _worker_preflight(scenario, "terra")
+        preflight, errors = _worker_preflight(trusted_terra_runtime, "terra")
         if errors:
             return _implementation_failure(scenario, preserved, "terra", errors)
+        terra_blocked_execution, execution_errors = _execution_evidence(
+            trusted_terra_execution, "terra", preflight
+        )
+        if execution_errors:
+            return _execution_failure(
+                scenario, preserved, "terra", execution_errors
+            )
     if scenario.get("mandatory_final_sol_review"):
         return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
@@ -733,6 +956,8 @@ def route(
                 "sol_is_implementation": False,
                 "terra_escalated": True,
                 "luna_attempts": scenario.get("luna_attempts", 2),
+                "implementation_preflight": {"terra": preflight},
+                "terra_execution": terra_blocked_execution,
             }
         )
     return result
@@ -756,29 +981,60 @@ def evaluate_advice(advice: dict[str, Any]) -> dict[str, str]:
 
 
 def verification_reuse_decision(
-    command: Any, current_fingerprint: Any, previous: Any
+    command: Any,
+    previous: Any,
+    *,
+    trusted_fingerprint: Any,
 ) -> dict[str, str]:
-    """Skip only an unchanged successful verification, never by command text alone."""
+    """Use only a fingerprint produced by the local tree-reading helper."""
 
     if not isinstance(command, str) or not command.strip():
         return {"action": "run", "reason": "invalid-command"}
-    if not isinstance(current_fingerprint, str) or not current_fingerprint.strip():
-        return {"action": "run", "reason": "missing-current-fingerprint"}
+    if (
+        not isinstance(trusted_fingerprint, str)
+        or DIGEST_PATTERN.fullmatch(trusted_fingerprint) is None
+    ):
+        return {"action": "run", "reason": "missing-trusted-fingerprint"}
     if (
         isinstance(previous, dict)
         and previous.get("outcome") == "PASS"
         and previous.get("command") == command
-        and previous.get("verification_input_fingerprint") == current_fingerprint
+        and previous.get("verification_input_fingerprint") == trusted_fingerprint
     ):
         return {"action": "skip", "reason": "unchanged-successful-input"}
     return {"action": "run", "reason": "verification-input-changed"}
 
 
-def test_witness_decision(anchors: Any) -> dict[str, str]:
-    """Require a bounded acceptance/risk/root-cause anchor for each new witness."""
+def test_witness_decision(witnesses: Any) -> dict[str, str]:
+    """Require one primary anchor and bounded, materially justified growth."""
 
-    if not isinstance(anchors, list) or not anchors or any(
-        not isinstance(anchor, str) or not anchor.strip() for anchor in anchors
-    ):
+    if not isinstance(witnesses, list) or not witnesses:
         return {"action": "reject-test-addition", "reason": "missing-test-anchor"}
+    seen: set[str] = set()
+    for witness in witnesses:
+        if not isinstance(witness, dict):
+            return {"action": "reject-test-addition", "reason": "malformed-test-witness"}
+        primary = witness.get("primary_anchor")
+        if not isinstance(primary, str) or not primary.strip():
+            return {"action": "reject-test-addition", "reason": "missing-primary-anchor"}
+        if primary in seen:
+            if witness.get("materially_distinct") is not True or not isinstance(
+                witness.get("justification"), str
+            ) or not witness["justification"].strip():
+                return {"action": "reject-test-addition", "reason": "duplicate-primary-anchor"}
+        seen.add(primary)
+        also_proves = witness.get("also_proves", [])
+        if not isinstance(also_proves, list) or any(
+            not isinstance(anchor, str) or not anchor.strip() for anchor in also_proves
+        ):
+            return {"action": "reject-test-addition", "reason": "malformed-secondary-anchor"}
+        case_count = witness.get("case_count", 1)
+        if type(case_count) is not int or case_count < 1:
+            return {"action": "reject-test-addition", "reason": "invalid-case-count"}
+        if case_count > 5 and (
+            witness.get("materially_distinct") is not True
+            or not isinstance(witness.get("justification"), str)
+            or not witness["justification"].strip()
+        ):
+            return {"action": "reject-test-addition", "reason": "unbounded-anchor-growth"}
     return {"action": "allow-minimal-witness", "reason": "anchored-witness"}

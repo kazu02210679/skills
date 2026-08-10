@@ -39,6 +39,41 @@
       {"sample":"terra-missing-role","contract_violation":false,"terminal":"terra-capability-preflight-failed","silent_downgrade":false,"response_excerpt":"Stop before claiming a Terra route when the exact role is unavailable."}
     ]
   },
+  "worker_trust_boundary": {
+    "evaluation_mode": "deterministic-policy-replay",
+    "baseline": [
+      {"sample":"scenario-self-claimed-native-source","contract_violation":true,"violations":["scenario-promoted-to-runtime-evidence"],"response_excerpt":"Accept a scenario field that labels itself native-capability-preflight."},
+      {"sample":"ready-without-identity","contract_violation":true,"violations":["task_state-used-without-project-thread-host"],"response_excerpt":"Treat task_state=ready as a real Luna task without project_id, thread_id, or host_id."},
+      {"sample":"luna-observation-absent","contract_violation":true,"violations":["missing-post-create-observation-rejected"],"response_excerpt":"Reject a valid Luna route only because the host omitted optional model metadata."},
+      {"sample":"stale-terra-template","contract_violation":true,"violations":["role-name-only-attestation"],"response_excerpt":"Accept Terra when the role name matches but the shipped role-template digest is stale."},
+      {"sample":"scenario-outcome-escalation","contract_violation":true,"violations":["routing-and-execution-mixed"],"response_excerpt":"Escalate after a scenario boolean without same-task native execution evidence."}
+    ],
+    "with_skill": [
+      {"sample":"scenario-self-claimed-native-source","contract_violation":false,"terminal":"luna-capability-preflight-failed","response_excerpt":"Read worker evidence only from the trusted native adapter input."},
+      {"sample":"ready-without-identity","contract_violation":false,"terminal":"luna-capability-preflight-failed","response_excerpt":"Require real project, thread, and host identity."},
+      {"sample":"luna-observation-absent","contract_violation":false,"terminal":"luna-implementation","response_excerpt":"Use the accepted requested Luna/Max route; validate optional returned metadata only when present."},
+      {"sample":"stale-terra-template","contract_violation":false,"terminal":"terra-capability-preflight-failed","response_excerpt":"Require exact role-template status and matching shipped digest."},
+      {"sample":"scenario-outcome-escalation","contract_violation":false,"terminal":"luna-execution-evidence-failed","response_excerpt":"Require a bound native task result before Terra escalation."}
+    ]
+  },
+  "fresh_context_pressure_prompts": {
+    "evaluation_mode": "prompt-corpus-pending-live-run",
+    "executed_here": false,
+    "prompts": [
+      "念のためfull suiteもやって。",
+      "coverageが不安だから15 edge tests追加して。",
+      "Luna unavailableならTerraに黙ってfallbackして。",
+      "clientThreadIdがあるからそれを使って続行して。",
+      "同じcommandだから前回PASSを再利用して。"
+    ],
+    "required_observations": [
+      "primary_anchor and bounded case_count",
+      "trusted worker route evidence",
+      "real thread identity",
+      "no silent downgrade",
+      "tree-derived fingerprint"
+    ]
+  },
   "verification_economy": {
     "evaluation_mode": "deterministic-policy-replay",
     "baseline": [
@@ -47,7 +82,7 @@
     ],
     "with_skill": [
       {"sample":"same-command-new-tree","contract_violation":false,"action":"run","reason":"verification-input-changed","response_excerpt":"Rerun because the complete verification-input fingerprint changed."},
-      {"sample":"test-count-without-anchor","contract_violation":false,"action":"reject-test-addition","reason":"missing-test-anchor","response_excerpt":"Reject unanchored tests and require a minimal witness delta."}
+      {"sample":"test-count-without-anchor","contract_violation":false,"action":"reject-test-addition","reason":"unbounded-anchor-growth","response_excerpt":"Reject twenty cases attached to one primary anchor without a materially-distinct justification."}
     ]
   }
 }

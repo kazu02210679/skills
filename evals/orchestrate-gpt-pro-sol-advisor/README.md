@@ -35,15 +35,25 @@ handling.
 
 The routing cases also verify Luna / Max as the default implementation worker,
 one-correction Terra / High escalation for difficult or stuck work, fail-closed
-Luna/Terra capability preflight, Sol read-only escalation only after Terra is
-blocked, and the explicit Test Economy defaults. Deterministic adversarial
-replays cover missing roles, wrong models, setup-only `clientThreadId`, command
-text-only verification skips, and unanchored test growth. The implementation
-references keep app-task identity and compact verification rules separate from
-the main router.
+Luna/Terra capability preflight, Sol read-only escalation only after trusted
+Terra execution evidence reports one blocked high-impact decision, and the
+explicit Test Economy defaults. Worker routing evidence is supplied through
+separate trusted inputs, so scenario self-claims cannot establish availability.
+Cases bind real project/thread/host identities, allow absent Luna post-creation
+model metadata, reject mismatches when it is returned, and require exact
+shipped Terra role-template digests. Deterministic adversarial replays cover
+missing roles, wrong models, setup-only `clientThreadId`, route/outcome mixing,
+command-text-only verification skips, and unbounded test growth. The
+`scripts/verification_fingerprint.py` helper reads the current tree inputs
+before a skip decision. The implementation references keep app-task identity,
+execution outcome, and compact verification rules separate from the main router.
+
+The repository records pressure prompts for a future fresh-context model run;
+this local suite labels its executable checks honestly as deterministic policy
+replays and does not claim that a fresh model pressure run occurred here.
 
 Run:
 
 ```powershell
-python -m unittest evals/orchestrate-gpt-pro-sol-advisor/test_contract.py
+python -m unittest discover -s evals/orchestrate-gpt-pro-sol-advisor -p "test_*.py"
 ```
