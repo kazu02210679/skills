@@ -3,19 +3,19 @@
   "repository_totals": {
     "skill_count": 12,
     "metadata_utf8_bytes": 4853,
-    "utf8_bytes": 91301,
-    "approx_tokens": 22826
+    "utf8_bytes": 105418,
+    "approx_tokens": 26355
   },
   "skills": [
     {"name": "co-create-plan", "metadata_utf8_bytes": 464, "skill_md_utf8_bytes": 8656, "auxiliary_utf8_bytes": 0},
     {"name": "codex-orchestration", "metadata_utf8_bytes": 518, "skill_md_utf8_bytes": 5148, "auxiliary_utf8_bytes": 0},
     {"name": "complexity-aware-execution", "metadata_utf8_bytes": 612, "skill_md_utf8_bytes": 2517, "auxiliary_utf8_bytes": 0},
     {"name": "create-project-map", "metadata_utf8_bytes": 405, "skill_md_utf8_bytes": 3764, "auxiliary_utf8_bytes": 0},
-    {"name": "gpt-pro-codex-loop", "metadata_utf8_bytes": 267, "skill_md_utf8_bytes": 9965, "auxiliary_utf8_bytes": 0},
+    {"name": "gpt-pro-codex-loop", "metadata_utf8_bytes": 267, "skill_md_utf8_bytes": 12405, "auxiliary_utf8_bytes": 0},
     {"name": "handoff", "metadata_utf8_bytes": 661, "skill_md_utf8_bytes": 7052, "auxiliary_utf8_bytes": 0},
     {"name": "monitoring-subagents", "metadata_utf8_bytes": 277, "skill_md_utf8_bytes": 3205, "auxiliary_utf8_bytes": 0},
     {"name": "open-pull-request", "metadata_utf8_bytes": 465, "skill_md_utf8_bytes": 18018, "auxiliary_utf8_bytes": 0},
-    {"name": "orchestrate-gpt-pro-sol-advisor", "metadata_utf8_bytes": 170, "skill_md_utf8_bytes": 3800, "auxiliary_utf8_bytes": 0},
+    {"name": "orchestrate-gpt-pro-sol-advisor", "metadata_utf8_bytes": 170, "skill_md_utf8_bytes": 9629, "auxiliary_utf8_bytes": 5848},
     {"name": "refresh-thread-titles", "metadata_utf8_bytes": 240, "skill_md_utf8_bytes": 5192, "auxiliary_utf8_bytes": 0},
     {"name": "review-implementation-html", "metadata_utf8_bytes": 421, "skill_md_utf8_bytes": 6446, "auxiliary_utf8_bytes": 6462},
     {"name": "writing-style", "metadata_utf8_bytes": 353, "skill_md_utf8_bytes": 11076, "auxiliary_utf8_bytes": 0}

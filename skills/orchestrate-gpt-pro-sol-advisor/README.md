@@ -1,39 +1,67 @@
 # GPT Pro + Sol Advisor composition
 
-> Runtime inspector は、信頼済み Codex Skill catalog が選択した単一の
-> Sol Advisor orchestration `SKILL.md` からだけ解決します。別の cached
-> version、caller 指定の plugin root、repo-local の同名 script、symlink
-> escape は拒否します。catalog の選択値は advisor/scenario data と別の
-> trusted host input として渡します。
+`gpt-pro-codex-loop` と Sol Advisor を、権限を混ぜずに併用するための
+ルーティングSkillです。ユーザーが `$orchestrate-gpt-pro-sol-advisor` または
+両者の併用を明示した場合だけ起動します。
 
-`gpt-pro-codex-loop` と Sol Advisor を、それぞれ単独利用できる状態を保ちながら明示的に併用するためのルーティング Skill です。
+## 役割
 
-## 3つのモード
+- GPT Pro: 要件、Acceptance Criteria、material-change approval、semantic review、最終ゲート。
+- Codex Primary: repo調査、設計、タスク分解、worker選択、diff確認、テスト、local verification、最終判断。
+- Luna / Max: デフォルト実装worker（`gpt-5.6-luna` / `max`）。
+- Terra / High: Lunaで詰まった場合、または難しい実装の救援（`sol_advisor_terra_implementer`）。
+- Sol Advisor: Terraでも解けない高影響の設計・安全性・リスク質問へのread-only助言。
 
-- GPT Pro 単独: `gpt-pro-codex-loop` だけを使い、Sol を起動しません。
-- Sol 単独: Sol Advisor の通常フローだけを使い、GPT Pro ループを起動しません。
-- 併用: ユーザーが `$orchestrate-gpt-pro-sol-advisor` または両者の併用を明示した場合だけ有効です。
+Solは実装workerではありません。Solの助言はCodexが `accept`、`reject`、
+`partially accept` のいずれかで判断し、完了判定や要件変更をSolに委譲しません。
 
-## 併用前の必須確認
+## 実装ルーティング
 
-GPT Pro の初期化より先に Sol Advisor の setup status と preferences を確認します。setup が未完了・旧形式・破損なら Sol の setup だけを行い、そのタスクを終了します。adapter を導入または更新した後は、新しい Codex タスクで再開します。
+併用時の標準経路は次のとおりです。
 
-新しいタスクではCodex runtimeから現在のworkspaceをcanonical pathに解決し、`get_preferences` が返す上流で検証済みのactive preferences objectについて、`client=codex` とworkspace identityの一致を要求します。workspace identityは双方をcanonicalizeして比較しますが、`profileKey` は別runtimeのcanonical pathから再生成せず、上流が保存したraw `preferences.workspace` を使った `codex:<scope>:<raw preferences.workspace>` と厳密比較します。別client・別workspace・不一致のprofileは使用しません。併用設定の助言ロールは `sol_advisor_advisor` だけです。旧互換のTerra / Sol reviewerへ自動フォールバックしません。
+```text
+GPT Pro / Sol Pro
+  ↓ 要件・AC
+Codex Primary
+  ├─ Luna / Max: bounded implementation（標準）
+  │    └─ focused verification
+  ├─ Terra / High: difficult / stuck implementation
+  └─ Sol Advisor: Terra後の高影響な設計判断だけ
+       ↓
+Codex Primary: 実diff・scope・verificationを再確認
+       ↓
+GPT Pro: semantic review → final-verify
+```
 
-Solを起動した後、助言を読む・採否判断する前にpublic native spawn/details metadataを確認します。details取得時のquery targetまたは返却されたthread IDをspawnで得たadvisor thread IDと完全一致させ、実際の `sol_advisor_advisor` roleも必須とします。public detailsがrole以外を省略した場合だけ、Codex Skill catalogから解決したインストール済みSol Advisorのorchestration `SKILL.md` を起点に `../../scripts/inspect-agent-runtime.sh` をcanonical resolutionし、その正規ファイルを同じadvisor thread IDに対して1回実行します。repo-localの同名script、存在しないplugin風path、canonical plugin cache/version root外へ逃げるsymlinkは認めません。
+Lunaはfeature、UI、CRUD、API wiring、boilerplate、既存patternに沿うrefactor、
+test修正、仕様の固まったアルゴリズムなどを担当します。Lunaの結果が不十分な
+場合は、同じtaskへ修正指示を1回だけ送り、同じroot causeで再度失敗したら
+Terraへ昇格します。concurrency、security-sensitive code、migration、shared
+state、難しいperformance bug、複数workstreamの統合、広い波及範囲もTerraです。
 
-inspectorの証拠はprocess exit code 0と完全一致する10項目JSONです。ここから導出できるのは`rollout_count=1`と`inspection_status=success`だけで、advisor completionではありません。completionは同じthread IDにbindされたhost-native result/wait/detailsのterminal stateで別途証明します。観測できなければ助言を破棄して停止します。inspector JSONは同じthreadを識別し、public detailsとの重複値も一致しなければなりません。
+Luna taskは粗いまとまりで作り、原則2件まで並列にします。ファイル単位・テスト
+単位の大量spawnや、Luna→Lunaの無限修正ループは禁止です。詳細な作成・監視・
+昇格契約は [luna-implementation-lane.md](references/luna-implementation-lane.md) を参照してください。
 
-各項目の出所を `public-native-details` または `local-runtime-inspector` として記録します。role/model/effortはbound profileと一致し、sandboxは厳密に `read-only` でなければなりません。permission profileはpreferencesに保存されないため一致比較やallowlist判定をせず、空でない観測値をそのまま監査記録へ残します。public role欠落、inspector失敗・曖昧・別thread・不正形式・競合、呼び出し失敗なら助言本文を下流へ渡さず破棄し、advisor再試行・role fallback・GPT Pro続行をせず併用モードを停止します。自己申告、caller-supplied Boolean、role manifest、要求設定は実行時attestationの代用になりません。
+## Test Economy
 
-## 権限境界
+テストはcoverage最大化ではなく、Acceptance Criteriaを証明する最小verification
+を目標にします。
 
-- ChatGPT Pro: 凍結要件、受入基準、semantic review、外側のレビュー状態
-- Codex: 調査、設計、実装、テスト、local verification、Sol 助言の採否
-- Sol: Codex フェーズ内の限定された read-only 助言
+- 新しいtestはAcceptance Criterion、material risk、bug root causeのいずれかに紐付ける。
+- `new_test_files = 0` がデフォルト。既存fileで表現できない理由があるときだけ追加する。
+- bug fixはroot causeごとに原則1 regression test。複数入力はtable-drivenにまとめる。
+- private methodやcall countではなくobservable behavior/public contractをテストする。
+- 検証はL0（diff/static）→L1（affected focused test、デフォルト）→L2（module）→L3（full suite）の段階制。
+- 関連code/test/configが変わっていない、成功済みcommandは再実行しない。
+- 成功時はcommand、exit code、test count、duration、1行要約だけを次のcontextへ渡す。失敗時だけ失敗名・関連excerpt・full log path/digestを残す。
 
-併用モードから `sol-advisor:orchestration` は起動しません。これは単独利用時の architect・実装委譲・final Sol review を含むため、併用モードの権限モデルと競合するからです。`sol_advisor_routine`、`sol_advisor_high`、`sol_advisor_terra_implementer` などの実装ロールも助言用途には使いません。
+## 単独利用
 
-Sol を呼ぶのは、具体的な技術質問、重大な不確実性またはリスク、判断価値が揃う commitment boundary だけです。Codex が助言を `accept` / `reject` / `partially accept` と理由付きで処理し、local verification 後に GPT Pro の semantic review へ戻します。
+- GPT Pro単独: `gpt-pro-codex-loop`だけを使い、Solは起動しません。
+- Sol単独: `sol-advisor:orchestration`だけを使い、GPT Pro loopやこのcompositionは起動しません。
+- 曖昧な言及やインストール済みという事実だけでは併用にしません。
 
-Pro の修正要求や実装変更のたびに Sol を繰り返しません。新しい証拠または技術的リスク質問が実質的に変わった場合だけ、停止条件付きで再相談します。完了を決めるのは Sol verdict ではなく、外側の controller の `final-verify` です。
+併用モードでも、`sol-advisor:orchestration`をnested invocationしません。設定済み
+advisorのattestationに失敗した場合は相談結果を捨て、モデルやroleを黙って代替せず、
+依存関係エラーとして停止します。

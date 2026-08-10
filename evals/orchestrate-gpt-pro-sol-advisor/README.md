@@ -33,6 +33,12 @@ attestation provenance, exact-thread host completion, inspector success, opaque 
 audit evidence, authority, bounded recurrence, and fail-closed dependency
 handling.
 
+The routing cases also verify Luna / Max as the default implementation worker,
+one-correction Terra / High escalation for difficult or stuck work, Sol
+read-only escalation only after Terra is blocked, and the explicit Test Economy
+defaults. The implementation references keep app-task identity and compact
+verification rules separate from the main router.
+
 Run:
 
 ```powershell

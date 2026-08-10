@@ -8,6 +8,14 @@
 
 Codex Desktop から、ChatGPT Pro に要件定義と反復的な意味レビューを担当させ、Codex がリポジトリ調査・詳細設計・実装・テスト・ローカル検証を担当する独立 Skill です。`codex-orchestration` には依存しません。
 
+## 実装workerとTest Economy
+
+Codexが実装を委譲する場合は、GPT-5.6 Luna / Max（`gpt-5.6-luna`、`max`）をデフォルトworkerにします。仕様の固まったfeature、UI、CRUD、API wiring、boilerplate、既存patternに沿うrefactor、test修正、明確なアルゴリズム、isolated worktreeの作業が対象です。
+
+Lunaで同じroot causeにより1回修正しても失敗した場合、またはconcurrency、security-sensitive code、migration、shared state、難しいperformance bug、複数workstreamの統合、広い波及範囲がある場合はGPT-5.6 Terra / Highへ昇格します。Terraでも高影響の設計・安全性・リスク判断が解けないときだけ、Solへread-onlyで1つの具体的な質問を送り、実装自体はLuna/Terraへ戻します。Solは実装・要件変更・完了判定を担当しません。
+
+テストはcoverage最大化ではなく、Acceptance Criteriaを証明する最小verificationを目標にします。新規testはAcceptance Criterion・material risk・bug root causeに紐付け、`new_test_files = 0`をデフォルトにします。bug fixはroot causeごとに原則1 regression test、同じ契約の入力はtable-driven、privateな実装詳細ではなくobservable behaviorをテストします。検証はL1 affected focused testをデフォルトにし、L2/L3は共有API・依存・build・schema・shared core・release-criticalな変更だけに上げます。関連code/test/configが変わっていない成功済みcommandは再実行せず、成功ログ全文も次のcontextへ渡しません。
+
 ユーザーが「ChatGPT Pro で要件を定義または固定し、Codex の実装を合格まで反復レビューする」組み合わせを明示的に依頼した場合だけ使います。要件相談だけ、単発レビュー、通常の実装では起動しません。
 
 Codex Desktop の Browser、サインイン済みの ChatGPT Pro、同一会話の固定、厳格な JSON envelope、正規化 snapshot、ローカル検証が必要です。Pro の `PASS` だけでは完了しません。

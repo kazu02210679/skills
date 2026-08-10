@@ -68,6 +68,27 @@ class QualityFirstBrowserPolicyTests(unittest.TestCase):
         self.assertIn("今すぐ回答", text)
         self.assertIn("経過時間だけ", text)
 
+    def test_skill_documents_luna_first_terra_escalation_and_test_economy(self) -> None:
+        skill = SKILL.read_text(encoding="utf-8").lower()
+        readme = README.read_text(encoding="utf-8")
+
+        for phrase in (
+            "default implementation worker",
+            "gpt-5.6 luna / max",
+            "gpt-5.6 terra / high",
+            "sol is not an implementation worker",
+            "one regression test per bug root cause",
+            "new_test_files = 0",
+            "l1 affected focused tests",
+            "do not rerun an unchanged successful verification command",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill)
+
+        for phrase in ("Luna / Max", "Terra / High", "Test Economy"):
+            with self.subTest(readme_phrase=phrase):
+                self.assertIn(phrase, readme)
+
 
 if __name__ == "__main__":
     unittest.main()

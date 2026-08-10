@@ -257,6 +257,48 @@ class CompositionContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.skill.lower())
 
+    def test_luna_first_routing_has_bounded_terra_and_sol_escalation(self) -> None:
+        for phrase in (
+            "implementation_policy: luna_first",
+            "gpt-5.6-luna",
+            "thinking: max",
+            "gpt-5.6-terra",
+            "difficult or stuck implementation",
+            "max_parallel_tasks: 2",
+            "sol is not the default implementation worker",
+            "sol must remain read-only",
+            "one precise, bounded packet",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.skill.lower())
+
+        lane = SKILL_ROOT / "references" / "luna-implementation-lane.md"
+        self.assertTrue(lane.is_file())
+        lane_text = lane.read_text(encoding="utf-8").lower()
+        for phrase in (
+            "clientthreadid",
+            "one precise correction to the same task",
+            "sol_advisor_terra_implementer",
+            "do not create a replacement task",
+        ):
+            with self.subTest(reference_phrase=phrase):
+                self.assertIn(phrase, lane_text)
+
+    def test_verification_economy_is_explicit(self) -> None:
+        economy = (
+            SKILL_ROOT / "references" / "verification-economy.md"
+        ).read_text(encoding="utf-8").lower()
+        for phrase in (
+            "new_test_files = 0",
+            "one regression test per root cause",
+            "observable behavior",
+            "l1  affected focused test",
+            "do not rerun an unchanged successful command",
+            "full log path and digest",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, economy)
+
     def test_combined_mode_does_not_invoke_sol_orchestration(self) -> None:
         lower = self.skill.lower()
         self.assertNotIn(
@@ -1212,6 +1254,11 @@ class CompositionContractTests(unittest.TestCase):
                 "inspector-fills-public-omissions",
                 "inspector-thread-mismatch-stops",
                 "self-claims-do-not-establish-provenance",
+                "luna-is-default-implementation-worker",
+                "luna-same-root-cause-escalates-terra",
+                "difficult-scope-starts-at-terra",
+                "terra-blocker-uses-sol-read-only-advice",
+                "test-economy-policy-is-explicit",
             },
             set(cases),
         )
@@ -1407,6 +1454,8 @@ class CompositionContractTests(unittest.TestCase):
         self.assertIn("$orchestrate-gpt-pro-sol-advisor", metadata)
         self.assertIn("単独", self.readme)
         self.assertIn("併用", self.readme)
+        self.assertIn("Luna", self.readme)
+        self.assertIn("Test Economy", self.readme)
 
 
 if __name__ == "__main__":

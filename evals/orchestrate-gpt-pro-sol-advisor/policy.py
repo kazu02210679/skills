@@ -11,6 +11,9 @@ from typing import Any
 
 SETUP_FAILURES = {"missing", "schema-old", "corrupt"}
 CODEX_ADVISOR_ROLE = "sol_advisor_advisor"
+TERRA_IMPLEMENTER_ROLE = "sol_advisor_terra_implementer"
+LUNA_MODEL = "gpt-5.6-luna"
+TERRA_MODEL = "gpt-5.6-terra"
 RUNTIME_FIELDS = {
     "role": "observed_advisor_role",
     "model": "observed_advisor_model",
@@ -370,6 +373,45 @@ def _runtime_attestation(
     }
 
 
+def _implementation_route(
+    scenario: dict[str, Any], preserved: dict[str, Any]
+) -> dict[str, Any]:
+    """Route a Codex-owned implementation without invoking Sol advisory logic."""
+
+    common = {
+        "selected_mode": "combined",
+        "implementation_request": True,
+        "sol_calls": 0,
+        "max_parallel_luna_tasks": 2,
+        **preserved,
+    }
+    same_root_cause_failed = bool(scenario.get("luna_same_root_cause_failed"))
+    terra_required = bool(
+        scenario.get("force_terra")
+        or scenario.get("difficult_scope")
+        or same_root_cause_failed
+    )
+    if terra_required:
+        return {
+            **common,
+            "implementation_lane": TERRA_IMPLEMENTER_ROLE,
+            "implementation_model": TERRA_MODEL,
+            "implementation_effort": "high",
+            "luna_attempts": 2 if same_root_cause_failed else 0,
+            "terra_escalated": True,
+            "terminal": "terra-implementation",
+        }
+    return {
+        **common,
+        "implementation_lane": "luna",
+        "implementation_model": LUNA_MODEL,
+        "implementation_thinking": "max",
+        "luna_attempts": 1,
+        "terra_escalated": False,
+        "terminal": "luna-implementation",
+    }
+
+
 def route(
     scenario: dict[str, Any],
     *,
@@ -381,6 +423,31 @@ def route(
         return {"selected_mode": intent, "gpt_pro_calls": 1, "sol_calls": 0, "terminal": "continue-outer-loop"}
     if intent == "sol-only":
         return {"selected_mode": intent, "gpt_pro_calls": 0, "sol_calls": 1, "terminal": "continue-sol-standalone"}
+    if intent == "test-economy":
+        return {
+            "selected_mode": intent,
+            "test_anchor_required": True,
+            "new_test_files_default": 0,
+            "regression_tests_per_root_cause": 1,
+            "default_verification_level": "L1",
+            "full_suite_default": False,
+            "rerun_unchanged_success": False,
+            "compact_success_output": [
+                "command",
+                "exit code",
+                "test count",
+                "duration",
+                "one-line summary",
+            ],
+            "compact_failure_output": [
+                "command",
+                "exit code",
+                "failed test names",
+                "relevant error excerpt",
+                "full log path + digest",
+            ],
+            "terminal": "test-policy",
+        }
     if intent != "combined":
         return {"selected_mode": "unselected", "composition_active": False, "sol_calls": 0, "terminal": "clarify"}
 
@@ -450,6 +517,8 @@ def route(
         "local_verification_retained": True,
         "pro_review_retained": True,
     }
+    if scenario.get("implementation_request") and not scenario.get("terra_blocked"):
+        return _implementation_route(scenario, preserved)
     if scenario.get("mandatory_final_sol_review"):
         return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
@@ -492,7 +561,7 @@ def route(
     )
     if "terminal" in attestation:
         return attestation
-    return {
+    result = {
         "selected_mode": "combined",
         "selected_lane": advisor_role,
         "sol_calls": 1,
@@ -508,6 +577,17 @@ def route(
         **preserved,
         "terminal": "primary-disposition",
     }
+    if scenario.get("implementation_request") and scenario.get("terra_blocked"):
+        result.update(
+            {
+                "implementation_escalation": "terra-blocked",
+                "implementation_lane": "sol-advisor-read-only",
+                "sol_is_implementation": False,
+                "terra_escalated": True,
+                "luna_attempts": scenario.get("luna_attempts", 2),
+            }
+        )
+    return result
 
 
 def bounded_packet(context: dict[str, Any]) -> dict[str, Any]:
