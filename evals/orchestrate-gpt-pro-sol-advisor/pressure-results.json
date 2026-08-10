@@ -69,6 +69,17 @@
       {"sample":"generic-command-toolchain","contract_violation":false,"result":"command-toolchain-bound","response_excerpt":"The manifest includes the command executable, resolved path, and allowlisted toolchain version."}
     ]
   },
+  "gitlink_hardening": {
+    "evaluation_mode": "deterministic-helper-regression",
+    "baseline": [
+      {"sample":"changed-gitlink-head","contract_violation":true,"violations":["gitlink-recorded-as-deleted"],"response_excerpt":"Treat a changed submodule directory as deleted and miss a move from one submodule commit to another."},
+      {"sample":"dirty-gitlink","contract_violation":true,"violations":["dirty-submodule-skipped"],"response_excerpt":"Reuse a successful verification while the submodule worktree contains uncommitted changes."}
+    ],
+    "with_skill": [
+      {"sample":"changed-gitlink-head","contract_violation":false,"result":"pointer-and-head-bound","response_excerpt":"Record the superproject gitlink SHA and the clean submodule HEAD so each submodule commit changes the fingerprint."},
+      {"sample":"dirty-gitlink","contract_violation":false,"result":"fail-closed-run","response_excerpt":"Return fingerprint-unavailable to the reuse policy and run verification instead of skipping."}
+    ]
+  },
   "fresh_context_pressure_prompts": {
     "evaluation_mode": "prompt-corpus-pending-live-run",
     "executed_here": false,

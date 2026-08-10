@@ -35,6 +35,55 @@ class VerificationFingerprintTests(unittest.TestCase):
             ["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True
         )
 
+    @staticmethod
+    def _git(repo: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True)
+
+    @classmethod
+    def _make_submodule_fixture(cls, root: Path) -> tuple[Path, Path]:
+        source = root / "submodule-source"
+        source.mkdir()
+        (source / "module.py").write_text("value = 1\n", encoding="utf-8")
+        cls._init_git(source)
+
+        repository = root / "superproject"
+        repository.mkdir()
+        (repository / "app.py").write_text("print('ok')\n", encoding="utf-8")
+        cls._init_git(repository)
+        (repository / "deps").mkdir()
+        submodule = repository / "deps" / "sub"
+        subprocess.run(
+            ["git", "clone", "-q", str(source), str(submodule)],
+            cwd=repository,
+            check=True,
+        )
+        source_head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=source,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        cls._git(
+            repository,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{source_head},deps/sub",
+        )
+        cls._git(repository, "commit", "-qm", "add submodule")
+        cls._git(submodule, "config", "user.email", "test@example.invalid")
+        cls._git(submodule, "config", "user.name", "Fingerprint Test")
+        return repository, submodule
+
+    @classmethod
+    def _advance_submodule(cls, submodule: Path, value: int, message: str) -> None:
+        (submodule / "module.py").write_text(
+            f"value = {value}\n", encoding="utf-8"
+        )
+        cls._git(submodule, "add", "module.py")
+        cls._git(submodule, "commit", "-qm", message)
+
     def test_fingerprint_reads_selected_tree_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -115,6 +164,46 @@ class VerificationFingerprintTests(unittest.TestCase):
         self.assertEqual("npm", identity["command_executable"])
         self.assertIn("command_toolchain", identity)
         self.assertTrue(identity["command_toolchain"])
+
+    def test_fingerprint_binds_each_changed_submodule_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository, submodule = self._make_submodule_fixture(Path(directory))
+            self._advance_submodule(submodule, 2, "advance to B")
+            second = FINGERPRINT.compute_fingerprint(
+                repository,
+                command="python app.py",
+            )
+            record = FINGERPRINT._input_record(
+                repository,
+                "deps/sub",
+                {"changed"},
+            )
+            self.assertNotIn("deleted", record)
+            self.assertEqual(
+                FINGERPRINT._git_output(submodule, "rev-parse", "--verify", "HEAD"),
+                record["submodule_head"],
+            )
+            self._advance_submodule(submodule, 3, "advance to C")
+            third = FINGERPRINT.compute_fingerprint(
+                repository,
+                command="python app.py",
+            )
+
+        self.assertNotEqual(second, third)
+
+    def test_dirty_submodule_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository, submodule = self._make_submodule_fixture(Path(directory))
+            (submodule / "module.py").write_text("value = dirty\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                FINGERPRINT.FingerprintError,
+                "dirty submodule",
+            ):
+                FINGERPRINT.compute_fingerprint(
+                    repository,
+                    command="python app.py",
+                )
 
     def test_fingerprint_ignores_generated_loop_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -103,6 +103,10 @@ sides of a rename. Its environment identity also binds the command executable,
 resolved executable path, and an allowlisted toolchain version for common
 Python, npm, pnpm, Cargo, Go, and .NET commands.
 
+Changed Gitlinks are bound to both the superproject pointer and the clean
+submodule `HEAD`. An unavailable or dirty submodule makes the fingerprint
+unavailable, so the reuse policy runs verification instead of skipping it.
+
 After implementation, the primary inspects the actual worktree, complete diff,
 owned scope, and evidence; worker reports are claims. Re-verify at the lowest
 sufficient level and return bounded evidence to GPT Pro. Workers never commit,

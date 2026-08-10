@@ -65,6 +65,7 @@ _TOOLCHAIN_VERSION_ARGS = {
     "ruby": ("--version",),
     "yarn": ("--version",),
 }
+_GIT_OBJECT_ID = re.compile(r"^[0-9a-f]{40,64}$")
 
 
 def _root(repo: Path) -> Path:
@@ -155,6 +156,37 @@ def _command_targets(root: Path, command: str) -> list[str]:
     return targets
 
 
+def _gitlink_index_sha(root: Path, relative: str) -> str | None:
+    status = _git_output(root, "ls-files", "--stage", "-z", "--", relative)
+    for record in status.split("\x00"):
+        if "\t" not in record:
+            continue
+        metadata, path = record.split("\t", 1)
+        fields = metadata.split()
+        if len(fields) != 3 or fields[0] != "160000" or path != relative:
+            continue
+        sha = fields[1]
+        if not _GIT_OBJECT_ID.fullmatch(sha):
+            raise FingerprintError(f"invalid gitlink object id: {relative}")
+        return sha
+    return None
+
+
+def _submodule_head(relative: str, path: Path) -> str:
+    if not path.is_dir():
+        raise FingerprintError(f"submodule unavailable: {relative}")
+    try:
+        status = _git_output(path, "status", "--porcelain=v1", "--untracked-files=all")
+        head = _git_output(path, "rev-parse", "--verify", "HEAD")
+    except FingerprintError as error:
+        raise FingerprintError(f"submodule unavailable: {relative}") from error
+    if status:
+        raise FingerprintError(f"dirty submodule: {relative}")
+    if not _GIT_OBJECT_ID.fullmatch(head):
+        raise FingerprintError(f"invalid submodule HEAD: {relative}")
+    return head
+
+
 def _is_config_or_lock(path: Path) -> bool:
     name = path.name.lower()
     return (
@@ -181,6 +213,15 @@ def _config_paths(root: Path) -> list[str]:
 def _input_record(root: Path, relative: str, kinds: set[str]) -> dict[str, object]:
     _, path = _relative_path(root, relative, require_file=False)
     record: dict[str, object] = {"kinds": sorted(kinds), "path": relative}
+    gitlink_sha = _gitlink_index_sha(root, relative)
+    if gitlink_sha is not None:
+        record["kind"] = "gitlink"
+        record["gitlink_sha"] = gitlink_sha
+        if not path.exists():
+            record["deleted"] = True
+            return record
+        record["submodule_head"] = _submodule_head(relative, path)
+        return record
     if path.is_file():
         record["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
     else:
