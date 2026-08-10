@@ -97,6 +97,12 @@ caller cannot supply, copy, or override the digest. Use the helper CLI directly
 when recording a new evidence line. See the verification-economy reference for
 the L0-L3 ladder and compact format.
 
+The helper parses `git status --porcelain=v1 -z` records, never human-readable
+quoted status lines. It preserves spaces and non-ASCII names and records both
+sides of a rename. Its environment identity also binds the command executable,
+resolved executable path, and an allowlisted toolchain version for common
+Python, npm, pnpm, Cargo, Go, and .NET commands.
+
 After implementation, the primary inspects the actual worktree, complete diff,
 owned scope, and evidence; worker reports are claims. Re-verify at the lowest
 sufficient level and return bounded evidence to GPT Pro. Workers never commit,

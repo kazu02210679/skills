@@ -50,6 +50,12 @@ verification_input = command
   + material environment identity
 ```
 
+Changed-file discovery uses NUL-delimited `git status --porcelain=v1 -z`
+records. This preserves spaces, non-ASCII names, and rename pairs without
+relying on Git's human-readable quoting. The environment identity also records
+the command executable, its resolved path, and an allowlisted toolchain version
+for common Python, npm, pnpm, Cargo, Go, and .NET commands.
+
 The same command with a new tree, dependency, generated artifact, config,
 environment, or merged worktree is a new verification. The skip policy invokes
 the helper internally for the current repository; it accepts no external

@@ -56,6 +56,19 @@
       {"sample":"scenario-outcome-escalation","contract_violation":false,"terminal":"luna-execution-evidence-failed","response_excerpt":"Require a bound native task result before Terra escalation."}
     ]
   },
+  "fingerprint_hardening": {
+    "evaluation_mode": "deterministic-helper-regression",
+    "baseline": [
+      {"sample":"quoted-unicode-status-paths","contract_violation":true,"violations":["human-readable-git-quoting-misparsed"],"response_excerpt":"Parse quoted status text and lose the exact repository-relative path."},
+      {"sample":"rename-status-pair","contract_violation":true,"violations":["rename-source-or-destination-omitted"],"response_excerpt":"Record only one side of a rename and leave the manifest incomplete."},
+      {"sample":"generic-command-toolchain","contract_violation":true,"violations":["python-only-environment-identity"],"response_excerpt":"Fingerprint Python host facts while ignoring the executable and toolchain used by npm, pnpm, Cargo, Go, or .NET."}
+    ],
+    "with_skill": [
+      {"sample":"quoted-unicode-status-paths","contract_violation":false,"result":"exact-paths-preserved","response_excerpt":"NUL-delimited porcelain records preserve spaces and non-ASCII paths without quote decoding."},
+      {"sample":"rename-status-pair","contract_violation":false,"result":"both-paths-recorded","response_excerpt":"Rename records bind both the source and destination paths to the current manifest."},
+      {"sample":"generic-command-toolchain","contract_violation":false,"result":"command-toolchain-bound","response_excerpt":"The manifest includes the command executable, resolved path, and allowlisted toolchain version."}
+    ]
+  },
   "fresh_context_pressure_prompts": {
     "evaluation_mode": "prompt-corpus-pending-live-run",
     "executed_here": false,

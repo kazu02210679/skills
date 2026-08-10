@@ -7,6 +7,8 @@ import hashlib
 import json
 import platform
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +54,17 @@ _CONFIG_NAMES = frozenset(
 _PATH_TOKEN = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9_.-]+[\\/])*[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+"
 )
+_TOOLCHAIN_VERSION_ARGS = {
+    "cargo": ("--version",),
+    "dotnet": ("--version",),
+    "go": ("version",),
+    "npm": ("--version",),
+    "pnpm": ("--version",),
+    "python": ("--version",),
+    "pytest": ("--version",),
+    "ruby": ("--version",),
+    "yarn": ("--version",),
+}
 
 
 def _root(repo: Path) -> Path:
@@ -97,23 +110,38 @@ def _git_output(root: Path, *args: str) -> str:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise FingerprintError(f"git input unavailable: {detail or 'unknown error'}")
-    return result.stdout.strip()
+    return result.stdout if "-z" in args else result.stdout.strip()
 
 
 def _git_changed_paths(root: Path) -> list[str]:
-    status = _git_output(root, "status", "--porcelain=v1", "--untracked-files=all")
-    paths: list[str] = []
-    for line in status.splitlines():
-        if len(line) < 4:
+    status = _git_output(
+        root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    paths: set[str] = set()
+    records = status.split("\x00")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4:
             continue
-        raw = line[3:].strip()
-        if " -> " in raw:
-            raw = raw.rsplit(" -> ", 1)[1]
-        relative, _ = _relative_path(root, raw, require_file=False)
-        if any(part.lower() in _EXCLUDED_DIRS for part in Path(relative).parts):
-            continue
-        paths.append(relative)
-    return paths
+        raw_paths = [record[3:]]
+        if "R" in record[:2] or "C" in record[:2]:
+            if index < len(records):
+                raw_paths.append(records[index])
+                index += 1
+        for raw in raw_paths:
+            if not raw:
+                continue
+            relative, _ = _relative_path(root, raw, require_file=False)
+            if any(part.lower() in _EXCLUDED_DIRS for part in Path(relative).parts):
+                continue
+            paths.add(relative)
+    return sorted(paths)
 
 
 def _command_targets(root: Path, command: str) -> list[str]:
@@ -160,10 +188,55 @@ def _input_record(root: Path, relative: str, kinds: set[str]) -> dict[str, objec
     return record
 
 
-def _environment_identity() -> dict[str, str]:
+def _command_executable(command: str) -> str:
+    try:
+        tokens = shlex.split(command, posix=False)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return "unknown"
+    token = tokens[0].strip("\"'")
+    name = Path(token).name.lower()
+    for suffix in (".cmd", ".exe", ".bat", ".com"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name or "unknown"
+
+
+def _toolchain_identity(executable: str) -> tuple[str, str]:
+    version_args = _TOOLCHAIN_VERSION_ARGS.get(executable)
+    resolved = shutil.which(executable) if version_args else None
+    if resolved is None:
+        return "unavailable", "unavailable"
+    try:
+        result = subprocess.run(
+            [resolved, *version_args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return str(Path(resolved).resolve()), "unavailable"
+    output = (result.stdout.strip() or result.stderr.strip()).splitlines()
+    version = re.sub(r"\s+", " ", output[0]).strip()[:256] if output else "unavailable"
+    if result.returncode != 0:
+        version = "unavailable"
+    return str(Path(resolved).resolve()), version or "unavailable"
+
+
+def _environment_identity(command: str) -> dict[str, str]:
     """Collect non-secret environment facts from the local execution host."""
 
+    command_executable = _command_executable(command)
+    command_path, command_toolchain = _toolchain_identity(command_executable)
     return {
+        "command_executable": command_executable,
+        "command_executable_path": command_path,
+        "command_toolchain": command_toolchain,
         "executable": str(Path(sys.executable).resolve()),
         "machine": platform.machine(),
         "platform": platform.platform(),
@@ -208,7 +281,7 @@ def compute_fingerprint(
     manifest = {
         "base_tree": base_tree,
         "command": command,
-        "environment": _environment_identity(),
+        "environment": _environment_identity(command),
         "inputs": [
             _input_record(root, relative, sources[relative])
             for relative in sorted(sources)

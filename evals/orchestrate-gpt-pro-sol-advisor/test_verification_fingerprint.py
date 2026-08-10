@@ -77,6 +77,45 @@ class VerificationFingerprintTests(unittest.TestCase):
 
         self.assertNotEqual(first, second)
 
+    def test_git_changed_paths_preserves_quoted_unicode_and_rename_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            spaced = repo / "file with space.py"
+            unicode_path = repo / "日本語.py"
+            old_path = repo / "old name.py"
+            new_path = repo / "new name.py"
+            spaced.write_text("value = 1\n", encoding="utf-8")
+            unicode_path.write_text("value = 1\n", encoding="utf-8")
+            old_path.write_text("value = 1\n", encoding="utf-8")
+            self._init_git(repo)
+            subprocess.run(
+                ["git", "config", "core.quotePath", "true"],
+                cwd=repo,
+                check=True,
+            )
+            spaced.write_text("value = 2\n", encoding="utf-8")
+            unicode_path.write_text("value = 2\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "mv", str(old_path), str(new_path)],
+                cwd=repo,
+                check=True,
+            )
+
+            changed = FINGERPRINT._git_changed_paths(repo)
+
+        self.assertIn("file with space.py", changed)
+        self.assertIn("日本語.py", changed)
+        self.assertIn("old name.py", changed)
+        self.assertIn("new name.py", changed)
+        self.assertNotIn('"日本語.py"', changed)
+
+    def test_environment_identity_binds_the_command_toolchain(self) -> None:
+        identity = FINGERPRINT._environment_identity("npm test")
+
+        self.assertEqual("npm", identity["command_executable"])
+        self.assertIn("command_toolchain", identity)
+        self.assertTrue(identity["command_toolchain"])
+
     def test_fingerprint_ignores_generated_loop_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
