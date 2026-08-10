@@ -6,9 +6,9 @@ criteria and changed behavior. Token cost is part of the verification design.
 ## Test additions
 
 - Default to `new_test_files = 0`.
-- Each witness has exactly one `primary_anchor` naming an Acceptance Criterion,
-  material risk, or bug root cause. Optional `also_proves` anchors may record
-  other behavior covered by that same observable witness.
+- Each witness has exactly one `primary_anchor` naming an existing Acceptance
+  Criterion, material-risk ID, or bug-root-cause key. Optional `also_proves`
+  anchors must also exist in those trusted catalogs; invented IDs are rejected.
 - A bug fix gets one regression witness per root cause by default. Use a
   table-driven witness set for equivalent inputs; do not add speculative edge,
   snapshot, integration, or full-suite tests without a material anchor.
@@ -36,9 +36,11 @@ L3  full repository suite                 (schema/shared-core/release-critical)
 ```
 
 Generate the verification-input fingerprint with
-`scripts/verification_fingerprint.py`. The helper reads selected files and
-lock/config files from the current repository; the adapter supplies the trusted
-VCS tree identity and material environment identity. The input is:
+`python scripts/verification_fingerprint.py --repo . --command "<command>"`.
+The helper reads the current Git tree identity, changed files, command targets,
+lock/config files, file contents, and material host identity itself. Optional
+`--target-file` values only add hints; they cannot hide changed inputs. The
+input is:
 
 ```text
 verification_input = command
@@ -49,9 +51,9 @@ verification_input = command
 ```
 
 The same command with a new tree, dependency, generated artifact, config,
-environment, or merged worktree is a new verification. The skip policy accepts
-only the helper's trusted fingerprint, never a caller-typed `current_fingerprint`
-or a copied previous value.
+environment, or merged worktree is a new verification. The skip policy invokes
+the helper internally for the current repository; it accepts no external
+fingerprint argument and never trusts a caller-typed or copied digest.
 
 ## Closed local evidence
 

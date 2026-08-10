@@ -78,11 +78,13 @@
     "evaluation_mode": "deterministic-policy-replay",
     "baseline": [
       {"sample":"same-command-new-tree","contract_violation":true,"violations":["command-text-only-skip"],"response_excerpt":"Skip a successful command because its text is unchanged even though the tree changed."},
-      {"sample":"test-count-without-anchor","contract_violation":true,"violations":["test-growth-without-witness-anchor"],"response_excerpt":"Add many tests to an existing file without recording the acceptance, risk, or root-cause anchor."}
+      {"sample":"test-count-without-anchor","contract_violation":true,"violations":["test-growth-without-witness-anchor"],"response_excerpt":"Add many tests to an existing file without recording the acceptance, risk, or root-cause anchor."},
+      {"sample":"unknown-anchor-id","contract_violation":true,"violations":["invented-witness-anchor"],"response_excerpt":"Attach a non-empty but unknown ID such as BANANA-123 to make a test look anchored."}
     ],
     "with_skill": [
       {"sample":"same-command-new-tree","contract_violation":false,"action":"run","reason":"verification-input-changed","response_excerpt":"Rerun because the complete verification-input fingerprint changed."},
-      {"sample":"test-count-without-anchor","contract_violation":false,"action":"reject-test-addition","reason":"unbounded-anchor-growth","response_excerpt":"Reject twenty cases attached to one primary anchor without a materially-distinct justification."}
+      {"sample":"test-count-without-anchor","contract_violation":false,"action":"reject-test-addition","reason":"unbounded-anchor-growth","response_excerpt":"Reject twenty cases attached to one primary anchor without a materially-distinct justification."},
+      {"sample":"unknown-anchor-id","contract_violation":false,"action":"reject-test-addition","reason":"unknown-primary-anchor","response_excerpt":"Reject a witness whose primary anchor is absent from the trusted acceptance/risk/root-cause catalogs."}
     ]
   }
 }

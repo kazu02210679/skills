@@ -47,12 +47,11 @@ execution evidenceを要求します。
 - 新規testはAcceptance Criterion、material risk、bug root causeのいずれかに紐付ける
 - `new_test_files = 0`をデフォルトにする
 - bug fixはroot causeごとに原則1 regression witness、同等入力はtable-drivenにまとめる
-- witnessは`primary_anchor`を1つだけ持ち、必要なら`also_proves`を追加する
+- witnessはtrusted catalogに存在する`primary_anchor`を1つだけ持ち、必要なら同じcatalog内の`also_proves`を追加する。未知のIDは拒否する
 - 1つのprimary anchorに5件を超えるtestを付ける場合は、materially-distinctな理由を記録する
 - privateな実装詳細ではなくobservable behavior/public contractを検証する
 - L0 → L1を基本にし、共有API・依存・schema・shared coreだけL2/L3へ上げる
-- 成功済みcommandの再実行は、`scripts/verification_fingerprint.py`が現treeから生成した
-  fingerprintが変わった場合だけ行う。前回値の転記は証拠にしない
+- 成功済みcommandの再実行判定はpolicy自身が`python scripts/verification_fingerprint.py --repo . --command "<command>"`相当を実行して現treeから生成する。外部digestや前回値の転記は証拠にしない
 - `--local-evidence`のclosed schemaを守り、metrics・test delta・fingerprintは`output_summary`にcompact化する
 
 ## モード境界

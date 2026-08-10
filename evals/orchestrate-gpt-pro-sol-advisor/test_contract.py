@@ -14,12 +14,21 @@ SKILL_ROOT = ROOT / "skills" / "orchestrate-gpt-pro-sol-advisor"
 CASES = Path(__file__).with_name("cases.json")
 PRESSURE_RESULTS = Path(__file__).with_name("pressure-results.json")
 POLICY_PATH = Path(__file__).with_name("policy.py")
+FINGERPRINT_PATH = ROOT / "scripts" / "verification_fingerprint.py"
 
 SPEC = importlib.util.spec_from_file_location("composition_policy", POLICY_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"Unable to load {POLICY_PATH}")
 POLICY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(POLICY)
+
+FINGERPRINT_SPEC = importlib.util.spec_from_file_location(
+    "verification_fingerprint", FINGERPRINT_PATH
+)
+if FINGERPRINT_SPEC is None or FINGERPRINT_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load {FINGERPRINT_PATH}")
+FINGERPRINT = importlib.util.module_from_spec(FINGERPRINT_SPEC)
+FINGERPRINT_SPEC.loader.exec_module(FINGERPRINT)
 
 
 def valid_combined(**overrides: object) -> dict[str, object]:
@@ -199,7 +208,8 @@ def execution_context(
         evidence.update(
             {
                 "root_cause_key": "auth-expiry",
-                "correction_count": 2,
+                "attempt_count": 2,
+                "correction_count": 1,
                 "same_root_cause": True,
             }
         )
@@ -394,9 +404,11 @@ class CompositionContractTests(unittest.TestCase):
             "test_delta",
             "primary_anchor",
             "also_proves",
+            "existing acceptance",
             "five cases",
             "verification_fingerprint.py",
             "verification_input",
+            "no external fingerprint argument",
             "unknown siblings are rejected",
         ):
             with self.subTest(phrase=phrase):
@@ -416,33 +428,34 @@ class CompositionContractTests(unittest.TestCase):
         self.assertNotIn("sol_advisor_terra_implementer", gpc)
 
     def test_verification_skip_requires_the_complete_input_fingerprint(self) -> None:
-        trusted_fingerprint = "sha256:" + "a" * 64
+        command = "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py"
+        trusted_fingerprint = FINGERPRINT.compute_fingerprint(ROOT, command=command)
         self.assertEqual(
             {"action": "skip", "reason": "unchanged-successful-input"},
             POLICY.verification_reuse_decision(
-                "pytest tests/auth.py",
+                ROOT,
+                command,
                 {
                     "outcome": "PASS",
-                    "command": "pytest tests/auth.py",
+                    "command": command,
                     "verification_input_fingerprint": trusted_fingerprint,
                 },
-                trusted_fingerprint=trusted_fingerprint,
             ),
         )
         for previous in (
             {
                 "outcome": "FAIL",
-                "command": "pytest tests/auth.py",
+                "command": command,
                 "verification_input_fingerprint": trusted_fingerprint,
             },
             {
                 "outcome": "PASS",
-                "command": "pytest tests/auth.py",
+                "command": command,
                 "verification_input_fingerprint": "sha256:" + "b" * 64,
             },
             {
                 "outcome": "PASS",
-                "command": "pytest tests/other.py",
+                "command": command + " --other",
                 "verification_input_fingerprint": trusted_fingerprint,
             },
         ):
@@ -450,11 +463,24 @@ class CompositionContractTests(unittest.TestCase):
                 self.assertEqual(
                     {"action": "run", "reason": "verification-input-changed"},
                     POLICY.verification_reuse_decision(
-                        "pytest tests/auth.py",
+                        ROOT,
+                        command,
                         previous,
-                        trusted_fingerprint=trusted_fingerprint,
                     ),
                 )
+
+        self.assertEqual(
+            {"action": "run", "reason": "verification-input-changed"},
+            POLICY.verification_reuse_decision(
+                ROOT,
+                command,
+                {
+                    "outcome": "PASS",
+                    "command": command,
+                    "verification_input_fingerprint": "sha256:" + "a" * 64,
+                },
+            ),
+        )
 
     def test_worker_runtime_evidence_must_be_external_and_identity_bound(self) -> None:
         self_claim = POLICY.route(
@@ -515,6 +541,19 @@ class CompositionContractTests(unittest.TestCase):
         )
         self.assertEqual("terra-implementation", escalated["terminal"])
 
+        over_budget = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_luna_execution=execution_context(
+                "11111111-1111-7111-8111-111111111111",
+                outcome="failed",
+                attempt_count=3,
+                correction_count=2,
+            ),
+        )
+        self.assertEqual("luna-execution-evidence-failed", over_budget["terminal"])
+
     def test_terra_requires_exact_shipped_role_template_provenance(self) -> None:
         missing_template = POLICY.route(
             valid_combined(implementation_request=True, difficult_scope=True),
@@ -566,13 +605,19 @@ class CompositionContractTests(unittest.TestCase):
                         "also_proves": ["RISK-1", "BUG-auth-expiry"],
                         "case_count": 2,
                     }
-                ]
+                ],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
             ),
         )
         self.assertEqual(
             {"action": "reject-test-addition", "reason": "unbounded-anchor-growth"},
             POLICY.test_witness_decision(
-                [{"primary_anchor": "AC-3", "also_proves": [], "case_count": 20}]
+                [{"primary_anchor": "AC-3", "also_proves": [], "case_count": 20}],
+                {"AC-3"},
+                set(),
+                set(),
             ),
         )
         self.assertEqual(
@@ -581,7 +626,29 @@ class CompositionContractTests(unittest.TestCase):
                 [
                     {"primary_anchor": "AC-3", "also_proves": [], "case_count": 1},
                     {"primary_anchor": "AC-3", "also_proves": [], "case_count": 1},
-                ]
+                ],
+                {"AC-3"},
+                set(),
+                set(),
+            ),
+        )
+
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unknown-primary-anchor"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "BANANA-123", "also_proves": [], "case_count": 1}],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unknown-secondary-anchor"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-3", "also_proves": ["BANANA-123"], "case_count": 1}],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
             ),
         )
 
@@ -1805,16 +1872,25 @@ class CompositionContractTests(unittest.TestCase):
         self.assertTrue(all(item["contract_violation"] for item in economy["baseline"]))
         verification_replays = {
             "same-command-new-tree": POLICY.verification_reuse_decision(
-                "pytest tests/auth.py",
+                ROOT,
+                "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py",
                 {
                     "outcome": "PASS",
-                    "command": "pytest tests/auth.py",
+                    "command": "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py",
                     "verification_input_fingerprint": "sha256:" + "b" * 64,
                 },
-                trusted_fingerprint="sha256:" + "c" * 64,
             ),
             "test-count-without-anchor": POLICY.test_witness_decision(
-                [{"primary_anchor": "AC-1", "also_proves": [], "case_count": 20}]
+                [{"primary_anchor": "AC-1", "also_proves": [], "case_count": 20}],
+                {"AC-1"},
+                set(),
+                set(),
+            ),
+            "unknown-anchor-id": POLICY.test_witness_decision(
+                [{"primary_anchor": "BANANA-123", "also_proves": [], "case_count": 1}],
+                {"AC-1"},
+                set(),
+                set(),
             ),
         }
         for trace in economy["with_skill"]:

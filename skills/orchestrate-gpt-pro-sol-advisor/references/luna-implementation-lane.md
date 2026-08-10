@@ -42,8 +42,8 @@ the actual worktree, branch, owned scope, and diff in the primary task.
 
 Routing attestation and execution outcome are separate. A same-root-cause Terra
 escalation requires trusted native task-result/wait evidence bound to the Luna
-`project_id`, `thread_id`, and `host_id`, reporting two corrections and one
-repeated root-cause key.
+`project_id`, `thread_id`, and `host_id`, reporting exactly two attempts (one
+initial attempt plus one same-task correction) and one repeated root-cause key.
 
 For difficult scope, a stuck/repeated Luna result, or concurrency, security,
 migration, shared state, cross-workstream, performance, or broad-blast-radius

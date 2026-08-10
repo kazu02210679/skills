@@ -5,8 +5,19 @@ from __future__ import annotations
 import os
 import posixpath
 import re
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import Any
+
+
+_FINGERPRINT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "verification_fingerprint.py"
+_FINGERPRINT_SPEC = spec_from_file_location("composition_verification_fingerprint", _FINGERPRINT_PATH)
+if _FINGERPRINT_SPEC is None or _FINGERPRINT_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load {_FINGERPRINT_PATH}")
+_FINGERPRINT_MODULE = module_from_spec(_FINGERPRINT_SPEC)
+_FINGERPRINT_SPEC.loader.exec_module(_FINGERPRINT_MODULE)
+FingerprintError = _FINGERPRINT_MODULE.FingerprintError
+compute_fingerprint = _FINGERPRINT_MODULE.compute_fingerprint
 
 
 SETUP_FAILURES = {"missing", "schema-old", "corrupt"}
@@ -576,6 +587,7 @@ def _execution_evidence(
             "host_id",
             "outcome",
             "root_cause_key",
+            "attempt_count",
             "correction_count",
             "same_root_cause",
         }
@@ -607,8 +619,16 @@ def _execution_evidence(
         if trusted_execution.get(key) != route_evidence.get(key):
             errors.append(f"{field}.{key}: does not bind to routed task")
     if worker == "luna":
-        if type(trusted_execution.get("correction_count")) is not int or trusted_execution["correction_count"] < 2:
-            errors.append(f"{field}.correction_count: must prove two corrections")
+        if type(trusted_execution.get("attempt_count")) is not int or trusted_execution["attempt_count"] != 2:
+            errors.append(f"{field}.attempt_count: must prove one initial attempt plus one correction")
+        if type(trusted_execution.get("correction_count")) is not int or trusted_execution["correction_count"] != 1:
+            errors.append(f"{field}.correction_count: must prove exactly one correction")
+        if (
+            type(trusted_execution.get("attempt_count")) is int
+            and type(trusted_execution.get("correction_count")) is int
+            and trusted_execution["attempt_count"] != trusted_execution["correction_count"] + 1
+        ):
+            errors.append(f"{field}: attempt/correction counts are inconsistent")
         if trusted_execution.get("same_root_cause") is not True:
             errors.append(f"{field}.same_root_cause: must be true")
         if not isinstance(trusted_execution.get("root_cause_key"), str) or not trusted_execution["root_cause_key"].strip():
@@ -627,6 +647,7 @@ def _execution_evidence(
         **(
             {
                 "root_cause_key": str(trusted_execution["root_cause_key"]),
+                "attempt_count": int(trusted_execution["attempt_count"]),
                 "correction_count": int(trusted_execution["correction_count"]),
             }
             if worker == "luna"
@@ -775,10 +796,16 @@ def route(
             "test_anchor_required": True,
             "primary_anchor_required": True,
             "also_proves_allowed": True,
+            "anchor_catalog_required": [
+                "acceptance_criteria",
+                "material_risks",
+                "root_cause_keys",
+            ],
             "max_unjustified_cases_per_anchor": 5,
             "materially_distinct_justification_required": True,
             "test_delta_anchors_required": True,
             "verification_input_fingerprint_required": True,
+            "fingerprint_computed_internally": True,
             "skip_requires_same_fingerprint": True,
             "new_test_files_default": 0,
             "regression_tests_per_root_cause": 1,
@@ -981,35 +1008,50 @@ def evaluate_advice(advice: dict[str, Any]) -> dict[str, str]:
 
 
 def verification_reuse_decision(
+    repo: Any,
     command: Any,
     previous: Any,
-    *,
-    trusted_fingerprint: Any,
 ) -> dict[str, str]:
-    """Use only a fingerprint produced by the local tree-reading helper."""
+    """Compute the current fingerprint internally before deciding to skip."""
 
-    if not isinstance(command, str) or not command.strip():
-        return {"action": "run", "reason": "invalid-command"}
-    if (
-        not isinstance(trusted_fingerprint, str)
-        or DIGEST_PATTERN.fullmatch(trusted_fingerprint) is None
-    ):
-        return {"action": "run", "reason": "missing-trusted-fingerprint"}
+    try:
+        current_fingerprint = compute_fingerprint(Path(repo), command=command)
+    except (FingerprintError, TypeError, ValueError):
+        return {"action": "run", "reason": "fingerprint-unavailable"}
     if (
         isinstance(previous, dict)
         and previous.get("outcome") == "PASS"
         and previous.get("command") == command
-        and previous.get("verification_input_fingerprint") == trusted_fingerprint
+        and previous.get("verification_input_fingerprint") == current_fingerprint
     ):
         return {"action": "skip", "reason": "unchanged-successful-input"}
     return {"action": "run", "reason": "verification-input-changed"}
 
 
-def test_witness_decision(witnesses: Any) -> dict[str, str]:
-    """Require one primary anchor and bounded, materially justified growth."""
+def _anchor_catalog(value: Any) -> set[str] | None:
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple, set, frozenset)):
+        return None
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        return None
+    return set(value)
+
+
+def test_witness_decision(
+    witnesses: Any,
+    valid_acceptance_ids: Any,
+    valid_risk_ids: Any,
+    valid_root_cause_keys: Any,
+) -> dict[str, str]:
+    """Require real acceptance/risk/root-cause anchors and bounded growth."""
 
     if not isinstance(witnesses, list) or not witnesses:
         return {"action": "reject-test-addition", "reason": "missing-test-anchor"}
+    acceptance_ids = _anchor_catalog(valid_acceptance_ids)
+    risk_ids = _anchor_catalog(valid_risk_ids)
+    root_cause_keys = _anchor_catalog(valid_root_cause_keys)
+    if acceptance_ids is None or risk_ids is None or root_cause_keys is None:
+        return {"action": "reject-test-addition", "reason": "anchor-catalog-invalid"}
+    valid_anchors = acceptance_ids | risk_ids | root_cause_keys
     seen: set[str] = set()
     for witness in witnesses:
         if not isinstance(witness, dict):
@@ -1017,6 +1059,8 @@ def test_witness_decision(witnesses: Any) -> dict[str, str]:
         primary = witness.get("primary_anchor")
         if not isinstance(primary, str) or not primary.strip():
             return {"action": "reject-test-addition", "reason": "missing-primary-anchor"}
+        if primary not in valid_anchors:
+            return {"action": "reject-test-addition", "reason": "unknown-primary-anchor"}
         if primary in seen:
             if witness.get("materially_distinct") is not True or not isinstance(
                 witness.get("justification"), str
@@ -1028,6 +1072,8 @@ def test_witness_decision(witnesses: Any) -> dict[str, str]:
             not isinstance(anchor, str) or not anchor.strip() for anchor in also_proves
         ):
             return {"action": "reject-test-addition", "reason": "malformed-secondary-anchor"}
+        if any(anchor not in valid_anchors for anchor in also_proves):
+            return {"action": "reject-test-addition", "reason": "unknown-secondary-anchor"}
         case_count = witness.get("case_count", 1)
         if type(case_count) is not int or case_count < 1:
             return {"action": "reject-test-addition", "reason": "invalid-case-count"}

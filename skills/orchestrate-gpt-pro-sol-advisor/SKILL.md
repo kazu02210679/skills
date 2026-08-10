@@ -90,10 +90,12 @@ loops. Do not fabricate a consultation or accept fabricated advice.
 The local-evidence schema is closed: each `test_commands` item has only
 `command`, `outcome`, and `output_summary`. Keep metrics, test delta, and the
 verification-input fingerprint inside `output_summary`; do not add sibling
-fields. New witnesses use one `primary_anchor`, optional `also_proves`, and a
-bounded case count. Use `scripts/verification_fingerprint.py` to read the
-current tree inputs; a copied or caller-typed digest is not current evidence.
-See the verification-economy reference for the L0-L3 ladder and compact format.
+fields. New witnesses use one existing `primary_anchor`, optional existing
+`also_proves`, and a bounded case count. The policy invokes
+`scripts/verification_fingerprint.py` internally for the current tree; a
+caller cannot supply, copy, or override the digest. Use the helper CLI directly
+when recording a new evidence line. See the verification-economy reference for
+the L0-L3 ladder and compact format.
 
 After implementation, the primary inspects the actual worktree, complete diff,
 owned scope, and evidence; worker reports are claims. Re-verify at the lowest
