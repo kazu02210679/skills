@@ -1,5 +1,8 @@
 import importlib.util
+import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +41,14 @@ class VerificationFingerprintTests(unittest.TestCase):
     @staticmethod
     def _git(repo: Path, *args: str) -> None:
         subprocess.run(["git", *args], cwd=repo, check=True)
+
+    @staticmethod
+    def _remove_tree(path: Path) -> None:
+        def make_writable(func, failed_path, _exc_info) -> None:
+            os.chmod(failed_path, stat.S_IWRITE)
+            func(failed_path)
+
+        shutil.rmtree(path, onerror=make_writable)
 
     @classmethod
     def _make_submodule_fixture(cls, root: Path) -> tuple[Path, Path]:
@@ -204,6 +215,41 @@ class VerificationFingerprintTests(unittest.TestCase):
                     repository,
                     command="python app.py",
                 )
+
+    def test_deinitialized_gitlink_fails_closed_and_reinitialized_gitlink_recovers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, submodule = self._make_submodule_fixture(root)
+            initial = FINGERPRINT.compute_fingerprint(
+                repository,
+                command="python app.py",
+            )
+            self._remove_tree(submodule)
+            submodule.mkdir()
+
+            with self.assertRaisesRegex(
+                FINGERPRINT.FingerprintError,
+                "submodule unavailable",
+            ):
+                FINGERPRINT.compute_fingerprint(
+                    repository,
+                    command="python app.py",
+                )
+
+            submodule.rmdir()
+            subprocess.run(
+                ["git", "clone", "-q", str(root / "submodule-source"), str(submodule)],
+                cwd=repository,
+                check=True,
+            )
+            restored = FINGERPRINT.compute_fingerprint(
+                repository,
+                command="python app.py",
+            )
+
+        self.assertEqual(initial, restored)
 
     def test_fingerprint_ignores_generated_loop_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

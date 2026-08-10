@@ -49,7 +49,8 @@ Git identity, changed files, command targets, lock/config inputs, and host
 identity; the policy computes it internally before a skip decision. Its
 regression suite covers NUL-delimited status parsing for spaces, non-ASCII names,
 and rename pairs, command-specific toolchain identity, and clean/dirty Gitlink
-handling. Dirty or unavailable submodules fail closed to a fresh verification.
+handling. All tracked Gitlinks are checked even when status is clean, and
+deinitialized, dirty, or unavailable submodules fail closed to a fresh verification.
 The helper also has a direct CLI for recording evidence. The implementation references keep app-task identity,
 execution outcome, and compact verification rules separate from the main router.
 

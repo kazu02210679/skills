@@ -172,14 +172,32 @@ def _gitlink_index_sha(root: Path, relative: str) -> str | None:
     return None
 
 
+def _gitlink_paths(root: Path) -> list[str]:
+    entries = _git_output(root, "ls-files", "--stage", "-z")
+    paths: set[str] = set()
+    for record in entries.split("\x00"):
+        if "\t" not in record:
+            continue
+        metadata, raw_path = record.split("\t", 1)
+        fields = metadata.split()
+        if len(fields) != 3 or fields[0] != "160000":
+            continue
+        relative, _ = _relative_path(root, raw_path, require_file=False)
+        paths.add(relative)
+    return sorted(paths)
+
+
 def _submodule_head(relative: str, path: Path) -> str:
     if not path.is_dir():
         raise FingerprintError(f"submodule unavailable: {relative}")
     try:
         status = _git_output(path, "status", "--porcelain=v1", "--untracked-files=all")
+        top_level = _git_output(path, "rev-parse", "--show-toplevel")
         head = _git_output(path, "rev-parse", "--verify", "HEAD")
     except FingerprintError as error:
         raise FingerprintError(f"submodule unavailable: {relative}") from error
+    if Path(top_level).resolve() != path.resolve():
+        raise FingerprintError(f"submodule unavailable: {relative}")
     if status:
         raise FingerprintError(f"dirty submodule: {relative}")
     if not _GIT_OBJECT_ID.fullmatch(head):
@@ -316,6 +334,8 @@ def compute_fingerprint(
         sources.setdefault(relative, set()).add("command-target")
     for relative in _git_changed_paths(root):
         sources.setdefault(relative, set()).add("changed")
+    for relative in _gitlink_paths(root):
+        sources.setdefault(relative, set()).add("gitlink")
     for relative in _config_paths(root):
         sources.setdefault(relative, set()).add("lock-config")
 

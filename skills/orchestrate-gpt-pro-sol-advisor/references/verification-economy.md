@@ -56,10 +56,11 @@ relying on Git's human-readable quoting. The environment identity also records
 the command executable, its resolved path, and an allowlisted toolchain version
 for common Python, npm, pnpm, Cargo, Go, and .NET commands.
 
-Gitlink inputs are handled separately from regular files: a clean submodule
-records both the superproject gitlink object and the submodule `HEAD`; a missing,
-uninitialized, or dirty submodule makes the fingerprint unavailable and forces
-the verification to run.
+Gitlink inputs are handled separately from regular files. Every tracked Gitlink
+is included even when status is clean; a clean submodule records both the
+superproject gitlink object and the submodule `HEAD` after independent-worktree
+validation. A missing, deinitialized, uninitialized, or dirty submodule makes
+the fingerprint unavailable and forces the verification to run.
 
 The same command with a new tree, dependency, generated artifact, config,
 environment, or merged worktree is a new verification. The skip policy invokes

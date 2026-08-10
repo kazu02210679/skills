@@ -73,11 +73,13 @@
     "evaluation_mode": "deterministic-helper-regression",
     "baseline": [
       {"sample":"changed-gitlink-head","contract_violation":true,"violations":["gitlink-recorded-as-deleted"],"response_excerpt":"Treat a changed submodule directory as deleted and miss a move from one submodule commit to another."},
-      {"sample":"dirty-gitlink","contract_violation":true,"violations":["dirty-submodule-skipped"],"response_excerpt":"Reuse a successful verification while the submodule worktree contains uncommitted changes."}
+      {"sample":"dirty-gitlink","contract_violation":true,"violations":["dirty-submodule-skipped"],"response_excerpt":"Reuse a successful verification while the submodule worktree contains uncommitted changes."},
+      {"sample":"deinitialized-gitlink","contract_violation":true,"violations":["clean-status-deinit-skipped"],"response_excerpt":"Rely on clean superproject status and parent-repository discovery after submodule deinit."}
     ],
     "with_skill": [
       {"sample":"changed-gitlink-head","contract_violation":false,"result":"pointer-and-head-bound","response_excerpt":"Record the superproject gitlink SHA and the clean submodule HEAD so each submodule commit changes the fingerprint."},
-      {"sample":"dirty-gitlink","contract_violation":false,"result":"fail-closed-run","response_excerpt":"Return fingerprint-unavailable to the reuse policy and run verification instead of skipping."}
+      {"sample":"dirty-gitlink","contract_violation":false,"result":"fail-closed-run","response_excerpt":"Return fingerprint-unavailable to the reuse policy and run verification instead of skipping."},
+      {"sample":"deinitialized-gitlink","contract_violation":false,"result":"independent-worktree-bound","response_excerpt":"Collect every tracked gitlink and reject a deinitialized path whose Git top-level resolves to the superproject."}
     ]
   },
   "fresh_context_pressure_prompts": {

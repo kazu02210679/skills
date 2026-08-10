@@ -103,8 +103,10 @@ sides of a rename. Its environment identity also binds the command executable,
 resolved executable path, and an allowlisted toolchain version for common
 Python, npm, pnpm, Cargo, Go, and .NET commands.
 
-Changed Gitlinks are bound to both the superproject pointer and the clean
-submodule `HEAD`. An unavailable or dirty submodule makes the fingerprint
+All tracked Gitlinks are added to the input set even when `git status` is clean.
+They are bound to both the superproject pointer and the clean submodule `HEAD`,
+after verifying that the submodule's independent Git top-level is the expected
+path. An unavailable, deinitialized, or dirty submodule makes the fingerprint
 unavailable, so the reuse policy runs verification instead of skipping it.
 
 After implementation, the primary inspects the actual worktree, complete diff,
