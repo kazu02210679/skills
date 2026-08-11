@@ -54,11 +54,12 @@ class QualityFirstBrowserPolicyTests(unittest.TestCase):
             text,
         )
 
-    def test_skill_defaults_to_two_pro_turns_and_routes_routine_review_to_sol(self) -> None:
+    def test_skill_defaults_to_two_pro_turns_and_routes_routine_review_to_luna(self) -> None:
         text = " ".join(SKILL.read_text(encoding="utf-8").lower().split())
         self.assertIn("--review-policy final_only", text)
         self.assertIn("does not automatically send another pro review", text)
-        self.assertIn("sol may provide one bounded read-only routine review", text)
+        self.assertIn("luna-max sub-agent may provide one bounded read-only routine review", text)
+        self.assertIn("sol may provide one bounded read-only high-impact consultation", text)
         self.assertIn("sol cannot replace the final pro gate", text)
 
     def test_timeout_contract_reobserves_active_turn_without_interrupting_it(self) -> None:

@@ -940,49 +940,62 @@ def route(
         if not eligible:
             return {
                 "selected_mode": "combined",
+                "review_calls": 0,
                 "sol_calls": 0,
-                "advice_admitted": 0,
-                "advice_discarded": True,
+                "review_discarded": True,
                 "fallback_calls": 0,
                 **preserved,
                 "terminal": "routine-review-not-eligible",
             }
-        if scenario.get("prior_sol_calls", 0):
+        if scenario.get("prior_routine_review_calls", 0) or scenario.get(
+            "prior_sol_calls", 0
+        ):
             return {
                 "selected_mode": "combined",
+                "review_calls": 0,
                 "sol_calls": 0,
-                "advice_admitted": 0,
-                "advice_discarded": True,
+                "review_discarded": True,
                 "fallback_calls": 0,
                 **preserved,
                 "terminal": "routine-review-already-consumed",
             }
-        if failure := _advisor_invocation_failure(scenario):
-            return failure
-        attestation = _runtime_attestation(
-            scenario, advisor_role, trusted_catalog, trusted_host
-        )
-        if "terminal" in attestation:
-            return attestation
-        disposition = evaluate_advice(scenario.get("sol_response", {}))
+        preflight, errors = _worker_preflight(trusted_luna_runtime, "luna")
+        if errors:
+            return {
+                "selected_mode": "combined",
+                "review_calls": 0,
+                "sol_calls": 0,
+                "review_worker": "luna",
+                "review_worker_available": False,
+                "dependency": "luna-review-runtime",
+                "preflight_errors": errors,
+                "review_discarded": True,
+                "fallback_calls": 0,
+                **preserved,
+                "terminal": "luna-review-capability-preflight-failed",
+            }
         return {
             "selected_mode": "combined",
-            "selected_lane": advisor_role,
-            "sol_calls": 1,
+            "selected_lane": "luna",
+            "review_worker": "luna",
+            "review_model": LUNA_MODEL,
+            "review_thinking": "max",
+            "review_as_subagent": True,
+            "review_calls": 1,
+            "sol_calls": 0,
             "maximum_lanes": 1,
             "routine_review": True,
             "routine_review_read_only": True,
             "pro_review_policy": "FINAL_ONLY",
-            "runtime_attested": True,
-            **attestation,
-            "advice_admitted": 1,
+            "review_worker_available": True,
+            "review_preflight": {"luna": preflight},
+            "review_discarded": False,
+            "advice_admitted": 0,
             "advice_discarded": False,
             "downstream_advice_propagations": 0,
             "fallback_calls": 0,
-            "advice_eligible_for_disposition": True,
-            **disposition,
             **preserved,
-            "terminal": "routine-sol-review-then-pro",
+            "terminal": "routine-luna-review-then-pro",
         }
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
         if failure := _advisor_invocation_failure(scenario):
