@@ -68,6 +68,27 @@ class QualityFirstBrowserPolicyTests(unittest.TestCase):
         self.assertIn("今すぐ回答", text)
         self.assertIn("経過時間だけ", text)
 
+    def test_standalone_skill_keeps_routing_in_composition_and_documents_test_economy(self) -> None:
+        skill = " ".join(SKILL.read_text(encoding="utf-8").lower().split())
+        readme = README.read_text(encoding="utf-8")
+
+        for phrase in (
+            "standalone use owns only the outer gpt pro protocol",
+            "does not select or invoke luna, terra, sol",
+            "orchestrate-gpt-pro-sol-advisor",
+            "one regression witness per root cause",
+            "new_test_files = 0",
+            "l1 affected focused tests",
+            "closed schema",
+            "verification-input",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill)
+
+        for phrase in ("standalone", "Test Economy", "closed schema"):
+            with self.subTest(readme_phrase=phrase):
+                self.assertIn(phrase, readme)
+
 
 if __name__ == "__main__":
     unittest.main()

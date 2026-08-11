@@ -9,6 +9,50 @@ ChatGPT Pro owns product requirements, acceptance criteria, and semantic review.
 
 **REQUIRED SUB-SKILL:** Use `browser:control-in-app-browser`.
 
+## Standalone scope and local-evidence economy
+
+Standalone use owns only the outer GPT Pro protocol. It does not select or
+invoke Luna, Terra, Sol, or a native worker role. Combined routing belongs to
+`orchestrate-gpt-pro-sol-advisor`; do not infer combined mode from an
+installation or a casual mention of another model.
+
+Codex still owns repository work, tests, snapshots, and every local
+verification claim. Keep verification economical: every added test maps to an
+acceptance criterion, material risk, or bug root cause; `new_test_files = 0`
+is the default; one regression witness per root cause is the default; and
+prefer observable contracts and table-driven witnesses over implementation
+details or speculative coverage. Use L0 diff/static inspection, L1 affected
+focused tests by default, L2 for shared/API/dependency changes, and L3 only
+for dependency, build-system, schema, shared-core, or release-critical work.
+
+The controller's `--local-evidence` input is a closed schema. Keep exactly
+these top-level fields and do not add metrics as sibling fields:
+
+```json
+{
+  "schema_version": 1,
+  "changed_file_intents": {"example.py": "Implement AC-1."},
+  "intent_summary": "Implement and verify AC-1.",
+  "acceptance_evidence": {"AC-1": ["Focused test passed."]},
+  "test_commands": [{
+    "command": "python -m unittest test_example.py -v",
+    "outcome": "PASS",
+    "output_summary": "exit=0; tests=1; duration=0.2s; summary=focused test passed; verify_input=sha256:...; test_delta=files:0,cases:1,anchors:AC-1"
+  }],
+  "diff_evidence": ["example.py implements AC-1."],
+  "omissions": [],
+  "unresolved_risks_or_blockers": []
+}
+```
+
+Encode bounded success metrics, test-delta anchors, and the verification-input
+fingerprint inside `output_summary`; never add `exit_code`, `test_count`,
+`duration`, `summary`, `test_delta`, or `fingerprint` fields to the object.
+On failure, keep only the command, exit code, failed names, relevant excerpt,
+and full-log path plus digest. Do not rerun an unchanged successful command:
+the skip key is the command plus the base/tree, relevant-file, lock/config,
+and material environment fingerprint—not the command string alone.
+
 For the normal controller loop, do not load
 [references/prompt-contract.md](references/prompt-contract.md) or
 [references/packet-contract.md](references/packet-contract.md) into model

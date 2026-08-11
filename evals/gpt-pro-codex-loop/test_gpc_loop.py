@@ -1310,6 +1310,30 @@ class ControllerCase(unittest.TestCase):
             controller.validate_model_bound_report(evidence)
         self.assertEqual("MODEL_BOUND_ITEM_COUNT_EXCEEDED", raised.exception.code)
 
+    def test_local_evidence_compacts_metrics_and_rejects_sibling_fields(self) -> None:
+        compact = self._write_local_evidence(
+            {"example.py": "Implement AC-1."},
+            test_commands=[
+                {
+                    "command": "python -m unittest test_example.py -v",
+                    "outcome": "PASS",
+                    "output_summary": (
+                        "exit=0; tests=1; duration=0.2s; summary=focused test passed; "
+                        "verify_input=sha256:abc; test_delta=files:0,cases:1,anchors:AC-1"
+                    ),
+                }
+            ],
+        )
+        loaded = controller._load_local_evidence(compact, valid_requirements())
+        self.assertIn("verify_input=sha256:abc", loaded["test_commands"][0]["output_summary"])
+
+        invalid = self._write_local_evidence(
+            {"example.py": "Implement AC-1."},
+            exit_code=0,
+        )
+        with self.assertRaisesRegex(controller.ControllerError, "unknown or missing fields"):
+            controller._load_local_evidence(invalid, valid_requirements())
+
     def test_build_report_rechecks_section_limit_after_controller_metadata(self) -> None:
         self._freeze_initial_requirements()
         (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")

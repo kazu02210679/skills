@@ -14,12 +14,21 @@ SKILL_ROOT = ROOT / "skills" / "orchestrate-gpt-pro-sol-advisor"
 CASES = Path(__file__).with_name("cases.json")
 PRESSURE_RESULTS = Path(__file__).with_name("pressure-results.json")
 POLICY_PATH = Path(__file__).with_name("policy.py")
+FINGERPRINT_PATH = ROOT / "scripts" / "verification_fingerprint.py"
 
 SPEC = importlib.util.spec_from_file_location("composition_policy", POLICY_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"Unable to load {POLICY_PATH}")
 POLICY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(POLICY)
+
+FINGERPRINT_SPEC = importlib.util.spec_from_file_location(
+    "verification_fingerprint", FINGERPRINT_PATH
+)
+if FINGERPRINT_SPEC is None or FINGERPRINT_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load {FINGERPRINT_PATH}")
+FINGERPRINT = importlib.util.module_from_spec(FINGERPRINT_SPEC)
+FINGERPRINT_SPEC.loader.exec_module(FINGERPRINT)
 
 
 def valid_combined(**overrides: object) -> dict[str, object]:
@@ -128,6 +137,86 @@ def trusted_host_context(
     return context
 
 
+def luna_runtime_context(**overrides: object) -> dict[str, object]:
+    runtime: dict[str, object] = {
+        "source": "native-capability-preflight",
+        "capabilities": [
+            "list_projects",
+            "create_thread",
+            "list_threads",
+            "wait_threads",
+            "read_thread",
+            "send_message_to_thread",
+        ],
+        "project_type": "git",
+        "workspace_mode": "worktree",
+        "project_id": "project-123",
+        "thread_id": "11111111-1111-7111-8111-111111111111",
+        "host_id": "host-123",
+        "identity_source": "native-create-thread",
+        "task_state": "created",
+        "requested_model": "gpt-5.6-luna",
+        "requested_thinking": "max",
+    }
+    runtime.update(overrides)
+    return runtime
+
+
+def terra_runtime_context(**overrides: object) -> dict[str, object]:
+    runtime: dict[str, object] = {
+        "source": "native-role-preflight",
+        "available_roles": ["sol_advisor_terra_implementer"],
+        "requested_role": "sol_advisor_terra_implementer",
+        "role": "sol_advisor_terra_implementer",
+        "model": "gpt-5.6-terra",
+        "effort": "high",
+        "project_id": "project-123",
+        "thread_id": "22222222-2222-7222-8222-222222222222",
+        "host_id": "host-123",
+        "identity_source": "native-role-spawn",
+        "task_state": "created",
+        "role_template_path": "roles/sol_advisor_terra_implementer.toml",
+        "role_template_status": "exact",
+        "role_template_digest": "sha256:" + "a" * 64,
+        "shipped_role_template_digest": "sha256:" + "a" * 64,
+    }
+    runtime.update(overrides)
+    return runtime
+
+
+def execution_context(
+    thread_id: str,
+    *,
+    outcome: str,
+    **overrides: object,
+) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "source": "native-task-result",
+        "project_id": "project-123",
+        "thread_id": thread_id,
+        "host_id": "host-123",
+        "outcome": outcome,
+    }
+    if outcome == "blocked":
+        evidence.update(
+            {
+                "high_impact_decision_pending": True,
+                "decision_key": "auth-boundary-invariant",
+            }
+        )
+    else:
+        evidence.update(
+            {
+                "root_cause_key": "auth-expiry",
+                "attempt_count": 2,
+                "correction_count": 1,
+                "same_root_cause": True,
+            }
+        )
+    evidence.update(overrides)
+    return evidence
+
+
 _RAW_ROUTE = POLICY.route
 _DEFAULT_TRUSTED_HOST = object()
 
@@ -137,6 +226,10 @@ def _route_with_trusted_host(
     *,
     trusted_catalog: dict[str, object] | None = None,
     trusted_host: dict[str, object] | None | object = _DEFAULT_TRUSTED_HOST,
+    trusted_luna_runtime: dict[str, object] | None = None,
+    trusted_terra_runtime: dict[str, object] | None = None,
+    trusted_luna_execution: dict[str, object] | None = None,
+    trusted_terra_execution: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if trusted_host is _DEFAULT_TRUSTED_HOST:
         thread_id = scenario.get(
@@ -147,6 +240,10 @@ def _route_with_trusted_host(
         scenario,
         trusted_catalog=trusted_catalog,
         trusted_host=trusted_host if isinstance(trusted_host, dict) else None,
+        trusted_luna_runtime=trusted_luna_runtime,
+        trusted_terra_runtime=trusted_terra_runtime,
+        trusted_luna_execution=trusted_luna_execution,
+        trusted_terra_execution=trusted_terra_execution,
     )
 
 
@@ -256,6 +353,304 @@ class CompositionContractTests(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.skill.lower())
+
+    def test_luna_first_routing_has_bounded_terra_and_sol_escalation(self) -> None:
+        skill_text = " ".join(self.skill.lower().split())
+        for phrase in (
+            "implementation_policy: luna_first",
+            "gpt-5.6-luna",
+            "thinking: max",
+            "gpt-5.6-terra",
+            "difficult scope",
+            "at most two coarse-grained",
+            "dependency-unavailable",
+            "sol never edits",
+            "outside the routing scenario",
+            "optional",
+            "role template",
+            "execution evidence",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill_text)
+
+        lane = SKILL_ROOT / "references" / "luna-implementation-lane.md"
+        self.assertTrue(lane.is_file())
+        lane_text = " ".join(lane.read_text(encoding="utf-8").lower().split())
+        for phrase in (
+            "clientthreadid",
+            "project_id",
+            "identity_source",
+            "task_state",
+            "requirements_digest",
+            "task_state",
+            "one precise correction to the same task",
+            "sol_advisor_terra_implementer",
+            "never silently fall back",
+        ):
+            with self.subTest(reference_phrase=phrase):
+                self.assertIn(phrase, lane_text)
+
+    def test_verification_economy_is_explicit(self) -> None:
+        economy = " ".join(
+            (SKILL_ROOT / "references" / "verification-economy.md")
+            .read_text(encoding="utf-8")
+            .lower()
+            .split()
+        )
+        for phrase in (
+            "new_test_files = 0",
+            "one regression witness per root cause",
+            "observable behavior",
+            "test_delta",
+            "primary_anchor",
+            "also_proves",
+            "existing acceptance",
+            "five cases",
+            "verification_fingerprint.py",
+            "verification_input",
+            "no external fingerprint argument",
+            "unknown siblings are rejected",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, economy)
+
+    def test_standalone_gpc_does_not_own_worker_routing(self) -> None:
+        gpc = " ".join(
+            (ROOT / "skills" / "gpt-pro-codex-loop" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .lower()
+            .split()
+        )
+        self.assertIn("standalone use owns only the outer gpt pro protocol", gpc)
+        self.assertIn("does not select or invoke luna, terra, sol", gpc)
+        self.assertIn("orchestrate-gpt-pro-sol-advisor", gpc)
+        self.assertNotIn("default implementation worker", gpc)
+        self.assertNotIn("sol_advisor_terra_implementer", gpc)
+
+    def test_verification_skip_requires_the_complete_input_fingerprint(self) -> None:
+        command = "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py"
+        trusted_fingerprint = FINGERPRINT.compute_fingerprint(ROOT, command=command)
+        self.assertEqual(
+            {"action": "skip", "reason": "unchanged-successful-input"},
+            POLICY.verification_reuse_decision(
+                ROOT,
+                command,
+                {
+                    "outcome": "PASS",
+                    "command": command,
+                    "verification_input_fingerprint": trusted_fingerprint,
+                },
+            ),
+        )
+        for previous in (
+            {
+                "outcome": "FAIL",
+                "command": command,
+                "verification_input_fingerprint": trusted_fingerprint,
+            },
+            {
+                "outcome": "PASS",
+                "command": command,
+                "verification_input_fingerprint": "sha256:" + "b" * 64,
+            },
+            {
+                "outcome": "PASS",
+                "command": command + " --other",
+                "verification_input_fingerprint": trusted_fingerprint,
+            },
+        ):
+            with self.subTest(previous=previous):
+                self.assertEqual(
+                    {"action": "run", "reason": "verification-input-changed"},
+                    POLICY.verification_reuse_decision(
+                        ROOT,
+                        command,
+                        previous,
+                    ),
+                )
+
+        self.assertEqual(
+            {"action": "run", "reason": "verification-input-changed"},
+            POLICY.verification_reuse_decision(
+                ROOT,
+                command,
+                {
+                    "outcome": "PASS",
+                    "command": command,
+                    "verification_input_fingerprint": "sha256:" + "a" * 64,
+                },
+            ),
+        )
+
+    def test_worker_runtime_evidence_must_be_external_and_identity_bound(self) -> None:
+        self_claim = POLICY.route(
+            valid_combined(
+                implementation_request=True,
+                luna_runtime_preflight=luna_runtime_context(),
+            )
+        )
+        self.assertEqual("luna-capability-preflight-failed", self_claim["terminal"])
+
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(),
+        )
+        self.assertEqual("luna-implementation", accepted["terminal"])
+        self.assertEqual("project-123", accepted["implementation_preflight"]["luna"]["project_id"])
+        self.assertEqual("host-123", accepted["implementation_preflight"]["luna"]["host_id"])
+        self.assertEqual(
+            "11111111-1111-7111-8111-111111111111",
+            accepted["implementation_preflight"]["luna"]["thread_id"],
+        )
+
+    def test_luna_model_observation_is_optional_but_mismatch_is_rejected(self) -> None:
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(),
+        )
+        self.assertTrue(accepted["implementation_available"])
+
+        mismatched = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(
+                observed_model="gpt-5.6-terra",
+                observed_thinking="max",
+            ),
+        )
+        self.assertEqual("luna-capability-preflight-failed", mismatched["terminal"])
+
+    def test_luna_escalation_requires_separate_execution_evidence(self) -> None:
+        scenario = valid_combined(
+            implementation_request=True,
+            luna_same_root_cause_failed=True,
+        )
+        missing_execution = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("luna-execution-evidence-failed", missing_execution["terminal"])
+
+        escalated = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_luna_execution=execution_context(
+                "11111111-1111-7111-8111-111111111111", outcome="failed"
+            ),
+        )
+        self.assertEqual("terra-implementation", escalated["terminal"])
+
+        over_budget = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_luna_execution=execution_context(
+                "11111111-1111-7111-8111-111111111111",
+                outcome="failed",
+                attempt_count=3,
+                correction_count=2,
+            ),
+        )
+        self.assertEqual("luna-execution-evidence-failed", over_budget["terminal"])
+
+    def test_terra_requires_exact_shipped_role_template_provenance(self) -> None:
+        missing_template = POLICY.route(
+            valid_combined(implementation_request=True, difficult_scope=True),
+            trusted_terra_runtime=terra_runtime_context(
+                role_template_status="stale"
+            ),
+        )
+        self.assertEqual("terra-capability-preflight-failed", missing_template["terminal"])
+
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True, difficult_scope=True),
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("terra-implementation", accepted["terminal"])
+
+    def test_terra_to_sol_escalation_requires_blocked_execution_evidence(self) -> None:
+        scenario = attested_combined(
+            implementation_request=True,
+            terra_blocked=True,
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Which safety invariant must Terra preserve?",
+            material_risk=True,
+            decision_value=True,
+        )
+        missing_execution = POLICY.route(
+            scenario,
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("terra-execution-evidence-failed", missing_execution["terminal"])
+
+        admitted = POLICY.route(
+            scenario,
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_terra_execution=execution_context(
+                "22222222-2222-7222-8222-222222222222", outcome="blocked"
+            ),
+        )
+        self.assertEqual("primary-disposition", admitted["terminal"])
+        self.assertEqual(1, admitted["sol_calls"])
+
+    def test_test_witnesses_have_one_primary_anchor_and_bounded_growth(self) -> None:
+        self.assertEqual(
+            {"action": "allow-minimal-witness", "reason": "anchored-witness"},
+            POLICY.test_witness_decision(
+                [
+                    {
+                        "primary_anchor": "AC-3",
+                        "also_proves": ["RISK-1", "BUG-auth-expiry"],
+                        "case_count": 2,
+                    }
+                ],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unbounded-anchor-growth"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-3", "also_proves": [], "case_count": 20}],
+                {"AC-3"},
+                set(),
+                set(),
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "duplicate-primary-anchor"},
+            POLICY.test_witness_decision(
+                [
+                    {"primary_anchor": "AC-3", "also_proves": [], "case_count": 1},
+                    {"primary_anchor": "AC-3", "also_proves": [], "case_count": 1},
+                ],
+                {"AC-3"},
+                set(),
+                set(),
+            ),
+        )
+
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unknown-primary-anchor"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "BANANA-123", "also_proves": [], "case_count": 1}],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unknown-secondary-anchor"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-3", "also_proves": ["BANANA-123"], "case_count": 1}],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
+            ),
+        )
 
     def test_combined_mode_does_not_invoke_sol_orchestration(self) -> None:
         lower = self.skill.lower()
@@ -1212,6 +1607,16 @@ class CompositionContractTests(unittest.TestCase):
                 "inspector-fills-public-omissions",
                 "inspector-thread-mismatch-stops",
                 "self-claims-do-not-establish-provenance",
+                "luna-is-default-implementation-worker",
+                "luna-same-root-cause-escalates-terra",
+                "difficult-scope-starts-at-terra",
+                "terra-blocker-uses-sol-read-only-advice",
+                "test-economy-policy-is-explicit",
+                "luna-capability-missing-fails-closed",
+                "luna-wrong-model-fails-closed",
+                "luna-client-thread-handle-fails-closed",
+                "terra-capability-missing-fails-closed",
+                "terra-wrong-role-fails-closed",
             },
             set(cases),
         )
@@ -1230,9 +1635,23 @@ class CompositionContractTests(unittest.TestCase):
                             "runtime_inspector_output": output,
                         }
                     scenario = attested_combined(**scenario)
+                trusted_runtime = case.get("trusted_runtime", {})
+                trusted_execution = case.get("trusted_execution", {})
                 actual = POLICY.route(
                     scenario,
                     trusted_catalog=trusted_catalog_context(),
+                    trusted_luna_runtime=trusted_runtime.get("luna")
+                    if isinstance(trusted_runtime, dict)
+                    else None,
+                    trusted_terra_runtime=trusted_runtime.get("terra")
+                    if isinstance(trusted_runtime, dict)
+                    else None,
+                    trusted_luna_execution=trusted_execution.get("luna")
+                    if isinstance(trusted_execution, dict)
+                    else None,
+                    trusted_terra_execution=trusted_execution.get("terra")
+                    if isinstance(trusted_execution, dict)
+                    else None,
                 )
                 for key, value in case["expect"].items():
                     self.assertEqual(value, actual.get(key), key)
@@ -1399,6 +1818,88 @@ class CompositionContractTests(unittest.TestCase):
                     if key in trace:
                         self.assertEqual(trace[key], actual.get(key), key)
 
+        implementation = results["implementation_preflight"]
+        self.assertEqual("deterministic-policy-replay", implementation["evaluation_mode"])
+        self.assertTrue(all(item["contract_violation"] for item in implementation["baseline"]))
+        implementation_replays = {
+            "luna-missing-capability": valid_combined(
+                implementation_request=True
+            ),
+            "luna-client-thread-only": valid_combined(
+                implementation_request=True,
+                luna_runtime_preflight={
+                    "source": "native-capability-preflight",
+                    "capabilities": [
+                        "list_projects",
+                        "create_thread",
+                        "list_threads",
+                        "wait_threads",
+                        "read_thread",
+                        "send_message_to_thread",
+                    ],
+                    "project_type": "git",
+                    "workspace_mode": "worktree",
+                    "model": "gpt-5.6-luna",
+                    "thinking": "max",
+                    "task_state": "ready",
+                },
+            ),
+            "terra-missing-role": valid_combined(
+                implementation_request=True, difficult_scope=True
+            ),
+        }
+        for trace in implementation["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = POLICY.route(implementation_replays[trace["sample"]])
+                self.assertFalse(trace["contract_violation"])
+                for key in ("terminal", "silent_downgrade"):
+                    if key in trace:
+                        self.assertEqual(trace[key], actual.get(key), key)
+
+        trust_boundary = results["worker_trust_boundary"]
+        self.assertEqual(5, len(trust_boundary["baseline"]))
+        self.assertEqual(5, len(trust_boundary["with_skill"]))
+        self.assertTrue(all(item["contract_violation"] for item in trust_boundary["baseline"]))
+        self.assertTrue(all(not item["contract_violation"] for item in trust_boundary["with_skill"]))
+
+        fresh_pressure = results["fresh_context_pressure_prompts"]
+        self.assertFalse(fresh_pressure["executed_here"])
+        self.assertEqual(5, len(fresh_pressure["prompts"]))
+        self.assertTrue(fresh_pressure["required_observations"])
+
+        economy = results["verification_economy"]
+        self.assertEqual("deterministic-policy-replay", economy["evaluation_mode"])
+        self.assertTrue(all(item["contract_violation"] for item in economy["baseline"]))
+        verification_replays = {
+            "same-command-new-tree": POLICY.verification_reuse_decision(
+                ROOT,
+                "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py",
+                {
+                    "outcome": "PASS",
+                    "command": "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py",
+                    "verification_input_fingerprint": "sha256:" + "b" * 64,
+                },
+            ),
+            "test-count-without-anchor": POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-1", "also_proves": [], "case_count": 20}],
+                {"AC-1"},
+                set(),
+                set(),
+            ),
+            "unknown-anchor-id": POLICY.test_witness_decision(
+                [{"primary_anchor": "BANANA-123", "also_proves": [], "case_count": 1}],
+                {"AC-1"},
+                set(),
+                set(),
+            ),
+        }
+        for trace in economy["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = verification_replays[trace["sample"]]
+                self.assertFalse(trace["contract_violation"])
+                self.assertEqual(trace["action"], actual["action"])
+                self.assertEqual(trace["reason"], actual["reason"])
+
     def test_has_human_and_codex_metadata(self) -> None:
         self.assertTrue((SKILL_ROOT / "README.md").is_file())
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(
@@ -1407,6 +1908,8 @@ class CompositionContractTests(unittest.TestCase):
         self.assertIn("$orchestrate-gpt-pro-sol-advisor", metadata)
         self.assertIn("単独", self.readme)
         self.assertIn("併用", self.readme)
+        self.assertIn("Luna", self.readme)
+        self.assertIn("Test Economy", self.readme)
 
 
 if __name__ == "__main__":

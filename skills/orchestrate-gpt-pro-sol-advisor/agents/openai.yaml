@@ -1,6 +1,6 @@
 interface:
   display_name: "GPT Pro + Sol Advisor"
-  short_description: "Compose GPT Pro and Sol without authority drift"
-  default_prompt: "Use $orchestrate-gpt-pro-sol-advisor to coordinate GPT Pro and Sol Advisor in explicit combined mode."
+  short_description: "Luna-first implementation with Terra/Sol escalation"
+  default_prompt: "Use $orchestrate-gpt-pro-sol-advisor for explicit combined mode: Luna/Max implementation, Terra/High escalation, bounded read-only Sol advice, and GPT Pro semantic review."
 policy:
   allow_implicit_invocation: false

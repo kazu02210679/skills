@@ -104,14 +104,14 @@ abandon-attempt       --send-status NOT_SENT --not-sent-evidence FILE
   "changed_file_intents": {"example.py": "Implement AC-1."},
   "intent_summary": "Implement and verify AC-1.",
   "acceptance_evidence": {"AC-1": ["Focused test passed."]},
-  "test_commands": [{"command": "python -m unittest test_example.py -v", "outcome": "PASS", "output_summary": "1 test passed."}],
+  "test_commands": [{"command": "python -m unittest test_example.py -v", "outcome": "PASS", "output_summary": "exit=0; tests=1; duration=0.2s; summary=focused test passed; verify_input=sha256:...; test_delta=files:0,cases:1,anchors:AC-1"}],
   "diff_evidence": ["example.py implements AC-1."],
   "omissions": [],
   "unresolved_risks_or_blockers": []
 }
 ```
 
-`schema_version` is integer `1`. `changed_file_intents` is an object of non-empty changed-path keys and non-empty intent strings; its keys must equal the captured product snapshot's changed-path set exactly. `intent_summary` is a non-empty string. `acceptance_evidence` must have exactly every active acceptance ID as keys and each value is a non-empty list of non-empty strings. `diff_evidence`, `omissions`, and `unresolved_risks_or_blockers` are lists of non-empty strings. Every `test_commands` item has exactly non-empty string `command`, `outcome`, and `output_summary` fields; the controller records commands without executing them. A report may record a non-`PASS` outcome, but final verification requires at least one command and every outcome to be `PASS`, with empty omissions and unresolved blockers.
+`schema_version` is integer `1`. `changed_file_intents` is an object of non-empty changed-path keys and non-empty intent strings; its keys must equal the captured product snapshot's changed-path set exactly. `intent_summary` is a non-empty string. `acceptance_evidence` must have exactly every active acceptance ID as keys and each value is a non-empty list of non-empty strings. `diff_evidence`, `omissions`, and `unresolved_risks_or_blockers` are lists of non-empty strings. Every `test_commands` item has exactly non-empty string `command`, `outcome`, and `output_summary` fields; the controller records commands without executing them. Encode exit code, test count, duration, bounded summary, test-delta anchors, and the verification-input fingerprint inside `output_summary`; do not add sibling fields such as `exit_code`, `test_count`, `duration`, `summary`, `test_delta`, or `fingerprint`. A report may record a non-`PASS` outcome, but final verification requires at least one command and every outcome to be `PASS`, with empty omissions and unresolved blockers.
 
 `--request` and `--repository-context` are UTF-8 text inputs read with universal-newline handling: CRLF and bare CR become LF before persistence. No trailing newline is added or removed; any trailing newline sequence is preserved after that line-ending normalization. `--conflict-evidence`, `--supplemental-evidence`, and `--approval-evidence` are readable, non-empty UTF-8 text files. `--not-sent-evidence` is readable, non-empty UTF-8 text normalized to LF and stored up to 8192 UTF-8 bytes; it is valid only with literal `--send-status NOT_SENT`. `accept-*` always receives the complete raw response plus the URL and model label observed in the Browser at acceptance time.
 

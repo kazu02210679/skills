@@ -18,6 +18,12 @@ For each case in `cases.json`, start a separate fresh agent context. Give it onl
 
 These checks assess whether concise Skill guidance leads an agent toward the intended decision. Model sampling can vary; record the date and raw result and investigate mismatches rather than calling the result deterministic.
 
+The focused quality-first policy test also checks the standalone boundary:
+worker routing is not owned by this Skill, while the model-agnostic Test
+Economy and closed local-evidence contract prevent speculative test and
+verification-log growth. Combined worker routing is evaluated by the
+composition skill.
+
 ## 2026-07-29 observed GREEN run
 
 The required six independent fresh contexts matched all expected fields. Two additional fresh non-trigger checks also matched after the trigger was narrowed:
