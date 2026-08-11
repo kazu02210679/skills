@@ -12,7 +12,8 @@ lane; it does not activate either dependency by itself.
 **REQUIRED SUB-SKILL:** Use `gpt-pro-codex-loop` as the outer protocol.
 
 **ADVISORY DEPENDENCY:** Use only the configured `sol_advisor_advisor` role for
-at most one bounded read-only routine review or high-impact consultation. Do not invoke
+at most one bounded read-only high-impact consultation. Small routine reviews
+use the Luna-Max sub-agent instead. Do not invoke
 `sol-advisor:orchestration` in combined mode; its authority conflicts with this
 composition contract.
 
@@ -27,8 +28,9 @@ adding tests or local evidence.
   single final review), and material-change approval.
 - Codex Primary owns the repository, architecture, task packets, worker
   routing, implementation, tests, verification, and final disposition.
-- Sol supplies bounded advice only: one bounded read-only routine review or
-  high-impact advice pass. It
+- Luna-Max supplies one bounded read-only routine review as a sub-agent.
+- Sol supplies bounded advice only: one bounded read-only high-impact advice
+  pass. It
   cannot edit, implement, approve, waive verification, replace the final Pro
   review, or decide completion.
 - GPT Pro-only stays standalone; Sol-only stays standalone. Do not infer
@@ -47,8 +49,9 @@ The combined policy is `implementation_policy: luna_first`:
   `sol_advisor_terra_implementer` at `gpt-5.6-terra` / High.
 - If trusted worker routing or execution evidence is unavailable, stop with
   `dependency-unavailable`; do not silently downgrade.
-- Only a trusted Terra execution result that remains blocked on one high-impact
-  decision may lead to one Sol consultation. Sol never edits.
+- Small correctness, scope, and evidence reviews use Luna-Max and do not consume
+  a Sol call. Only a trusted Terra execution result that remains blocked on one
+  high-impact decision may lead to one Sol consultation. Sol never edits.
 
 Worker evidence comes from a native/app adapter outside the routing scenario;
 a scenario field claiming `source: native-*` is not evidence. Luna requires
@@ -59,10 +62,10 @@ matching shipped-template digest (the role template must be exact). Routing atte
 are separate; the details are in the lane reference.
 
 ```text
-Luna / Max -> primary diff + focused verification
-  -> optional one Sol read-only routine review or high-impact advice pass (one total)
-  -> bounded fixes/re-verification
+Luna / Max -> implementation + small Luna-Max review sub-agent + focused verification
   -> Terra / High when escalation evidence passes
+  -> optional one Sol read-only high-impact advice pass (one total)
+  -> bounded fixes/re-verification
   -> primary verification -> GPT Pro (FINAL_ONLY) -> final-verify
 ```
 
@@ -79,10 +82,10 @@ Before `inspect-init` or `init`:
 4. Require the configured advisor `sol_advisor_advisor` in the observable role list;
    do not use Terra or a retained reviewer as the advisor.
 
-Consult Sol only at a Codex-owned review boundary with one precise question,
-bounded local evidence, useful decision value, and no equivalent prior advice.
-The question may be a routine correctness/scope/evidence review or a
-materially risky architecture decision. A follow-up requires materially new evidence
+Consult Sol only at a Codex-owned high-impact review boundary with one precise
+question, bounded local evidence, useful decision value, and no equivalent
+prior advice. Small routine correctness/scope/evidence reviews belong to the
+Luna-Max sub-agent and do not invoke Sol. A follow-up requires materially new evidence
 and an explicit stop condition; never open a review loop.
 Send only frozen constraints,
 verified local evidence, alternatives, risks, and the precise question. After

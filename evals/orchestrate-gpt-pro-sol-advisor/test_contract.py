@@ -1537,7 +1537,7 @@ class CompositionContractTests(unittest.TestCase):
         self.assertEqual("sol_advisor_advisor", result["selected_lane"])
         self.assertEqual(1, result["sol_calls"])
 
-    def test_routine_sol_review_is_bounded_before_final_pro_review(self) -> None:
+    def test_routine_review_uses_luna_max_before_final_pro_review(self) -> None:
         result = POLICY.route(
             attested_combined(
                 routine_review=True,
@@ -1549,21 +1549,26 @@ class CompositionContractTests(unittest.TestCase):
                 material_risk=False,
             ),
             trusted_catalog=trusted_catalog_context(),
+            trusted_luna_runtime=luna_runtime_context(),
         )
         self.assertEqual("combined", result["selected_mode"])
-        self.assertEqual("sol_advisor_advisor", result["selected_lane"])
-        self.assertEqual(1, result["sol_calls"])
+        self.assertEqual("luna", result["selected_lane"])
+        self.assertEqual("gpt-5.6-luna", result["review_model"])
+        self.assertEqual("max", result["review_thinking"])
+        self.assertTrue(result["review_as_subagent"])
+        self.assertEqual(1, result["review_calls"])
+        self.assertEqual(0, result["sol_calls"])
         self.assertTrue(result["routine_review"])
         self.assertTrue(result["routine_review_read_only"])
         self.assertEqual("FINAL_ONLY", result["pro_review_policy"])
         self.assertTrue(result["pro_review_retained"])
-        self.assertEqual("routine-sol-review-then-pro", result["terminal"])
+        self.assertEqual("routine-luna-review-then-pro", result["terminal"])
 
-    def test_routine_sol_review_cannot_be_reentered(self) -> None:
+    def test_routine_luna_review_cannot_be_reentered(self) -> None:
         result = POLICY.route(
             attested_combined(
                 routine_review=True,
-                prior_sol_calls=1,
+                prior_routine_review_calls=1,
                 routine_review_evidence=["focused tests pass"],
                 codex_commitment_boundary=True,
                 concrete_question=True,
@@ -1573,9 +1578,27 @@ class CompositionContractTests(unittest.TestCase):
             ),
             trusted_catalog=trusted_catalog_context(),
         )
+        self.assertEqual(0, result["review_calls"])
         self.assertEqual(0, result["sol_calls"])
-        self.assertTrue(result["advice_discarded"])
+        self.assertTrue(result["review_discarded"])
         self.assertEqual("routine-review-already-consumed", result["terminal"])
+
+    def test_routine_review_requires_trusted_luna_runtime(self) -> None:
+        result = POLICY.route(
+            attested_combined(
+                routine_review=True,
+                routine_review_evidence=["focused tests pass"],
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does this focused diff preserve the acceptance criteria?",
+                decision_value=True,
+                material_risk=False,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("luna-review-capability-preflight-failed", result["terminal"])
+        self.assertEqual(0, result["review_calls"])
+        self.assertEqual(0, result["sol_calls"])
 
     def test_legacy_only_roles_do_not_trigger_compatibility_fallback(self) -> None:
         result = POLICY.route(
@@ -1620,7 +1643,7 @@ class CompositionContractTests(unittest.TestCase):
                 "legacy-only-does-not-fallback",
                 "nested-orchestration-is-rejected",
                 "explicit-combined-low-risk-skips-sol",
-                "routine-review-uses-sol-before-final-pro",
+                "routine-review-uses-luna-max-before-final-pro",
                 "technical-question-selects-configured-advisor",
                 "authority-escalation-is-rejected",
                 "conflicting-advice-is-rejected",

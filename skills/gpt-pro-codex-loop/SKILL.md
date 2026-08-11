@@ -18,9 +18,11 @@ bounded stop; the controller does not automatically send another Pro review.
 
 Use `--review-policy ITERATIVE` only when the user explicitly accepts repeated
 Pro review usage. Routine diff review and local verification remain Codex-owned
-in standalone mode. In the explicit composition mode, Sol may provide one
-bounded read-only routine review before the final Pro review; Sol cannot replace
-the final Pro gate or decide completion.
+in standalone mode. In the explicit composition mode, a Luna-Max sub-agent may
+provide one bounded read-only routine review before the final Pro review. Sol
+may provide one bounded read-only high-impact consultation only when escalation
+evidence warrants it; Sol cannot replace the final Pro gate or decide
+completion.
 
 ## Standalone scope and local-evidence economy
 

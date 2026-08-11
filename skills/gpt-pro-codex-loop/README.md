@@ -1,5 +1,10 @@
 # GPT Pro Codex Loop
 
+In explicit composition mode, a Luna-Max sub-agent handles one bounded
+read-only routine review before the final Pro review. Sol is reserved for one
+bounded read-only high-impact consultation when escalation evidence warrants
+it; it never replaces the final Pro gate.
+
 このSkillは、Codex DesktopのBrowser経由でChatGPT Proに要件・Acceptance
 Criteria・semantic reviewを担当させ、Codexが実装とlocal verificationを担当する
 外側のプロトコルです。
@@ -13,8 +18,9 @@ controllerが停止し、Proへの自動再レビューは行いません。
 
 反復レビューが本当に必要で、Proの使用量を受け入れる場合だけ
 `--review-policy ITERATIVE` を明示します。通常のdiff review・テスト結果の確認・
-local verificationはCodexが担当し、明示的なcomposition modeではSol Advisorを
-最終Pro review前のbounded read-only routine reviewとして使えます。Solは完了判定
+local verificationはCodexが担当し、明示的なcomposition modeではLuna-Max sub-agentを
+最終Pro review前のbounded read-only routine reviewに使います。Solは高影響な
+read-only consultationに限定し、完了判定
 やProの最終gateを代替しません。
 
 ## standaloneの責務
