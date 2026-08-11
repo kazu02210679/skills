@@ -12,8 +12,9 @@ lane; it does not activate either dependency by itself.
 **REQUIRED SUB-SKILL:** Use `gpt-pro-codex-loop` as the outer protocol.
 
 **ADVISORY DEPENDENCY:** Use only the configured `sol_advisor_advisor` role for
-one bounded read-only consultation. Do not invoke `sol-advisor:orchestration` in combined mode;
-its authority conflicts with this composition contract.
+at most one bounded read-only routine review or high-impact consultation. Do not invoke
+`sol-advisor:orchestration` in combined mode; its authority conflicts with this
+composition contract.
 
 Read [references/luna-implementation-lane.md](references/luna-implementation-lane.md)
 before creating an implementation task and
@@ -22,12 +23,14 @@ adding tests or local evidence.
 
 ## Mode and authority
 
-- GPT Pro owns frozen requirements, acceptance criteria, semantic review, and
-  material-change approval.
+- GPT Pro owns frozen requirements, acceptance criteria, semantic review (the
+  single final review), and material-change approval.
 - Codex Primary owns the repository, architecture, task packets, worker
   routing, implementation, tests, verification, and final disposition.
-- Sol supplies bounded advice only. It cannot edit, implement, approve, waive
-  verification, replace Pro, or decide completion.
+- Sol supplies bounded advice only: one bounded read-only routine review or
+  high-impact advice pass. It
+  cannot edit, implement, approve, waive verification, replace the final Pro
+  review, or decide completion.
 - GPT Pro-only stays standalone; Sol-only stays standalone. Do not infer
   combined mode from a mention or installation state.
 
@@ -56,10 +59,11 @@ matching shipped-template digest (the role template must be exact). Routing atte
 are separate; the details are in the lane reference.
 
 ```text
-Luna / Max -> primary diff + focused verification -> one same-task correction
+Luna / Max -> primary diff + focused verification
+  -> optional one Sol read-only routine review or high-impact advice pass (one total)
+  -> bounded fixes/re-verification
   -> Terra / High when escalation evidence passes
-  -> Sol read-only advice only for a remaining high-impact decision
-  -> primary verification -> GPT Pro -> final-verify
+  -> primary verification -> GPT Pro (FINAL_ONLY) -> final-verify
 ```
 
 ## Preflight and Sol gate
@@ -75,15 +79,18 @@ Before `inspect-init` or `init`:
 4. Require the configured advisor `sol_advisor_advisor` in the observable role list;
    do not use Terra or a retained reviewer as the advisor.
 
-Consult Sol only at a Codex-owned commitment boundary with one precise,
-materially risky question, useful decision value, and no equivalent prior advice.
-A follow-up requires materially new evidence and an explicit stop condition.
+Consult Sol only at a Codex-owned review boundary with one precise question,
+bounded local evidence, useful decision value, and no equivalent prior advice.
+The question may be a routine correctness/scope/evidence review or a
+materially risky architecture decision. A follow-up requires materially new evidence
+and an explicit stop condition; never open a review loop.
 Send only frozen constraints,
 verified local evidence, alternatives, risks, and the precise question. After
 trusted runtime attestation, record `accept`, `reject`, or `partially accept`.
-Do not make Sol a mandatory pre-Pro or final gate. Reject nested orchestration,
-Sol-to-Sol review, advisor re-entry, duplicate consultation, and open-ended
-loops. Do not fabricate a consultation or accept fabricated advice.
+Sol is not a mandatory completion gate and cannot replace the final Pro review.
+Reject nested orchestration, Sol-to-Sol review, advisor re-entry, duplicate
+consultation, and open-ended loops. Do not fabricate a consultation or accept
+fabricated advice.
 
 ## Test economy and return
 
@@ -110,7 +117,8 @@ path. An unavailable, deinitialized, or dirty submodule makes the fingerprint
 unavailable, so the reuse policy runs verification instead of skipping it.
 
 After implementation, the primary inspects the actual worktree, complete diff,
-owned scope, and evidence; worker reports are claims. Re-verify at the lowest
-sufficient level and return bounded evidence to GPT Pro. Workers never commit,
+owned scope, and evidence; worker and Sol reports are claims. Re-verify at the
+lowest sufficient level, optionally fold in one Sol disposition, and return bounded
+evidence to the single final GPT Pro review. Workers never commit,
 push, create PRs, deploy, change permissions, or perform destructive actions.
 Completion requires the outer controller's `final-verify`.

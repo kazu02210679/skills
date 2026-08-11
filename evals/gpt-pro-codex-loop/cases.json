@@ -1,7 +1,7 @@
 [
   {
     "id": "requirements-owner",
-    "prompt": "Use ChatGPT Pro in the Browser to define and freeze requirements, then have Codex implement them and return to the same Pro conversation for iterative review until both semantic and local gates pass.",
+    "prompt": "Use ChatGPT Pro in the Browser to define and freeze requirements, then have Codex implement them and return to the same Pro conversation for one final semantic review after local verification.",
     "expect": {
       "pro_owns_requirements": true,
       "codex_owns_local_implementation": true,

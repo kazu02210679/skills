@@ -4,6 +4,19 @@
 Criteria・semantic reviewを担当させ、Codexが実装とlocal verificationを担当する
 外側のプロトコルです。
 
+## Proの使用量を抑える既定
+
+新規runは `FINAL_ONLY` が既定です。通常の1 runでProを使うのは、要件・計画の
+固定時と、Codexが実装・local verificationを終えた後の最終semantic reviewの
+2回だけです。最終reviewが `CHANGES_REQUESTED` または `BLOCK` になった場合は
+controllerが停止し、Proへの自動再レビューは行いません。
+
+反復レビューが本当に必要で、Proの使用量を受け入れる場合だけ
+`--review-policy ITERATIVE` を明示します。通常のdiff review・テスト結果の確認・
+local verificationはCodexが担当し、明示的なcomposition modeではSol Advisorを
+最終Pro review前のbounded read-only routine reviewとして使えます。Solは完了判定
+やProの最終gateを代替しません。
+
 ## standaloneの責務
 
 GPT Pro単独で使う場合、このSkillはLuna・Terra・Solやnative worker roleを

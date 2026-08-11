@@ -9,7 +9,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 FENCE_PATTERN = re.compile(
@@ -260,7 +260,10 @@ REQUIRED_STATE_FIELDS = (
     "nonce_derivation_key",
     "approved_existing_paths",
 )
-OPTIONAL_STATE_FIELDS: tuple[str, ...] = ()
+OPTIONAL_STATE_FIELDS = ("review_policy",)
+REVIEW_POLICIES = frozenset({"FINAL_ONLY", "ITERATIVE"})
+DEFAULT_REVIEW_POLICY = "FINAL_ONLY"
+LEGACY_REVIEW_POLICY = "ITERATIVE"
 PRO_CLASS_MODEL_LABEL = "GPT-5.6 Sol"
 PRO_CLASS_REASONING_LABEL = "Pro"
 PRO_CLASS_PLAN_LABELS = frozenset({"Pro", "Business", "Enterprise"})
@@ -336,6 +339,19 @@ STATE_TRANSITIONS = {
 }
 MAX_REVIEW_ROUNDS = 3
 MAX_FORMAT_ERRORS = 1
+
+
+def review_policy(state: Mapping[str, object]) -> str:
+    """Return the validated policy, preserving iterative behavior for legacy state."""
+    value = state.get("review_policy")
+    if value in REVIEW_POLICIES:
+        return str(value)
+    return LEGACY_REVIEW_POLICY
+
+
+def review_round_limit(state: Mapping[str, object]) -> int:
+    """Return the maximum accepted Pro review rounds for a run."""
+    return 1 if review_policy(state) == "FINAL_ONLY" else MAX_REVIEW_ROUNDS
 
 
 class PacketValidationError(ValueError):
@@ -1632,6 +1648,10 @@ def _validate_state_fields(
         path=name,
     )
     _require_schema_version(state, errors, path=name)
+    if "review_policy" in state and state.get("review_policy") not in REVIEW_POLICIES:
+        errors.append(
+            f"{name}.review_policy: must be FINAL_ONLY or ITERATIVE"
+        )
     attestation_version = state.get("model_attestation_schema_version")
     if (
         type(attestation_version) is not int
@@ -2089,7 +2109,7 @@ def _expected_stop_category(
             return "REVIEW_REPEATED_BLOCKER"
         if (
             current_state.get("latest_decision") == "CHANGES_REQUESTED"
-            and current_state.get("review_round") == MAX_REVIEW_ROUNDS
+            and current_state.get("review_round") == review_round_limit(current_state)
         ):
             return "REVIEW_ROUND_LIMIT"
     if previous_phase == "FINAL_VERIFICATION" and current_phase == "BLOCKED":
@@ -3139,12 +3159,12 @@ def validate_transition(
     previous_round_valid = (
         isinstance(previous_round, int)
         and not isinstance(previous_round, bool)
-        and 0 <= previous_round <= MAX_REVIEW_ROUNDS
+        and 0 <= previous_round <= review_round_limit(previous_state)
     )
     current_round_valid = (
         isinstance(current_round, int)
         and not isinstance(current_round, bool)
-        and 0 <= current_round <= MAX_REVIEW_ROUNDS
+        and 0 <= current_round <= review_round_limit(current_state)
     )
     if not previous_round_valid:
         errors.append("previous.review_round: must be an integer within the review limit")
@@ -3509,7 +3529,7 @@ def validate_transition(
                 )
                 round_limit = (
                     decision == "CHANGES_REQUESTED"
-                    and current_round == MAX_REVIEW_ROUNDS
+                    and current_round == review_round_limit(current_state)
                 )
                 if repeated_blocker or round_limit:
                     expected_target = "BLOCKED"

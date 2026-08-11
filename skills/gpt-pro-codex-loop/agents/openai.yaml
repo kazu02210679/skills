@@ -1,4 +1,4 @@
 interface:
   display_name: "GPT Pro Codex Loop"
   short_description: "Run a requirements-to-review loop with ChatGPT Pro"
-  default_prompt: "Use $gpt-pro-codex-loop to have ChatGPT Pro define requirements and iteratively review a Codex implementation with economical local verification until semantic and local gates both pass; use the composition Skill explicitly when worker routing is required."
+  default_prompt: "Use $gpt-pro-codex-loop with FINAL_ONLY to have ChatGPT Pro define requirements and perform one final semantic review after economical local verification; use the composition Skill explicitly when Sol routine review or worker routing is required."
