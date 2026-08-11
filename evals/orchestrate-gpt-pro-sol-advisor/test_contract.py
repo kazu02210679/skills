@@ -345,7 +345,8 @@ class CompositionContractTests(unittest.TestCase):
 
     def test_forbids_duplicate_review_recursion_and_silent_downgrade(self) -> None:
         for phrase in (
-            "do not make sol a mandatory pre-pro or final gate",
+            "sol is not a mandatory completion gate",
+            "cannot replace the final pro review",
             "reject nested",
             "sol-to-sol review",
             "fabricate a",
@@ -1536,6 +1537,46 @@ class CompositionContractTests(unittest.TestCase):
         self.assertEqual("sol_advisor_advisor", result["selected_lane"])
         self.assertEqual(1, result["sol_calls"])
 
+    def test_routine_sol_review_is_bounded_before_final_pro_review(self) -> None:
+        result = POLICY.route(
+            attested_combined(
+                routine_review=True,
+                routine_review_evidence=["focused tests pass", "diff scope is bounded"],
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does this focused diff preserve the acceptance criteria?",
+                decision_value=True,
+                material_risk=False,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("combined", result["selected_mode"])
+        self.assertEqual("sol_advisor_advisor", result["selected_lane"])
+        self.assertEqual(1, result["sol_calls"])
+        self.assertTrue(result["routine_review"])
+        self.assertTrue(result["routine_review_read_only"])
+        self.assertEqual("FINAL_ONLY", result["pro_review_policy"])
+        self.assertTrue(result["pro_review_retained"])
+        self.assertEqual("routine-sol-review-then-pro", result["terminal"])
+
+    def test_routine_sol_review_cannot_be_reentered(self) -> None:
+        result = POLICY.route(
+            attested_combined(
+                routine_review=True,
+                prior_sol_calls=1,
+                routine_review_evidence=["focused tests pass"],
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Should the routine review run again?",
+                decision_value=True,
+                material_risk=False,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual(0, result["sol_calls"])
+        self.assertTrue(result["advice_discarded"])
+        self.assertEqual("routine-review-already-consumed", result["terminal"])
+
     def test_legacy_only_roles_do_not_trigger_compatibility_fallback(self) -> None:
         result = POLICY.route(
             valid_combined(
@@ -1579,6 +1620,7 @@ class CompositionContractTests(unittest.TestCase):
                 "legacy-only-does-not-fallback",
                 "nested-orchestration-is-rejected",
                 "explicit-combined-low-risk-skips-sol",
+                "routine-review-uses-sol-before-final-pro",
                 "technical-question-selects-configured-advisor",
                 "authority-escalation-is-rejected",
                 "conflicting-advice-is-rejected",

@@ -1,5 +1,13 @@
 # GPT Pro + Sol Advisor composition
 
+## Quota-aware review policy
+
+The composed flow uses GPT Pro for requirements/plan freeze and one final
+semantic review only. Routine diff review, test-result inspection, and local
+verification stay in the Codex-owned lane; combined mode may add one bounded,
+read-only Sol routine review before the final Pro review. Sol advice is
+non-authoritative and never replaces the final Pro gate or completion decision.
+
 `gpt-pro-codex-loop`とSol Advisorを、権限を混ぜずに同じCodex taskで使うための
 composition Skillです。`$orchestrate-gpt-pro-sol-advisor`または両者の併用を
 明示的に求めた場合だけ有効になります。

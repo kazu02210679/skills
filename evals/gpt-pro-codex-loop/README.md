@@ -26,7 +26,7 @@ composition skill.
 
 ## 2026-07-29 observed GREEN run
 
-The required six independent fresh contexts matched all expected fields. Two additional fresh non-trigger checks also matched after the trigger was narrowed:
+The required six independent fresh contexts matched all expected fields. The normal flow now uses a `FINAL_ONLY` review policy: Pro handles requirements and one final semantic review, while routine review and local verification stay outside the Pro loop. Two additional fresh non-trigger checks also matched after the trigger was narrowed:
 
 | Case | Observed decision | Result |
 |---|---|---|

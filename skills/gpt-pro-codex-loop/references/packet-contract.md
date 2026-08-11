@@ -58,9 +58,15 @@ The normal-loop entry point is `python skills/gpt-pro-codex-loop/scripts/gpc_loo
 ```text
 inspect-init  [--write-approval-manifest FILE]
 init          --request FILE --repository-context FILE --model-policy PRO_CLASS|EXACT_LABEL
-              [--requested-model-label LABEL] [--retry-incomplete]
+              [--requested-model-label LABEL] [--review-policy FINAL_ONLY|ITERATIVE]
+              [--retry-incomplete]
               [--approved-existing-path PATH ... | --approved-existing-path-manifest FILE]
 ```
+
+`--review-policy` defaults to `FINAL_ONLY`. New runs therefore accept at most
+one semantic review packet after the requirements packet. A non-passing final
+review stops the run instead of automatically sending another Pro review.
+`ITERATIVE` preserves the legacy three-round behavior and must be explicit.
 
 `inspect-init` is read-only with respect to run-owned state. It returns a path count, canonical set digest, at most 20 preview paths, omitted count, and the resolved output path or `null`. Only an explicit `--write-approval-manifest` atomically writes a candidate manifest; its parent must already exist. Keep that file outside the inspected repository so it does not change the product-path set. Generation does not constitute approval.
 

@@ -919,6 +919,71 @@ def route(
             )
     if scenario.get("mandatory_final_sol_review"):
         return {"selected_mode": "combined", "sol_calls": 0, **preserved, "terminal": "local-verify-then-pro"}
+    if (
+        scenario.get("routine_review")
+        and not scenario.get("material_risk")
+        and not scenario.get("authority_escalation")
+        and not scenario.get("conflicts_with_frozen_evidence")
+    ):
+        routine_evidence = scenario.get("routine_review_evidence")
+        precise_question = scenario.get("precise_question")
+        eligible = (
+            scenario.get("codex_commitment_boundary") is True
+            and scenario.get("concrete_question") is True
+            and scenario.get("decision_value") is True
+            and isinstance(precise_question, str)
+            and bool(precise_question.strip())
+            and isinstance(routine_evidence, list)
+            and 0 < len(routine_evidence) <= 5
+            and all(isinstance(item, str) and item.strip() for item in routine_evidence)
+        )
+        if not eligible:
+            return {
+                "selected_mode": "combined",
+                "sol_calls": 0,
+                "advice_admitted": 0,
+                "advice_discarded": True,
+                "fallback_calls": 0,
+                **preserved,
+                "terminal": "routine-review-not-eligible",
+            }
+        if scenario.get("prior_sol_calls", 0):
+            return {
+                "selected_mode": "combined",
+                "sol_calls": 0,
+                "advice_admitted": 0,
+                "advice_discarded": True,
+                "fallback_calls": 0,
+                **preserved,
+                "terminal": "routine-review-already-consumed",
+            }
+        if failure := _advisor_invocation_failure(scenario):
+            return failure
+        attestation = _runtime_attestation(
+            scenario, advisor_role, trusted_catalog, trusted_host
+        )
+        if "terminal" in attestation:
+            return attestation
+        disposition = evaluate_advice(scenario.get("sol_response", {}))
+        return {
+            "selected_mode": "combined",
+            "selected_lane": advisor_role,
+            "sol_calls": 1,
+            "maximum_lanes": 1,
+            "routine_review": True,
+            "routine_review_read_only": True,
+            "pro_review_policy": "FINAL_ONLY",
+            "runtime_attested": True,
+            **attestation,
+            "advice_admitted": 1,
+            "advice_discarded": False,
+            "downstream_advice_propagations": 0,
+            "fallback_calls": 0,
+            "advice_eligible_for_disposition": True,
+            **disposition,
+            **preserved,
+            "terminal": "routine-sol-review-then-pro",
+        }
     if scenario.get("authority_escalation") or scenario.get("conflicts_with_frozen_evidence"):
         if failure := _advisor_invocation_failure(scenario):
             return failure

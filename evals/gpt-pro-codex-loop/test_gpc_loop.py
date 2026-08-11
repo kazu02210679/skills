@@ -127,7 +127,68 @@ class ControllerCase(unittest.TestCase):
             [],
             "PRO_CLASS",
             None,
+            review_policy="ITERATIVE",
         )
+
+    def test_new_run_defaults_to_final_only_review_policy(self) -> None:
+        controller.initialize_run(
+            self.repository,
+            "controller-test",
+            self.request,
+            self.context,
+            [],
+            "PRO_CLASS",
+            None,
+        )
+
+        state = self._state()
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual(state["review_policy"], "FINAL_ONLY")
+        self.assertEqual(status["review_policy"], "FINAL_ONLY")
+        self.assertEqual(status["review_round_limit"], 1)
+
+    def test_final_only_blocks_after_one_nonpassing_review(self) -> None:
+        attempt = self._prepare_valid_review(review_policy="FINAL_ONLY")
+        review = self._valid_changes_review(
+            "CODE_CHANGE", "CORRECTNESS", "missing-behavior"
+        )
+        raw = self._write_review_response(attempt, review)
+
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+
+        self.assertEqual(result["phase"], "BLOCKED")
+        self.assertEqual(result["review_round"], 1)
+        self.assertEqual(result["stop_origin_category"], "REVIEW_ROUND_LIMIT")
+        self.assertEqual(result["next_commands"], [])
+
+    def test_final_only_does_not_reenter_for_evidence_request(self) -> None:
+        attempt = self._prepare_valid_review(review_policy="FINAL_ONLY")
+        review = self._valid_changes_review(
+            "PROVIDE_EVIDENCE", "INSUFFICIENT_EVIDENCE", "missing-focused-output"
+        )
+        raw = self._write_review_response(attempt, review)
+
+        result = controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+
+        self.assertEqual(result["phase"], "BLOCKED")
+        self.assertEqual(result["next_commands"], [])
 
     def _run_dir(self) -> Path:
         return self.repository / ".ai-pro-loop" / "controller-test"
@@ -139,9 +200,23 @@ class ControllerCase(unittest.TestCase):
         return (self._run_dir() / "state.json").read_bytes()
 
     def _freeze_initial_requirements(
-        self, requirements: dict[str, object] | None = None
+        self,
+        requirements: dict[str, object] | None = None,
+        review_policy: str | None = None,
     ) -> dict[str, object]:
-        self._init_run()
+        if review_policy is None:
+            self._init_run()
+        else:
+            controller.initialize_run(
+                self.repository,
+                "controller-test",
+                self.request,
+                self.context,
+                [],
+                "PRO_CLASS",
+                None,
+                review_policy=review_policy,
+            )
         attempt = controller.prepare_requirements(self.repository, "controller-test")
         expected = controller.load_json(Path(attempt["expected_header_path"]))
         raw = self.input_directory / "requirements.raw.md"
@@ -183,8 +258,10 @@ class ControllerCase(unittest.TestCase):
         )
         return path
 
-    def _build_valid_report(self, **evidence_overrides: object) -> dict[str, object]:
-        self._freeze_initial_requirements()
+    def _build_valid_report(
+        self, review_policy: str | None = None, **evidence_overrides: object
+    ) -> dict[str, object]:
+        self._freeze_initial_requirements(review_policy=review_policy)
         (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
         evidence = self._write_local_evidence(
             {"example.py": "Implement AC-1."}, **evidence_overrides
@@ -240,8 +317,10 @@ class ControllerCase(unittest.TestCase):
         )
         return review
 
-    def _prepare_valid_review(self, **evidence_overrides: object) -> dict[str, object]:
-        self._build_valid_report(**evidence_overrides)
+    def _prepare_valid_review(
+        self, review_policy: str | None = None, **evidence_overrides: object
+    ) -> dict[str, object]:
+        self._build_valid_report(review_policy, **evidence_overrides)
         return controller.prepare_review(self.repository, "controller-test")
 
     def _write_review_response(
@@ -568,6 +647,7 @@ class ControllerCase(unittest.TestCase):
                 "--retry-incomplete",
                 "--model-policy",
                 "--requested-model-label",
+                "--review-policy",
             ],
             "prepare-requirements": ["--conflict-evidence"],
             "accept-requirements": [
@@ -811,6 +891,7 @@ class ControllerCase(unittest.TestCase):
                 (
                     Path("."), "run", request, context,
                     ["old.py", "legacy.py"], "EXACT_LABEL", "Pro", None, False,
+                    "FINAL_ONLY",
                 ),
             ),
             ("prepare_requirements", ["prepare-requirements", "--repo", ".", "--task", "run", "--conflict-evidence", str(evidence)], (Path("."), "run", evidence)),
