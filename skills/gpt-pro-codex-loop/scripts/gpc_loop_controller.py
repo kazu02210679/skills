@@ -1896,7 +1896,16 @@ def _load_local_evidence(
                 _require_nonempty_string(command.get(key), f"test_commands.{index}.{key}", errors)
     for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
         _validate_evidence_strings(evidence.get(field), field, errors)
-    _raise_validation("INVALID_LOCAL_EVIDENCE", "Local evidence is invalid.", sorted(set(errors)))
+    schema_shape_error = "local evidence: contains unknown or missing fields" in errors
+    _raise_validation(
+        "INVALID_LOCAL_EVIDENCE",
+        (
+            "Local evidence contains unknown or missing fields."
+            if schema_shape_error
+            else "Local evidence is invalid."
+        ),
+        sorted(set(errors)),
+    )
     validate_model_bound_report(evidence)
     return evidence
 
