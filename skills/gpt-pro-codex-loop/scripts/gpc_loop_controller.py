@@ -327,10 +327,11 @@ def resolve_run(repository: Path, task_slug: str) -> RunPaths:
     if not isinstance(task_slug, str) or TASK_SLUG.fullmatch(task_slug) is None:
         raise ControllerError("INVALID_TASK_SLUG", "Invalid task slug.")
     metadata = root / ".ai-pro-loop"
+    resolved_root = root.resolve(strict=False)
     resolved_metadata = metadata.resolve(strict=False)
     run = metadata / task_slug
     resolved_run = run.resolve(strict=False)
-    if not _is_contained(resolved_metadata, root) or not _is_contained(
+    if not _is_contained(resolved_metadata, resolved_root) or not _is_contained(
         resolved_run, resolved_metadata
     ):
         raise ControllerError("UNSAFE_RUN_PATH", "Run path escapes the repository metadata directory.")

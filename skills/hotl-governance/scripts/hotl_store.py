@@ -197,7 +197,7 @@ def _read_repository_artifact_windows(repository: Path, normalized: str) -> byte
     supplied = repository.absolute()
     if _is_link_or_reparse(supplied) or not supplied.is_dir():
         raise _artifact_error()
-    root = supplied.resolve(strict=True)
+    root = supplied if os.name == "nt" else supplied.resolve(strict=True)
     candidate = root
     for part in PurePosixPath(normalized).parts:
         candidate = candidate / part
