@@ -26,7 +26,7 @@ import gpc_loop_controller as controller  # noqa: E402
 import gpc_loop as cli  # noqa: E402
 
 
-PRO_MODEL_LABEL = "GPT-5.6 Sol"
+PRO_MODEL_LABEL = "GPT-5.6 Pro"
 PRO_REASONING_LABEL = "Pro"
 PRO_PLAN_LABEL = "Pro"
 
@@ -1081,7 +1081,7 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(state["conversation_binding_state"], "CONVERSATION_UNBOUND")
         self.assertIsNone(state["bound_conversation_url"])
         self.assertIsNone(state["visible_model_label"])
-        self.assertEqual(state["model_attestation_schema_version"], 2)
+        self.assertEqual(state["model_attestation_schema_version"], 3)
         self.assertEqual(state["approved_existing_paths"], [])
 
     def test_init_binds_only_a_closed_hotl_governance_context_artifact(self) -> None:
@@ -1179,9 +1179,49 @@ class ControllerCase(unittest.TestCase):
 
         controller.prepare_requirements(self.repository, "controller-test")
         upgraded = self._state()
-        self.assertEqual(upgraded["model_attestation_schema_version"], 2)
+        self.assertEqual(upgraded["model_attestation_schema_version"], 3)
         self.assertIsNone(upgraded["visible_reasoning_label"])
         self.assertIsNone(upgraded["visible_plan_label"])
+
+    def test_coherent_v2_unbound_state_upgrades_on_next_normal_transition(self) -> None:
+        self._init_run()
+        state = self._state()
+        state.update(
+            model_attestation_schema_version=2,
+            bound_conversation_url=None,
+            visible_model_label=None,
+            visible_reasoning_label=None,
+            visible_plan_label=None,
+        )
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual("REQUIREMENTS_PENDING", status["phase"])
+        self.assertTrue(status["legacy_model_attestation_upgrade_pending"])
+        self.assertEqual(before, self._state_bytes())
+
+        controller.prepare_requirements(self.repository, "controller-test")
+        upgraded = self._state()
+        self.assertEqual(upgraded["model_attestation_schema_version"], 3)
+        self.assertIsNone(upgraded["visible_model_label"])
+        self.assertIsNone(upgraded["visible_reasoning_label"])
+        self.assertIsNone(upgraded["visible_plan_label"])
+
+    def test_partial_v2_unbound_state_requires_restart(self) -> None:
+        self._init_run()
+        state = self._state()
+        state["model_attestation_schema_version"] = 2
+        del state["visible_model_label"]
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+        self.assertEqual(status["next_commands"], [])
+        self.assertEqual(before, self._state_bytes())
 
     def test_legacy_bound_state_requires_restart_without_guessing_identity(self) -> None:
         self._freeze_initial_requirements()
@@ -1207,6 +1247,136 @@ class ControllerCase(unittest.TestCase):
             controller.prepare_review(self.repository, "controller-test")
         self.assertEqual(raised.exception.code, "LEGACY_STATE_RESTART_REQUIRED")
 
+    def test_v2_sol_bound_state_requires_restart_for_pro_only_contract(self) -> None:
+        self._freeze_initial_requirements()
+        state = self._state()
+        state["model_attestation_schema_version"] = 2
+        state["visible_model_label"] = "GPT-5.6 Sol"
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+        self.assertTrue(status["recovery_required"])
+        self.assertEqual(status["next_commands"], [])
+        self.assertEqual(before, self._state_bytes())
+
+    def test_v3_sol_bound_state_requires_restart_without_advertising_commands(self) -> None:
+        self._freeze_initial_requirements()
+        state = self._state()
+        state["visible_model_label"] = "GPT-5.6 Sol"
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+        self.assertTrue(status["recovery_required"])
+        self.assertEqual(status["next_commands"], [])
+        self.assertEqual(before, self._state_bytes())
+
+    def test_v3_classifier_rejects_noncanonical_policy_shapes_read_only(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        baseline = self._state()
+        variants = {
+            "unsupported-policy": dict(baseline, model_policy="OTHER"),
+            "missing-policy": dict(baseline),
+            "exact-mismatch": dict(
+                baseline,
+                model_policy="EXACT_LABEL",
+                requested_model_label="GPT-5.6 Pro",
+                visible_model_label="GPT-5.6 Sol",
+            ),
+            "float-version": dict(baseline, model_attestation_schema_version=3.0),
+            "bool-version": dict(baseline, model_attestation_schema_version=True),
+        }
+        del variants["missing-policy"]["model_policy"]
+        for name, variant in variants.items():
+            with self.subTest(name=name):
+                controller.write_json_atomic(run / "state.json", variant)
+                before = file_tree(run)
+                status = controller.status_run(self.repository, "controller-test")
+                self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+                self.assertEqual(status["next_commands"], [])
+                self.assertEqual(before, file_tree(run))
+                controller.write_json_atomic(run / "state.json", baseline)
+
+    def test_export_rejects_state_swap_after_initial_state_read(self) -> None:
+        self._freeze_initial_requirements()
+        paths = controller.resolve_run(self.repository, "controller-test")
+        original_state = paths.state.read_bytes()
+        replacement = dict(
+            controller.load_json(paths.state),
+            visible_model_label="GPT-5.6 Sol",
+        )
+        replacement_bytes = controller._canonical_json_bytes(replacement)
+        original_strict_json_loads = controller.validate_packet.strict_json_loads
+        swapped = False
+
+        def swap_after_state_parse(raw: str) -> object:
+            nonlocal swapped
+            value = original_strict_json_loads(raw)
+            if raw.encode("utf-8") == original_state and not swapped:
+                swapped = True
+                paths.state.write_bytes(replacement_bytes)
+            return value
+
+        with patch.object(
+            controller.validate_packet,
+            "strict_json_loads",
+            new=swap_after_state_parse,
+        ):
+            with self.assertRaises(controller.ControllerError) as caught:
+                controller.export_governance_receipt(
+                    self.repository, "controller-test", "requirements"
+                )
+
+        self.assertEqual("RECOVERY_REQUIRED", caught.exception.code)
+        self.assertEqual(replacement_bytes, paths.state.read_bytes())
+        self.assertNotEqual(original_state, paths.state.read_bytes())
+
+    def test_export_rejects_legacy_attestation_for_every_receipt_type_read_only(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        baseline = self._state()
+        variants = {
+            "bound-v2": dict(
+                baseline,
+                model_attestation_schema_version=2,
+            ),
+            "partial-v2": dict(
+                baseline,
+                model_attestation_schema_version=2,
+                visible_reasoning_label=None,
+            ),
+            "wrong-v3-model": dict(
+                baseline,
+                visible_model_label="GPT-5.6 Sol",
+            ),
+            "legacy-bound": dict(baseline),
+        }
+        del variants["legacy-bound"]["model_attestation_schema_version"]
+        del variants["legacy-bound"]["visible_reasoning_label"]
+        del variants["legacy-bound"]["visible_plan_label"]
+
+        for name, variant in variants.items():
+            with self.subTest(name=name):
+                controller.write_json_atomic(run / "state.json", variant)
+                before = file_tree(run)
+                for receipt_type in ("requirements", "review", "final"):
+                    with self.subTest(receipt_type=receipt_type):
+                        with self.assertRaises(controller.ControllerError) as caught:
+                            controller.export_governance_receipt(
+                                self.repository, "controller-test", receipt_type
+                            )
+                        self.assertEqual(
+                            "LEGACY_STATE_RESTART_REQUIRED", caught.exception.code
+                        )
+                self.assertEqual(before, file_tree(run))
+                controller.write_json_atomic(run / "state.json", baseline)
+
     def test_pro_class_requires_current_model_reasoning_and_plan_observation(self) -> None:
         self._init_run()
         state = self._state()
@@ -1216,7 +1386,7 @@ class ControllerCase(unittest.TestCase):
             controller.observed_browser_errors(
                 state,
                 observed_url,
-                "GPT-5.6 Sol",
+                "GPT-5.6 Pro",
                 allow_initial_binding=True,
                 observed_reasoning_label="Pro",
                 observed_plan_label="Pro",
@@ -1224,11 +1394,22 @@ class ControllerCase(unittest.TestCase):
             [],
         )
         self.assertIn(
-            "observed reasoning level does not satisfy the requested model policy",
+            "observed model family does not satisfy the requested model policy",
             controller.observed_browser_errors(
                 state,
                 observed_url,
                 "GPT-5.6 Sol",
+                allow_initial_binding=True,
+                observed_reasoning_label="Pro",
+                observed_plan_label="Pro",
+            ),
+        )
+        self.assertIn(
+            "observed reasoning level does not satisfy the requested model policy",
+            controller.observed_browser_errors(
+                state,
+                observed_url,
+                "GPT-5.6 Pro",
                 allow_initial_binding=True,
                 observed_reasoning_label="Extra High",
                 observed_plan_label="Pro",
@@ -2359,6 +2540,98 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(controller.consumed_chain_heads(self._state()), set())
 
     def test_material_proposal_requires_digest_bound_local_approval(self) -> None:
+        initial_task = "initial-material"
+        controller.initialize_run(
+            self.repository,
+            initial_task,
+            self.request,
+            self.context,
+            [],
+            "PRO_CLASS",
+            None,
+        )
+        attempt = controller.prepare_requirements(
+            self.repository,
+            initial_task,
+        )
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        proposal = valid_requirements(
+            decision="NEED_USER_INPUT",
+            behavior_changed=True,
+            user_approval_required=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        raw = self.input_directory / "initial-material.raw.md"
+        write_raw_envelope(raw, expected, proposal)
+
+        stopped = controller.accept_requirements(
+            self.repository,
+            initial_task,
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+        self.assertEqual(stopped["phase"], "USER_DECISION_REQUIRED")
+        self.assertEqual(
+            ["approve-requirements"],
+            controller.status_run(self.repository, initial_task)["next_commands"],
+        )
+        evidence = self.input_directory / "initial-material-approval.txt"
+        evidence.write_text("The user approved this exact proposal.\n", encoding="utf-8")
+
+        frozen = controller.approve_requirements(
+            self.repository, initial_task, evidence
+        )
+
+        self.assertEqual(frozen["phase"], "REQUIREMENTS_FROZEN")
+        self.assertEqual(frozen["active_requirements_revision"], 1)
+        self.assertEqual(frozen["review_round"], 0)
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        first_built = controller.build_report(
+            self.repository,
+            initial_task,
+            self._write_local_evidence({"example.py": "Implement AC-1."}),
+        )
+        resumed = controller.load_json(
+            self.repository / ".ai-pro-loop" / initial_task / "state.json"
+        )
+        self.assertEqual(resumed["phase"], "REVIEW_PENDING")
+        self.assertEqual(
+            ["build-report", "prepare-review"],
+            controller.status_run(self.repository, initial_task)["next_commands"],
+        )
+        self.assertIsNone(resumed["resolution_evidence"])
+        later_report = dict(
+            controller.load_json(
+                self.repository
+                / ".ai-pro-loop"
+                / initial_task
+                / "implementation-report.json"
+            ),
+            review_round=1,
+        )
+        self.assertNotIn(
+            "review_round: material revision requires reset to zero",
+            controller.validate_packet.validate_report(later_report, proposal),
+        )
+        (self.repository / "example.py").write_text("value = 2\n", encoding="utf-8")
+        rebuilt = controller.build_report(
+            self.repository,
+            initial_task,
+            self._write_local_evidence({"example.py": "Correct AC-1."}),
+        )
+        self.assertNotEqual(first_built["snapshot_digest"], rebuilt["snapshot_digest"])
+        self.assertEqual(
+            "REVIEW_PENDING",
+            controller.load_json(
+                self.repository / ".ai-pro-loop" / initial_task / "state.json"
+            )["phase"],
+        )
+        (self.repository / "example.py").unlink()
+
         self._freeze_initial_requirements()
         self._seed_requirements_revision_pending()
         attempt = controller.prepare_requirements(
@@ -3230,6 +3503,35 @@ class ControllerCase(unittest.TestCase):
         with self.assertRaises(controller.ControllerError):
             controller.final_verify(self.repository, "controller-test")
         self.assertEqual(self._state_bytes(), before)
+        self.assertEqual(
+            ["build-report", "final-verify"],
+            controller.status_run(self.repository, "controller-test")["next_commands"],
+        )
+        final_state = self._state()
+        controller.write_json_atomic(
+            controller.resolve_run(self.repository, "controller-test").state,
+            dict(final_state, review_round=controller.validate_packet.MAX_REVIEW_ROUNDS),
+        )
+        self.assertEqual(
+            ["final-verify"],
+            controller.status_run(self.repository, "controller-test")["next_commands"],
+        )
+        controller.write_json_atomic(
+            controller.resolve_run(self.repository, "controller-test").state,
+            final_state,
+        )
+
+        rebuilt = controller.build_report(
+            self.repository,
+            "controller-test",
+            self._write_local_evidence({"example.py": "Correct AC-1."}),
+        )
+        reopened = self._state()
+        self.assertEqual("REVIEW_PENDING", reopened["phase"])
+        self.assertIsNone(reopened["active_review_packet_digest"])
+        self.assertIsNone(reopened["reviewed_snapshot_digest"])
+        self.assertIsNone(reopened["latest_decision"])
+        self.assertEqual(rebuilt["snapshot_digest"], reopened["current_snapshot_digest"])
 
     def test_correction_loop_replaces_snapshot_and_rejects_first_review_replay(self) -> None:
         first_attempt = self._prepare_valid_review()

@@ -19,13 +19,24 @@ import hotl_contract as contract
 import hotl_controller as controller
 import hotl_store as store
 
-
 EXECUTION_ID = "EXEC-123456789ABC"
 SUCCESSOR_ONE = "EXEC-ABCDEF123456"
 SUCCESSOR_TWO = "EXEC-FEDCBA654321"
 DIGEST_ONE = "sha256:" + "1" * 64
 DIGEST_TWO = "sha256:" + "2" * 64
 DIGEST_THREE = "sha256:" + "3" * 64
+
+
+def evaluate_positive_projection(
+    production_result: tuple[bool, tuple[str, ...]], gate: str
+) -> tuple[bool, tuple[str, ...]]:
+    """Pure test-only eligibility projection with no production selector."""
+    _passed, production_errors = production_result
+    authority_error = f"{gate}:authority_provider_unavailable"
+    integrity_errors = tuple(
+        error for error in production_errors if error != authority_error
+    )
+    return not integrity_errors, integrity_errors
 SUCCESSOR_REQUIREMENTS = {"requirements": ["REQ-2"]}
 
 
@@ -346,10 +357,10 @@ class ProjectionTests(unittest.TestCase):
                     projection, event | {"payload": payload}
                 )
                 self.assertTrue(admitted.receipt_records["RCP-" + decision].valid)
-                self.assertEqual(("STOPPED",), controller.allowed_transitions(admitted))
+                self.assertEqual((), controller.allowed_transitions(admitted))
 
-    def test_offline_approval_is_gate_eligible_only_in_frozen_manual_mode(self) -> None:
-        for approval_mode, expected in (("agentic", True), ("offline_manual", True)):
+    def test_offline_approval_is_integrity_only_and_never_production_authority(self) -> None:
+        for approval_mode in ("agentic", "offline_manual"):
             with self.subTest(approval_mode=approval_mode):
                 projection = fixture_projection(
                     "REQUIREMENTS", approval_mode=approval_mode
@@ -374,10 +385,10 @@ class ProjectionTests(unittest.TestCase):
                     receipt_digest=DIGEST_TWO,
                 )
                 projection = controller.project_event(projection, approval)
-                self.assertEqual(expected, controller.evaluate_gate(projection, "G1")[0])
+                self.assertTrue(evaluate_positive_projection(controller.evaluate_gate(projection, "G1"), "G1")[0])
+                self.assertFalse(controller.evaluate_gate(projection, "G1")[0])
 
-    def test_exact_gpt_requirements_receipt_is_the_agentic_g1_authority(self) -> None:
-        """Restoring a local approval requirement must make this fail."""
+    def test_exact_gpt_requirements_receipt_is_integrity_only_not_g1_authority(self) -> None:
         projection = fixture_projection("REQUIREMENTS")
         projection = controller.project_event(
             projection, fixture_node("REQ-1", "requirement")
@@ -389,7 +400,9 @@ class ProjectionTests(unittest.TestCase):
             ),
         )
         passed, errors = controller.evaluate_gate(projection, "G1")
-        self.assertTrue(passed, errors)
+        self.assertFalse(passed)
+        self.assertIn("G1:authority_provider_unavailable", errors)
+        self.assertEqual((True, ()), evaluate_positive_projection(controller.evaluate_gate(projection, "G1"), "G1"))
 
     def test_evidence_event_never_advances_state(self) -> None:
         projection = fixture_projection("REQUIREMENTS")
@@ -402,16 +415,24 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual("REQUIREMENTS", result.state.value)
 
     def test_only_valid_transition_committed_advances_state(self) -> None:
-        projection = g1_projection()
+        projection = fixture_projection("IMPLEMENT", active_snapshot_digest=DIGEST_TWO)
+        for node_id, node_type in (("REQ-1", "requirement"), ("CODE-1", "code")):
+            projection = controller.project_event(projection, fixture_node(node_id, node_type))
+        projection = controller.project_event(
+            projection, fixture_edge("CODE-1", "implements", "REQ-1")
+        )
+        projection = controller.project_event(
+            projection, fixture_receipt(projection, "implementation", "RCP-IMPL-1")
+        )
 
         result = controller.project_event(
             projection,
             fixture_transition(
-                projection, gate="G1", source="REQUIREMENTS", target="IMPLEMENT"
+                projection, gate="G2", source="IMPLEMENT", target="LOCAL_VERIFY"
             ),
         )
 
-        self.assertEqual("IMPLEMENT", result.state.value)
+        self.assertEqual("LOCAL_VERIFY", result.state.value)
 
     def test_invalid_transition_bindings_are_rejected(self) -> None:
         projection = g1_projection()
@@ -546,6 +567,73 @@ class ProjectionTests(unittest.TestCase):
 
         self.assertEqual(("IMPLEMENT",), controller.allowed_transitions(projection))
 
+    def test_accepted_corrective_review_can_resolve_prior_finding(self) -> None:
+        def corrective_projection() -> controller.Projection:
+            projection = fixture_projection(
+                "SEMANTIC_REVIEW", active_snapshot_digest=DIGEST_TWO, cycle_id=1
+            )
+            for review_id in ("REV-1", "REV-2"):
+                projection = controller.project_event(
+                    projection, fixture_node(review_id, "review")
+                )
+            projection = admit_review(
+                projection, "REV-1", "rejected", root_cause_ids=["ROOT-stable"]
+            )
+            projection = controller.project_event(
+                projection,
+                fixture_finding("REV-1", "ROOT-stable", prose_digest=DIGEST_ONE),
+            )
+            return admit_review(projection, "REV-2", "accepted")
+
+        projection = corrective_projection()
+        resolved = fixture_event(
+            "finding_recorded",
+            {
+                "finding_id": "FIND-1",
+                "root_cause_id": "ROOT-stable",
+                "review_id": "REV-2",
+                "status": "resolved",
+            },
+            issuer={"kind": "skill", "id": "gpt-pro-codex-loop", "version": "1"},
+            subject_ids=["REV-2"],
+            result="pass",
+            input_digest=DIGEST_TWO,
+        )
+        corrected = controller.project_event(projection, resolved)
+
+        self.assertEqual("resolved", corrected.finding_state["FIND-1"].status)
+        self.assertNotIn("unresolved_findings", controller.completion_errors(corrected))
+
+        mismatch_cases = {
+            "same_finding_different_root": ("FIND-1", "ROOT-other"),
+            "different_finding_same_root": ("FIND-2", "ROOT-stable"),
+            "alias": ("FIND-01", "ROOT-stable"),
+            "text_only": ("FIND-summary", "ROOT-stable"),
+            "inferred_parent": ("FIND-1", "ROOT-parent"),
+        }
+        for label, (finding_id, root_cause_id) in mismatch_cases.items():
+            with self.subTest(label=label):
+                candidate = corrective_projection()
+                mismatch = fixture_event(
+                    "finding_recorded",
+                    {
+                        "finding_id": finding_id,
+                        "root_cause_id": root_cause_id,
+                        "review_id": "REV-2",
+                        "status": "resolved",
+                    },
+                    issuer={"kind": "skill", "id": "gpt-pro-codex-loop", "version": "1"},
+                    subject_ids=["REV-2"],
+                    result="pass",
+                    input_digest=DIGEST_TWO,
+                )
+                try:
+                    after = controller.project_event(candidate, mismatch)
+                except controller.ControllerError:
+                    after = candidate
+                self.assertEqual("open", after.finding_state["FIND-1"].status)
+                self.assertIn("unresolved_findings", controller.completion_errors(after))
+
     def test_late_finding_cannot_change_committed_review_roots(self) -> None:
         projection = fixture_projection(
             "SEMANTIC_REVIEW", active_snapshot_digest=DIGEST_TWO, cycle_id=1
@@ -572,33 +660,17 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual("IMPLEMENT", controller.project_event(projection, corrective).state.value)
 
     def test_post_terminal_evidence_is_rejected_by_replay(self) -> None:
-        projection = fixture_projection(
-            "INIT", active_snapshot_digest=DIGEST_TWO, cycle_id=1
-        )
-        projection = controller.project_event(projection, fixture_node("REQ-1", "requirement"))
-        projection = controller.project_event(
-            projection, fixture_receipt(projection, "stop", "RCP-STOP-1")
-        )
-        terminal = fixture_transition(
-            projection, gate="STOP", source="INIT", target="STOPPED"
-        )
-        stopped = controller.project_event(projection, terminal)
+        stopped = fixture_projection("STOPPED")
         with self.assertRaises(controller.ControllerError) as raised:
             controller.project_event(stopped, fixture_node("REQ-2", "requirement"))
         self.assertEqual("TERMINAL_STATE", raised.exception.code)
 
-    def test_bound_stop_authority_can_terminate_before_snapshot_activation(self) -> None:
+    def test_bound_stop_receipt_is_audit_only_before_snapshot_activation(self) -> None:
         projection = fixture_projection("INIT")
         projection = controller.project_event(
             projection, fixture_receipt(projection, "stop", "RCP-STOP-INIT")
         )
-        stopped = controller.project_event(
-            projection,
-            fixture_transition(
-                projection, gate="STOP", source="INIT", target="STOPPED"
-            ),
-        )
-        self.assertEqual("STOPPED", stopped.state.value)
+        self.assertEqual((), controller.allowed_transitions(projection))
 
     def test_terminal_states_have_no_allowed_transitions(self) -> None:
         for state in ("COMPLETE", "ESCALATED", "RECOVERY_REQUIRED", "STOPPED"):
@@ -810,11 +882,131 @@ class CompletionTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("REQ-1:missing_implementation", errors)
 
-    def test_complete_current_typed_provenance_satisfies_g4(self) -> None:
+    def test_complete_current_typed_provenance_cannot_satisfy_production_g4(self) -> None:
         projection = self._complete_projection()
 
         self.assertEqual((), controller.completion_errors(projection))
-        self.assertEqual((True, ()), controller.evaluate_gate(projection, "G4"))
+        passed, errors = controller.evaluate_gate(projection, "G4")
+        self.assertFalse(passed)
+        self.assertIn("G4:authority_provider_unavailable", errors)
+        for gate, state in (("G1", controller.State.REQUIREMENTS), ("G3", controller.State.LOCAL_VERIFY)):
+            with self.subTest(gate=gate):
+                passed, errors = controller.evaluate_gate(replace(projection, state=state), gate)
+                self.assertFalse(passed)
+                self.assertIn(f"{gate}:authority_provider_unavailable", errors)
+        production_result = controller.evaluate_gate(projection, "G4")
+        self.assertEqual((True, ()), evaluate_positive_projection(production_result, "G4"))
+        self.assertEqual(
+            evaluate_positive_projection(production_result, "G4"),
+            evaluate_positive_projection(production_result, "G4"),
+        )
+        production_source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (
+                Path(controller.__file__),
+                SCRIPTS / "hotl_governance.py",
+                SCRIPTS / "hotl_contract.py",
+            )
+        )
+        self.assertNotIn("evaluate_positive_projection", production_source)
+        prohibited_channels = (
+            "boolean_hook",
+            "monkeypatchable_provider_function",
+            "local_file",
+            "environment_value",
+            "policy_digest",
+            "cli_argument",
+            "exported_receipt",
+            "receipt_assertion",
+            "self_hash",
+            "registry",
+            "import_discovery",
+            "serialized_selector",
+        )
+        for channel in prohibited_channels:
+            with self.subTest(prohibited_channel=channel):
+                candidate = controller._copy_projection(  # type: ignore[attr-defined]
+                    projection,
+                    gate_evidence={channel: ("grant",)},
+                )
+                if channel == "environment_value":
+                    with patch.dict("os.environ", {"HOTL_AUTHORITY": "grant"}):
+                        channel_result = controller.evaluate_gate(candidate, "G4")
+                elif channel == "import_discovery":
+                    with patch.dict(sys.modules, {"hotl_authority_provider": object()}):
+                        channel_result = controller.evaluate_gate(candidate, "G4")
+                elif channel == "local_file":
+                    with tempfile.TemporaryDirectory() as directory:
+                        Path(directory, "authority.json").write_text("true", encoding="utf-8")
+                        channel_result = controller.evaluate_gate(candidate, "G4")
+                else:
+                    channel_result = controller.evaluate_gate(candidate, "G4")
+                self.assertFalse(channel_result[0])
+                self.assertIn("G4:authority_provider_unavailable", channel_result[1])
+        for forbidden_symbol in (
+            "_trusted_authority_provider",
+            "authority_provider_path",
+            "authority_provider_registry",
+            "HOTL_AUTHORITY",
+        ):
+            self.assertNotIn(forbidden_symbol, production_source)
+
+    def test_sol_audit_is_advisory_and_not_a_g4_predicate(self) -> None:
+        projection = self._complete_projection()
+        receipts_without_sol = {
+            key: value
+            for key, value in projection.receipt_records.items()
+            if value.receipt_type != "sol_audit"
+        }
+        sol_records = {
+            "success": controller.ReceiptRecord(
+                "RCP-SOL-SUCCESS", "sol_audit", DIGEST_ONE,
+                "orchestrate-gpt-pro-sol-advisor", projection.authority_snapshot_digest,
+                projection.requirements_digest, projection.active_snapshot_digest,
+                controller.projection_evidence_set_digest(projection), projection.cycle_id, True,
+            ),
+            "failure": controller.ReceiptRecord(
+                "RCP-SOL-FAILURE", "sol_audit", DIGEST_TWO,
+                "orchestrate-gpt-pro-sol-advisor", projection.authority_snapshot_digest,
+                projection.requirements_digest, projection.active_snapshot_digest,
+                controller.projection_evidence_set_digest(projection), projection.cycle_id, False,
+            ),
+            "contradictory": controller.ReceiptRecord(
+                "RCP-SOL-CONTRADICT", "sol_audit", DIGEST_THREE,
+                "orchestrate-gpt-pro-sol-advisor", projection.authority_snapshot_digest,
+                projection.requirements_digest, projection.active_snapshot_digest,
+                controller.projection_evidence_set_digest(projection), projection.cycle_id, True,
+            ),
+        }
+        sol_conditions = {
+            "absent": None,
+            "valid": sol_records["success"],
+            "invalid": None,
+            "malformed": None,
+            "tampered": None,
+            "changed": sol_records["contradictory"],
+        }
+        advisory_statuses: dict[str, str] = {}
+        expected_decision = controller.evaluate_gate(
+            controller._copy_projection(  # type: ignore[attr-defined]
+                projection, receipt_records=receipts_without_sol
+            ),
+            "G4",
+        )
+        for label, sol_record in sol_conditions.items():
+            with self.subTest(sol_status=label):
+                receipts = dict(receipts_without_sol)
+                if sol_record is not None:
+                    receipts[sol_record.receipt_id] = sol_record
+                candidate = controller._copy_projection(  # type: ignore[attr-defined]
+                    projection, receipt_records=receipts
+                )
+                advisory_statuses[label] = label
+                self.assertEqual(expected_decision, controller.evaluate_gate(candidate, "G4"))
+        self.assertEqual(
+            {"absent", "valid", "invalid", "malformed", "tampered", "changed"},
+            set(advisory_statuses.values()),
+        )
 
     def test_code_and_test_in_independent_changes_do_not_complete_requirement(self) -> None:
         """Changing the common-change predicate to two independent checks must fail."""
@@ -908,7 +1100,8 @@ class CompletionTests(unittest.TestCase):
                 receipt_digest="sha256:" + hashlib.sha256(b"verify-2").hexdigest(),
             ),
         )
-        self.assertTrue(controller.evaluate_gate(local_with_verification, "G3")[0])
+        self.assertFalse(controller.evaluate_gate(local_with_verification, "G3")[0])
+        self.assertTrue(evaluate_positive_projection(controller.evaluate_gate(local_with_verification, "G3"), "G3")[0])
         without_final = controller.empty_projection(
             execution_id=complete.execution_id,
             state=complete.state,
@@ -930,7 +1123,8 @@ class CompletionTests(unittest.TestCase):
             authority_snapshot_digest=complete.authority_snapshot_digest,
         )
         self.assertFalse(controller.evaluate_gate(without_final, "G4")[0])
-        self.assertTrue(controller.evaluate_gate(complete, "G4")[0])
+        self.assertFalse(controller.evaluate_gate(complete, "G4")[0])
+        self.assertTrue(evaluate_positive_projection(controller.evaluate_gate(complete, "G4"), "G4")[0])
 
 
 class RepositoryControllerTests(unittest.TestCase):
@@ -1016,26 +1210,21 @@ class RepositoryControllerTests(unittest.TestCase):
             "predecessor_execution_id": paths.root.name,
             "supersedes": [{"new_id": "REQ-2", "old_id": "REQ-1"}],
         }
-        digest = store.store_evidence(paths, contract.canonical_json_bytes(binding))
+        content = contract.canonical_json_bytes(binding)
+        digest = contract.canonical_digest(binding)
+        artifact = paths.evidence / digest.removeprefix("sha256:")
+        if not artifact.is_file():
+            digest = store.store_evidence(paths, content)
+        else:
+            self.assertEqual(content, artifact.read_bytes())
         return binding | {"lineage_receipt_digest": digest}
 
     def _terminal_predecessor(self) -> tuple[store.RunPaths, dict[str, object]]:
-        paths, first, policy = self._initialize("REQUIREMENTS")
-        events = [first]
-        projection = controller.replay(policy, events)
-        self._admit(
-            paths,
-            policy,
-            events,
-            fixture_receipt(
-                projection,
-                "material_change",
-                "RCP-MATERIAL-1",
-                receipt_digest="sha256:" + hashlib.sha256(b"material").hexdigest(),
-            ),
-        )
-        result = controller.commit_transition(self.repository, EXECUTION_ID, "MATERIAL_CHANGE")
-        self.assertEqual("STOPPED", result["state"])
+        paths, _first, policy = self._initialize("REQUIREMENTS")
+        self._lineage(paths)
+        persisted = json.loads(paths.state.read_text(encoding="utf-8"))
+        persisted["event_count"] = 9
+        paths.state.write_bytes(contract.canonical_json_bytes(persisted))
         return paths, policy
 
     def test_mutation_holds_one_run_lock_across_load_replay_and_append(self) -> None:
@@ -1094,26 +1283,18 @@ class RepositoryControllerTests(unittest.TestCase):
         self.assertFalse(paths.lock.exists())
 
     def test_commit_transition_is_the_locked_state_advance_path(self) -> None:
-        paths, first, policy = self._initialize("REQUIREMENTS")
+        paths, first, policy = self._initialize("IMPLEMENT")
         events = [first]
         projection = controller.replay(policy, events)
-        self._admit(
-            paths,
-            policy,
-            events,
-            fixture_receipt(
-                projection, "requirements", "RCP-REQ-1", receipt_digest=DIGEST_ONE
-            ),
-        )
-        projection = controller.replay(policy, events)
-        self._admit(
-            paths,
-            policy,
-            events,
-            fixture_receipt(
-                projection, "approval", "RCP-APPROVAL-1", receipt_digest=DIGEST_TWO
-            ),
-        )
+        for event in (fixture_node("CODE-1", "code"),):
+            self._admit(paths, policy, events, event)
+            projection = controller.replay(policy, events)
+        for event in (
+            fixture_edge("CODE-1", "implements", "REQ-1"),
+            fixture_receipt(projection, "implementation", "RCP-IMPL-1"),
+        ):
+            self._admit(paths, policy, events, event)
+            projection = controller.replay(policy, events)
         real_append = store.append_events
 
         def guarded_append(
@@ -1127,10 +1308,10 @@ class RepositoryControllerTests(unittest.TestCase):
             real_append(run_paths, events, state, artifacts)
 
         with patch.object(controller.store, "append_events", side_effect=guarded_append):
-            result = controller.commit_transition(self.repository, EXECUTION_ID, "G1")
+            result = controller.commit_transition(self.repository, EXECUTION_ID, "G2")
 
-        self.assertEqual("IMPLEMENT", result["state"])
-        self.assertEqual("IMPLEMENT", controller.status_execution(self.repository, EXECUTION_ID)["state"])
+        self.assertEqual("LOCAL_VERIFY", result["state"])
+        self.assertEqual("LOCAL_VERIFY", controller.status_execution(self.repository, EXECUTION_ID)["state"])
         self.assertFalse(paths.lock.exists())
 
     def test_init_transition_is_executable(self) -> None:
@@ -1159,13 +1340,13 @@ class RepositoryControllerTests(unittest.TestCase):
                 controller.ControllerError
             ) as raised:
                 controller.commit_transition(self.repository, EXECUTION_ID, decision)
-            self.assertEqual("GATE_FAILED", raised.exception.code)
+            self.assertEqual("AUTHORITY_PROVIDER_UNAVAILABLE", raised.exception.code)
         self.assertEqual(
             "REQUIREMENTS",
             controller.commit_transition(self.repository, EXECUTION_ID, "INIT")["state"],
         )
 
-    def test_init_status_advertises_authorized_terminal_target_commit_accepts(self) -> None:
+    def test_init_status_never_advertises_audit_only_terminal_receipts(self) -> None:
         cases = (
             ("STOP", "stop", "EXEC-000000000001"),
             ("MATERIAL_CHANGE", "material_change", "EXEC-000000000002"),
@@ -1192,22 +1373,16 @@ class RepositoryControllerTests(unittest.TestCase):
                 )
                 projection = controller.replay(policy, events)
 
+                self.assertEqual(("REQUIREMENTS",), controller.allowed_transitions(projection))
                 self.assertEqual(
-                    ("REQUIREMENTS", "STOPPED"),
-                    controller.allowed_transitions(projection),
-                )
-                self.assertEqual(
-                    ["REQUIREMENTS", "STOPPED"],
+                    ["REQUIREMENTS"],
                     controller.status_execution(self.repository, execution_id)[
                         "allowed_transitions"
                     ],
                 )
-                self.assertEqual(
-                    "STOPPED",
-                    controller.commit_transition(
-                        self.repository, execution_id, decision
-                    )["state"],
-                )
+                with self.assertRaises(controller.ControllerError) as raised:
+                    controller.commit_transition(self.repository, execution_id, decision)
+                self.assertEqual("AUTHORITY_PROVIDER_UNAVAILABLE", raised.exception.code)
 
     def test_generic_record_rejects_every_privileged_or_controller_event(self) -> None:
         paths, first, policy = self._initialize("REQUIREMENTS")
@@ -1400,12 +1575,25 @@ class RepositoryControllerTests(unittest.TestCase):
             )
         self.assertEqual("REQUIREMENTS_MISMATCH", raised.exception.code)
 
-    def test_material_change_receipt_then_lifecycle_commit_stops_predecessor(self) -> None:
-        paths, _ = self._terminal_predecessor()
-
-        self.assertEqual("STOPPED", controller.status_execution(self.repository, EXECUTION_ID)["state"])
-        self.assertEqual((), controller.allowed_transitions(fixture_projection("STOPPED")))
-        self.assertGreater(paths.events.read_bytes().count(b"\n"), 1)
+    def test_material_change_receipt_is_audit_only_and_cannot_stop_predecessor(self) -> None:
+        paths, first, policy = self._initialize("REQUIREMENTS")
+        events = [first]
+        projection = controller.replay(policy, events)
+        self._admit(
+            paths,
+            policy,
+            events,
+            fixture_receipt(
+                projection,
+                "material_change",
+                "RCP-MATERIAL-1",
+                receipt_digest="sha256:" + hashlib.sha256(b"material").hexdigest(),
+            ),
+        )
+        with self.assertRaises(controller.ControllerError) as raised:
+            controller.commit_transition(self.repository, EXECUTION_ID, "MATERIAL_CHANGE")
+        self.assertEqual("AUTHORITY_PROVIDER_UNAVAILABLE", raised.exception.code)
+        self.assertEqual("REQUIREMENTS", controller.status_execution(self.repository, EXECUTION_ID)["state"])
 
     def test_missing_or_corrupt_lineage_evidence_is_rejected(self) -> None:
         paths, _ = self._terminal_predecessor()

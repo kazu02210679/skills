@@ -14,6 +14,8 @@ INIT | REQUIREMENTS | IMPLEMENT | LOCAL_VERIFY | SEMANTIC_REVIEW
 
 `COMPLETE`, `ESCALATED`, `RECOVERY_REQUIRED`, and `STOPPED` are terminal for the same execution. An unlisted transition is rejected. A material change to scope, policy, authority snapshot, or frozen requirements is not an in-place edit: terminate the execution and create a successor that records `predecessor_execution_id`, `lineage_receipt_digest`, and an explicit `supersedes` relation.
 
+The table below describes the closed state vocabulary, not current reachability. This bounded production build has no authority provider or provider-selection seam. G1, G3, G4, `STOP`, and `MATERIAL_CHANGE` therefore emit no transition under every input. New runs stop at `REQUIREMENTS`; downstream states are retained for deterministic replay of legacy evidence and pure test-only projection.
+
 ## Transition table
 
 | From | Condition | To |
@@ -26,8 +28,8 @@ INIT | REQUIREMENTS | IMPLEMENT | LOCAL_VERIFY | SEMANTIC_REVIEW
 | `SEMANTIC_REVIEW` | `CORRECTIVE`: current rejected review is correctable | `IMPLEMENT` |
 | `SEMANTIC_REVIEW` | `ESCALATION`: stable-root or round limit is reached | `ESCALATED` |
 | `SEMANTIC_REVIEW` | G4 passes for the current accepted review | `COMPLETE` |
-| mutable state | `MATERIAL_CHANGE`: current bound authority requires replacement | `STOPPED` |
-| mutable state | `STOP`: current bound stop authority explicitly stops | `STOPPED` |
+| mutable state | `MATERIAL_CHANGE`: external authority requires replacement (unreachable in the current production build) | `STOPPED` |
+| mutable state | `STOP`: external stop authority explicitly stops (unreachable in the current production build) | `STOPPED` |
 | mutable state | transaction or integrity ambiguity | `RECOVERY_REQUIRED` |
 
 Reject every transition not listed in this table.
@@ -42,12 +44,14 @@ predicate emits no transition.
 
 | Gate | From | Required predicate | To |
 | --- | --- | --- | --- |
-| G1 | REQUIREMENTS | active frozen requirements plus the exact accepted GPT Pro `requirements` receipt, bound to policy authority and requirements digest | IMPLEMENT |
+| G1 | REQUIREMENTS | active frozen requirements plus a provider-admitted GPT Pro `requirements` receipt, bound to policy authority and requirements digest | IMPLEMENT |
 | G2 | IMPLEMENT | controller-owned `record-implementation` receipt binds a re-read change manifest, worker report, base identity, snapshot, requirements, code/test/change graph, and exact artifact digests | LOCAL_VERIFY |
-| G3 | LOCAL_VERIFY | exact current-cycle local evidence plus controller-owned zero-exit receipts for every closed verification spec (exact argv, test IDs, and artifact paths), each shell-free and re-hashed before/after execution | SEMANTIC_REVIEW |
-| G4 | SEMANTIC_REVIEW | current accepted review, GPT Pro final receipt, exact Task 7 Sol consultation/disposition or no-consultation audit receipt, and complete active-requirement coverage | COMPLETE |
+| G3 | LOCAL_VERIFY | provider-admitted current-cycle verification receipts for every closed spec (exact interpreter, argv, test IDs, artifact paths, executed count, and complete repository snapshot) | SEMANTIC_REVIEW |
+| G4 | SEMANTIC_REVIEW | provider-admitted current accepted review and GPT Pro final receipt plus complete active-requirement coverage; Sol remains advisory | COMPLETE |
 
 Only `evaluate` may advance a gate. `record` and `import-receipt` append validated evidence but leave state unchanged. A failed predicate emits no transition; it never creates an implicit repair path.
+
+The positive projection evaluator is a pure fixture under `evals/`. Production code does not import or discover it, and no CLI option, policy field, environment value, registry entry, receipt, local file, or serialized state can select it.
 
 ## Requirements input binding
 
@@ -71,9 +75,12 @@ requirements or evidence digest.
 
 ## Receipt contract
 
-Each privileged source receipt is issuer-specific and closed-schema. After its
-issuer-specific validator admits it, `receipt_imported` records this exact
-closed projection:
+Each source receipt is issuer-specific and closed-schema. Schema, digest, and
+persisted-source validation establish integrity but not authority.
+`receipt_imported` is an audit record and never proof of origin or authority. A
+future caller-independent provider would require a separately designed public
+contract; the current production package intentionally exposes no provider
+interface. The closed audit projection is:
 
 - `receipt_id`, `receipt_type`, `receipt_digest`, and `issuer_skill`;
 - `authority_snapshot_digest` and `requirements_digest`;
@@ -85,8 +92,8 @@ The type-to-issuer allowlist is exact: `requirements`, `approval`,
 `gpt-pro-codex-loop`; controller-owned `implementation` by `codex` and
 `verification` by `hotl-local-verifier`; `sol_audit` by
 `orchestrate-gpt-pro-sol-advisor`; and `lineage` by `hotl-governance-lineage`.
-Agentic G1 uses the requirements receipt as its approval boundary; `approve`
-fails closed unless a non-worker-writable provider exists. Requirements and
+Agentic G1 remains closed. `approve` cannot grant authority, while receipt import
+may retain validated audit bytes without affecting any gate. Requirements and
 approval receipts bind authority and requirements only.
 Implementation, verification, review, and final receipts bind authority,
 requirements, snapshot, evidence set, and cycle. Material-change and stop
@@ -131,7 +138,7 @@ validate the complete source receipt before constructing the closed admitted
 projection. Replay accepts already-admitted events and never treats a caller's
 issuer label as proof of authority.
 
-Semantic review findings use stable `finding_id` and `root_cause_id`; the controller never compares finding prose. A rejected `review_recorded` atomically commits its unique, sorted, non-empty `root_cause_ids`; an accepted review commits an empty set. Later `finding_recorded` events cannot alter a counted round. Each review binds a current authorized semantic-review receipt. Receipts must match the execution, authority, requirements, current snapshot, current evidence-set digest, cycle, issuer schema, and replay protections as applicable. Malformed, mismatched, stale, wrong-issuer, duplicate-ID, or duplicate-digest receipts fail closed and do not consume a valid review round.
+Semantic review findings use the composite stable key `(finding_id, root_cause_id)`; the controller never compares finding prose. A rejected review commits unique open pairs. A later accepted corrective review may resolve only the exact prior pair. The same finding under another root, another finding under the same root, missing identity, aliases, text-only matches, and inferred parents do not resolve it. Receipts must match the execution, authority, requirements, current snapshot, current evidence-set digest, cycle, issuer schema, and replay protections as applicable. Malformed, mismatched, stale, wrong-issuer, duplicate-ID, or duplicate-digest receipts fail closed and do not consume a valid review round. These checks are audit integrity only and never open G4.
 
 ## Typed provenance triples
 
@@ -164,7 +171,7 @@ Node IDs are execution-local and typed (`REQ-`, `CODE-`, `TEST-`, `CMD-`, `EVID-
 
 For every active requirement, require active code that implements it and active test that verifies it in the *same* active change, plus a command that executes the test and produces valid current evidence proving it. Require an accepted review bound to the current evidence set.
 
-For a bound outer protocol, run the GPT Pro controller's `final-verify`, export its final governance receipt, import that receipt into HOTL, and only then evaluate G4. G4 may commit only when all active requirements meet this predicate and no unresolved findings remain. After `COMPLETE`, run `verify-log` to revalidate the event chain, witness, projection, and artifact integrity.
+For a bound outer protocol, the GPT Pro controller may run `final-verify` and export its final governance receipt. Exported bytes remain audit evidence. The current production build has no provider interface, so G4 cannot commit even when every integrity predicate is otherwise satisfied. Sol consultation receipts are optional advisory data and never a G4 predicate or decision input. `verify-log` revalidates the event chain, witness, projection, complete repository snapshot, and artifact integrity without asserting origin, authority, or completion.
 
 ## Evidence lifecycle
 
@@ -184,7 +191,7 @@ Canonical JSON uses UTF-8, sorted object keys, no BOM, finite integers only, no 
 
 The hash chain detects accidental corruption, partial modification, truncation, and naive tampering. It does not make a repository writable by an adversary tamper-proof: an attacker with full write access can rewrite the log and state together. Use an external signed checkpoint, repository secret, or remote transparency log for that stronger threat model.
 
-Do not treat an LLM response, generic event, local CLI assertion, mutable working-tree file, or free-text review as privileged authority. The controller accepts only the required closed-schema receipt and current evidence bindings.
+Do not treat an LLM response, exported receipt bytes, generic event, local CLI assertion, mutable working-tree file, environment value, policy digest, self-hash, registry, import discovery result, serialized selector, or free-text review as privileged authority. Closed schemas and hashes prove consistency, not origin. The current production package has no caller-independent provider interface: G1, G3, G4, STOP, and MATERIAL_CHANGE fail closed unconditionally; Task 7 Sol receipts remain optional audit-only sidecars and cannot alter the underlying decision.
 
 ## Recovery
 

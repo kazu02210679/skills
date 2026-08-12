@@ -211,10 +211,10 @@ def valid_state(
     bound_conversation_url: object = "https://chatgpt.com/c/test-conversation",
     model_policy: object = "PRO_CLASS",
     requested_model_label: object = None,
-    visible_model_label: object = "GPT-5.6 Sol",
+    visible_model_label: object = "GPT-5.6 Pro",
     visible_reasoning_label: object = "Pro",
     visible_plan_label: object = "Pro",
-    model_attestation_schema_version: object = 2,
+    model_attestation_schema_version: object = 3,
     active_requirements_revision: object = _UNSET_STATE_VALUE,
     active_requirements_digest: object = _UNSET_STATE_VALUE,
     approval_sequence: object = 0,
@@ -1186,7 +1186,7 @@ class RequirementsPacketTests(unittest.TestCase):
             errors,
         )
 
-    def test_material_public_contract_change_requires_zero_report_round(self) -> None:
+    def test_material_public_contract_change_uses_trusted_state_round(self) -> None:
         previous = valid_requirements()
         revised = valid_requirements(
             requirements_revision=2,
@@ -1199,12 +1199,30 @@ class RequirementsPacketTests(unittest.TestCase):
             review_round_reset=True,
         )
         self.assertEqual(validate_requirements(revised, previous=previous), [])
-        self.assertIn(
-            "review_round: material revision requires reset to zero",
-            validate_report(valid_report(revised), revised),
+        report = valid_report(revised)
+        self.assertEqual(validate_report(report, revised), [])
+        snapshot = valid_snapshot(report)
+        reset_state = valid_state(
+            "REVIEW_PENDING",
+            0,
+            active_requirements_revision=2,
+            active_requirements_digest=canonical_digest(revised),
+            approval_sequence=1,
+            active_report_digest=canonical_digest(report),
+            current_snapshot_digest=snapshot["snapshot_digest"],
         )
+        self.assertIn(
+            "review_round: does not match active workflow state",
+            packet_validator.validate_report_context(
+                report, revised, reset_state, snapshot
+            ),
+        )
+        resumed_state = dict(reset_state, review_round=1)
         self.assertEqual(
-            validate_report(valid_report(revised, review_round=0), revised), []
+            packet_validator.validate_report_context(
+                report, revised, resumed_state, snapshot
+            ),
+            [],
         )
 
 
@@ -3366,7 +3384,7 @@ class TransitionTests(unittest.TestCase):
                 )
                 expected = {
                     "bound_conversation_url": f"{field}: must match the bound conversation state",
-                    "visible_model_label": "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Sol",
+                    "visible_model_label": "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Pro",
                     "visible_reasoning_label": "current.visible_reasoning_label: must equal the controlled Pro-class reasoning level Pro",
                     "visible_plan_label": "current.visible_plan_label: must identify a Pro-capable ChatGPT plan",
                 }[field]
@@ -3383,6 +3401,22 @@ class TransitionTests(unittest.TestCase):
         )
 
     def test_model_policy_rejects_silent_downgrade_or_wrong_exact_label(self) -> None:
+        pro_previous = valid_state(
+            "PREFLIGHT",
+            0,
+            visible_model_label="GPT-5.6 Pro",
+        )
+        pro_current = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            visible_model_label="GPT-5.6 Pro",
+        )
+        pro_errors = validate_transition(pro_previous, pro_current)
+        self.assertFalse(
+            [error for error in pro_errors if ".visible_model_label:" in error],
+            pro_errors,
+        )
+
         previous = valid_state("PREFLIGHT", 0)
         wrong_class = valid_state(
             "REQUIREMENTS_PENDING",
@@ -3390,7 +3424,7 @@ class TransitionTests(unittest.TestCase):
             visible_model_label="Standard",
         )
         self.assertIn(
-            "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Sol",
+            "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Pro",
             validate_transition(previous, wrong_class),
         )
 
@@ -3417,10 +3451,10 @@ class TransitionTests(unittest.TestCase):
         wrong_attestation_version = valid_state(
             "REQUIREMENTS_PENDING",
             0,
-            model_attestation_schema_version=1,
+            model_attestation_schema_version=2,
         )
         self.assertIn(
-            "current.model_attestation_schema_version: must be integer 2",
+            "current.model_attestation_schema_version: must be integer 3",
             validate_transition(previous, wrong_attestation_version),
         )
 

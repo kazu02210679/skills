@@ -12,12 +12,12 @@ Render all values except `PROMPT_DIGEST`, hash the exact UTF-8 bytes while that 
 
 State records `model_attestation_schema_version`, `model_policy`, `requested_model_label`, `visible_model_label`, `visible_reasoning_label`, and `visible_plan_label`.
 
-- `PRO_CLASS`: visibly verify the independent UI state `GPT-5.6 Sol` model family + `Pro` reasoning level + a Pro-capable ChatGPT plan (`Pro`, `Business`, or `Enterprise`). `Extra High` / `Very High` / `非常に高い` is not Pro reasoning.
+- `PRO_CLASS`: visibly verify the independent ChatGPT UI state `GPT-5.6 Pro` model + `Pro` reasoning level + a Pro-capable plan (`Pro`, `Business`, or `Enterprise`). `GPT-5.6 Sol` belongs to the Codex/Sol Advisor path and is not accepted here. `Extra High` / `Very High` / `非常に高い` is not Pro reasoning.
 - `EXACT_LABEL`: the visible model label must exactly equal the user-requested label. Reasoning and plan observations may be recorded but do not redefine that model-label policy.
 
 Never silently downgrade. Start a new conversation, send the first requirements turn while unbound, then bind the persistent `/c/` URL and the complete visible model state after the valid response. Verify the URL, model family, reasoning level, and plan before every later send and response.
 
-Model-attestation state schema version 2 introduced the independent reasoning and plan observations. A fully unbound legacy state may acquire the null v2 fields on its next normal transition. A bound or partial legacy state must not infer them and requires a new task slug.
+Model-attestation state schema version 3 makes `GPT-5.6 Pro` the sole `PRO_CLASS` model and retains the independent reasoning and plan observations introduced in v2. A fully conversation-unbound state with URL, model, reasoning, and plan all null may acquire the null v3 fields on its next normal transition; this includes a coherent v2 and an older fieldless legacy state. A bound v2, partial v2, bound legacy, or otherwise partial state must not infer the new model identity and requires a new task slug. Receipt export uses the same trusted-state classification and remains read-only when restart is required.
 
 ## Shared envelope instruction
 

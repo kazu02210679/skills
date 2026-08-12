@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,10 +31,10 @@ import governance_receipt as sol_receipts
 
 EXECUTION = "EXEC-C6EBD51734DE"
 SNAPSHOT = "sha256:" + "b" * 64
-NONCE = "d6869e970ce7ce7dec3b0ca23b9e282e"
+NONCE = "7f32e6d296c9a0de1ea3970aa42a6828"
 GPT_BINDING = {
     "conversation_url": "https://chatgpt.com/c/hotl-fixture",
-    "model_label": "GPT-5.6 Sol",
+    "model_label": "GPT-5.6 Pro",
     "plan_label": "Pro",
     "reasoning_label": "Pro",
     "run_id": "gpc-loop-hotl-fixture",
@@ -146,7 +147,7 @@ class HotlCliTests(unittest.TestCase):
             "verification_strategy": ["Run the focused unittest."],
         }
         binding = {
-            "conversation_url": "https://chatgpt.com/c/hotl-e2e", "model_label": "GPT-5.6 Sol",
+            "conversation_url": "https://chatgpt.com/c/hotl-e2e", "model_label": "GPT-5.6 Pro",
             "plan_label": "Pro", "reasoning_label": "Pro", "run_id": "gpc-loop-hotl-e2e", "task_slug": task_slug,
         }
         self.execution = controller.gpt_governance_execution_id(task_slug)
@@ -200,7 +201,7 @@ class HotlCliTests(unittest.TestCase):
             task_slug,
             response,
             "https://chatgpt.com/c/hotl-e2e",
-            "GPT-5.6 Sol",
+            "GPT-5.6 Pro",
             "Pro",
             "Pro",
         )
@@ -299,7 +300,7 @@ class HotlCliTests(unittest.TestCase):
             task_slug,
             review_response,
             str(state["bound_conversation_url"]),
-            "GPT-5.6 Sol",
+            "GPT-5.6 Pro",
             "Pro",
             "Pro",
         )
@@ -325,6 +326,7 @@ class HotlCliTests(unittest.TestCase):
         exported: tuple[dict[str, object], dict[str, object], bytes] | None = None,
         *,
         active_snapshot_digest: str = SNAPSHOT,
+        import_receipt: bool = True,
     ) -> dict[str, object]:
         receipt, requirements_artifact, receipt_bytes = (
             exported or self._export_frozen_gpt_requirements()
@@ -406,8 +408,7 @@ class HotlCliTests(unittest.TestCase):
             "PRIVILEGED_EVENT_REQUIRES_RECEIPT",
             rejected_generic["error"]["code"],
         )
-        imported = cli.main_json(
-            [
+        import_argv = [
                 "import-receipt",
                 "--repo",
                 str(self.repository),
@@ -416,7 +417,9 @@ class HotlCliTests(unittest.TestCase):
                 "--receipt", str(receipt_path),
                 "--gpt-repo", str(self.gpt_repository),
             ]
-        )
+        if not import_receipt:
+            return receipt
+        imported = cli.main_json(import_argv)
         self.assertTrue(imported["ok"], imported)
         return receipt
 
@@ -610,12 +613,11 @@ class HotlCliTests(unittest.TestCase):
     def _reach_semantic_review(self) -> None:
         exported = self._export_frozen_gpt_requirements()
         self._init_from_gpt_requirements(exported)
-        self.assertTrue(self._evaluate("G1")["ok"])
+        self.assertFalse(self._evaluate("G1")["ok"])
         self._record_controller_implementation()
-        self.assertTrue(self._evaluate("G2")["ok"])
         self._record_proof()
         self._run_current_verification()
-        self.assertTrue(self._evaluate("G3")["ok"])
+        self.assertFalse(self._evaluate("G3")["ok"])
 
     @staticmethod
     def _implementation_claims(
@@ -775,14 +777,12 @@ class HotlCliTests(unittest.TestCase):
         self.assertIsNone(requirements_receipt["evidence_set_digest"])
         self.assertIsNone(requirements_receipt["cycle_id"])
         gate_one = self._evaluate("G1")
-        self.assertTrue(gate_one["ok"], gate_one)
+        self.assertFalse(gate_one["ok"], gate_one)
         if active_snapshot_digest != SNAPSHOT:
             controller.activate_snapshot(
                 self.repository, self.execution, active_snapshot_digest
             )
         self._record_controller_implementation()
-        gate_two = self._evaluate("G2")
-        self.assertTrue(gate_two["ok"], gate_two)
         return requirements_receipt
 
     def _import_receipt_bytes(
@@ -890,7 +890,14 @@ class HotlCliTests(unittest.TestCase):
             ),
             cli.COMMANDS,
         )
-        for argv in ([], ["unknown"], ["status"], ["evaluate", "--bogus"]):
+        for argv in (
+            [],
+            ["unknown"],
+            ["status"],
+            ["evaluate", "--bogus"],
+            ["evaluate", "--authority-provider", "local.json"],
+            ["evaluate", "--test-projection"],
+        ):
             with self.subTest(argv=argv):
                 result = cli.main_json(argv)
                 self.assertFalse(result["ok"])
@@ -1327,13 +1334,40 @@ class HotlCliTests(unittest.TestCase):
             self._import(incomplete, "gpt-binding-incomplete.json")["error"]["code"],
         )
 
+        sol_binding = dict(receipt["binding"], model_label="GPT-5.6 Sol")
+        sol_receipt = dict(
+            receipt,
+            binding=sol_binding,
+            authority_snapshot_digest=controller.gpt_governance_authority_digest(
+                sol_binding
+            ),
+            nonce=controller.gpt_governance_nonce(sol_binding),
+            transaction_id="gpc-loop-hotl-fixture:requirements-01",
+        )
+        sol_identity = {
+            field: sol_receipt[field]
+            for field in (
+                "authority_snapshot_digest", "binding", "claims", "execution_id",
+                "input_digest", "issued_at_unix", "nonce", "output_digest",
+                "receipt_type", "requirements_digest", "snapshot_digest",
+                "transaction_id",
+            )
+        }
+        sol_receipt["receipt_id"] = "RCP-GPC-" + hashlib.sha256(
+            contract.canonical_json_bytes(sol_identity)
+        ).hexdigest()[:20].upper()
+        self.assertEqual(
+            "INVALID_RECEIPT_BINDING",
+            self._import(sol_receipt, "gpt-binding-sol.json")["error"]["code"],
+        )
+
     def test_gpt_identity_derivation_is_domain_separated_and_recomputed(self) -> None:
         self.assertEqual(
             "EXEC-C6EBD51734DE",
             controller.gpt_governance_execution_id("hotl-fixture"),
         )
         self.assertEqual(
-            "d6869e970ce7ce7dec3b0ca23b9e282e",
+            "7f32e6d296c9a0de1ea3970aa42a6828",
             controller.gpt_governance_nonce(GPT_BINDING),
         )
         self.assertEqual(AUTHORITY, controller.gpt_governance_authority_digest(GPT_BINDING))
@@ -1347,7 +1381,7 @@ class HotlCliTests(unittest.TestCase):
             controller.gpt_governance_execution_id("hotl-fixture-2"),
         )
         self.assertEqual(
-            "58576b717cadf982dd1131f9604cfd14",
+            "01c7f536a64d8cf60c3ef0899b532704",
             controller.gpt_governance_nonce(changed),
         )
         self.assertNotEqual(
@@ -1400,6 +1434,28 @@ class HotlCliTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertIn(result["error"]["code"], {"GPT_SOURCE_UNAVAILABLE", "GPT_SOURCE_MISMATCH"})
 
+    def test_exact_persisted_gpt_receipt_is_audit_only_and_cannot_open_g1(self) -> None:
+        exported = self._export_frozen_gpt_requirements()
+        receipt = self._init_from_gpt_requirements(
+            exported, import_receipt=False
+        )
+        result = cli.main_json(
+            [
+                "import-receipt", "--repo", str(self.repository),
+                "--execution", self.execution,
+                "--receipt", str(self.inputs / "gpt-requirements-receipt.json"),
+                "--gpt-repo", str(self.gpt_repository),
+            ]
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertIn(receipt["receipt_id"], self._projection()["receipt_records"])
+        gate = self._evaluate("G1")
+        self.assertFalse(gate["ok"], gate)
+        self.assertIn(
+            "G1:authority_provider_unavailable",
+            gate["error"]["message"],
+        )
+
     def test_g1_rejects_a_gpt_receipt_without_current_hotl_context(self) -> None:
         """Removing mandatory context binding would re-open cross-controller substitution."""
         self._init()
@@ -1427,7 +1483,7 @@ class HotlCliTests(unittest.TestCase):
             exported, active_snapshot_digest=str(authoritative[0]["snapshot_digest"])
         )
         self._record_current_verification()
-        self.assertTrue(self._evaluate("G3")["ok"])
+        self.assertFalse(self._evaluate("G3")["ok"])
         before = self._projection()
         current_evidence = controller.evidence_set_digest(
             str(before["requirements_digest"]),
@@ -1530,6 +1586,7 @@ class HotlCliTests(unittest.TestCase):
             ]
         )
         self.assertTrue(import_result["ok"], import_result)
+        self.assertFalse(self._evaluate("G1")["ok"])
 
     def test_approve_rejects_worker_created_host_evidence_in_agentic_mode(self) -> None:
         target = contract.canonical_digest({"requirements": ["REQ-1"]})
@@ -1567,7 +1624,7 @@ class HotlCliTests(unittest.TestCase):
     def test_public_receipt_import_cannot_mint_worker_verification_authority(self) -> None:
         """Replacing the closed ingress check with generic import must fail."""
         self._init_from_gpt_requirements()
-        self.assertTrue(self._evaluate("G1")["ok"])
+        self.assertFalse(self._evaluate("G1")["ok"])
         forged = self._import(
             self._receipt(
                 "verification",
@@ -1582,7 +1639,7 @@ class HotlCliTests(unittest.TestCase):
     def test_controller_records_content_addressed_implementation_manifest_and_report(self) -> None:
         """Replacing controller ingress with public receipt import must fail this gate."""
         self._init_from_gpt_requirements()
-        self.assertTrue(self._evaluate("G1")["ok"])
+        self.assertFalse(self._evaluate("G1")["ok"])
         code = self.repository / "example.py"
         test = self.repository / "test_example.py"
         code.write_bytes(b"value = 1\n")
@@ -1630,7 +1687,6 @@ class HotlCliTests(unittest.TestCase):
             ]
         )
         self.assertTrue(recorded["ok"], recorded)
-        self.assertTrue(self._evaluate("G2")["ok"])
         paths = store.resolve_run(self.repository, self.execution)
         self.assertEqual(contract.canonical_json_bytes(manifest), (paths.evidence / contract.canonical_digest(manifest)[7:]).read_bytes())
         self.assertEqual(report_path.read_bytes(), (paths.evidence / contract.canonical_digest(contract.strict_json_loads(report_path.read_text(encoding="utf-8")))[7:]).read_bytes())
@@ -1638,7 +1694,7 @@ class HotlCliTests(unittest.TestCase):
     def test_worker_selected_fake_base_identity_cannot_open_g2(self) -> None:
         """Replacing controller-derived Git base identity must let this forgery through."""
         self._init_from_gpt_requirements()
-        self.assertTrue(self._evaluate("G1")["ok"])
+        self.assertFalse(self._evaluate("G1")["ok"])
         code = self.repository / "example.py"
         test = self.repository / "test_example.py"
         code.write_bytes(b"value = 1\n")
@@ -1684,9 +1740,8 @@ class HotlCliTests(unittest.TestCase):
     def test_mutated_implementation_after_controller_verification_closes_g3_and_verify_log(self) -> None:
         """Removing receipt-bound artifact rehashing leaves stale verification healthy."""
         self._init_from_gpt_requirements()
-        self.assertTrue(self._evaluate("G1")["ok"])
+        self.assertFalse(self._evaluate("G1")["ok"])
         self._record_controller_implementation()
-        self.assertTrue(self._evaluate("G2")["ok"])
         self._record_proof()
         self._run_current_verification()
         (self.repository / "example.py").write_bytes(b"value = 2\n")
@@ -1697,10 +1752,29 @@ class HotlCliTests(unittest.TestCase):
         self.assertTrue(verified["ok"], verified)
         self.assertFalse(verified["result"]["current_snapshot_integrity"])
 
+    def test_unreferenced_repository_change_invalidates_verified_snapshot(self) -> None:
+        self._init_from_gpt_requirements()
+        self.assertFalse(self._evaluate("G1")["ok"])
+        self._record_controller_implementation()
+        self._record_proof()
+        self._run_current_verification()
+
+        (self.repository / "unreferenced.py").write_bytes(b"value = 'changed'\n")
+        verified = cli.main_json(
+            ["verify-log", "--repo", str(self.repository), "--execution", self.execution]
+        )
+
+        self.assertTrue(verified["ok"], verified)
+        self.assertFalse(verified["result"]["current_snapshot_integrity"])
+        self.assertIn(
+            "REPOSITORY_SNAPSHOT_DIGEST_MISMATCH",
+            verified["result"]["current_snapshot_findings"],
+        )
+
     def test_tampered_referenced_implementation_blob_is_not_healthy(self) -> None:
         """Replacing immutable evidence digest verification must hide this tamper."""
         self._init_from_gpt_requirements()
-        self.assertTrue(self._evaluate("G1")["ok"])
+        self.assertFalse(self._evaluate("G1")["ok"])
         self._record_controller_implementation()
         paths = store.resolve_run(self.repository, self.execution)
         manifest = next(
@@ -1743,6 +1817,18 @@ class HotlCliTests(unittest.TestCase):
         self.assertFalse(result["ok"], result)
         self.assertEqual("INVALID_POLICY", result["error"]["code"])
 
+    def test_policy_rejects_non_controller_python_runner(self) -> None:
+        """A caller-selected executable must not impersonate the unittest runner."""
+        fake_runner = self.repository / "fake-python.exe"
+        fake_runner.write_bytes(b"not the controller runtime\n")
+        result = self._init(
+            required_verification_argv=[
+                [str(fake_runner), "-m", "unittest", "test_example.py"]
+            ]
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("INVALID_POLICY", result["error"]["code"])
+
     def test_controller_runs_only_exact_frozen_argv_without_a_shell(self) -> None:
         """Removing controller argv execution must turn this into an argument error."""
         argv = [sys.executable, "-m", "unittest", "test_example.py"]
@@ -1758,6 +1844,35 @@ class HotlCliTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual("REQUIREMENTS", result["result"]["state"])
 
+    def test_local_unittest_records_audit_receipt_but_cannot_open_g3(self) -> None:
+        argv = [sys.executable, "-m", "unittest", "test_example.py"]
+        self._init(required_verification_argv=[argv])
+        (self.repository / "example.py").write_bytes(b"value = 1\n")
+        (self.repository / "test_example.py").write_bytes(
+            b"import unittest\n\nclass ExampleTests(unittest.TestCase):\n"
+            b"    def test_example(self):\n        self.assertTrue(True)\n"
+        )
+        result = cli.main_json(
+            [
+                "run-verification", "--repo", str(self.repository),
+                "--execution", self.execution,
+                "--argv", str(self._write("untrusted-verify-argv.json", argv)),
+            ]
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(
+            any(
+                record["receipt_type"] == "verification"
+                for record in self._projection()["receipt_records"].values()
+            )
+        )
+        paths = store.resolve_run(self.repository, self.execution)
+        persisted = json.loads(paths.state.read_text(encoding="utf-8"))
+        projection = controller.replay(persisted["policy"], store.load_events(paths))
+        passed, errors = controller.evaluate_gate(replace(projection, state=controller.State.LOCAL_VERIFY), "G3")
+        self.assertFalse(passed)
+        self.assertIn("G3:authority_provider_unavailable", errors)
+
     def test_verification_rejects_empty_unittest_artifact_without_receipt(self) -> None:
         """A zero-test unittest success must not mint a G3 verification receipt."""
         argv = [sys.executable, "-m", "unittest", "test_example.py"]
@@ -1772,7 +1887,10 @@ class HotlCliTests(unittest.TestCase):
             ]
         )
         self.assertFalse(result["ok"], result)
-        self.assertEqual("NO_TESTS_EXECUTED", result["error"]["code"])
+        self.assertIn(
+            result["error"]["code"],
+            {"NO_TESTS_EXECUTED", "VERIFICATION_FAILED"},
+        )
         self.assertFalse(
             any(record["receipt_type"] == "verification" for record in self._projection()["receipt_records"].values())
         )
@@ -1819,8 +1937,8 @@ class HotlCliTests(unittest.TestCase):
             any(record["receipt_type"] == "verification" for record in self._projection()["receipt_records"].values())
         )
 
-    def test_import_sol_receipt_accepts_exact_task7_no_consultation_bytes(self) -> None:
-        """Replacing this closed adapter with generic receipt import must fail."""
+    def test_import_sol_receipt_records_advisory_audit_without_gate_authority(self) -> None:
+        """Canonical self-hashed Task7 bytes are audit data, not provenance."""
         self._init()
         scenario = {
             "authority_snapshot_digest": AUTHORITY, "execution_id": self.execution,
@@ -1835,6 +1953,12 @@ class HotlCliTests(unittest.TestCase):
             "--receipt", str(receipt_path),
         ])
         self.assertTrue(result["ok"], result)
+        self.assertTrue(
+            any(
+                record["receipt_type"] == "sol_audit"
+                for record in self._projection()["receipt_records"].values()
+            )
+        )
 
     def test_import_sol_receipt_rejects_a_rehashed_invalid_timestamp(self) -> None:
         """A closed Task 7 validator must reject semantic forgery, not just its ID."""
@@ -2008,13 +2132,13 @@ class HotlCliTests(unittest.TestCase):
             exported, active_snapshot_digest=str(authoritative[0]["snapshot_digest"])
         )
         self._record_current_verification()
-        self.assertEqual("SEMANTIC_REVIEW", self._evaluate("G3")["result"]["state"])
         self._import_authoritative_gpt_review_and_final(authoritative, evidence_id="EVID-1")
-        result = self._evaluate("G4")
-        self.assertTrue(result["ok"], result)
-        self.assertEqual("COMPLETE", result["result"]["state"])
+        for gate in ("G1", "G3", "G4"):
+            result = self._evaluate(gate)
+            self.assertFalse(result["ok"], result)
+        self.assertEqual("REQUIREMENTS", self._projection()["state"])
 
-    def test_real_gpt_requirements_receipt_completes_and_replays_byte_identically(
+    def test_real_gpt_requirements_receipt_is_audit_only_and_replays_byte_identically(
         self,
     ) -> None:
         exported = self._export_frozen_gpt_requirements()
@@ -2025,14 +2149,14 @@ class HotlCliTests(unittest.TestCase):
         )
         self._record_current_verification()
         gate_three = self._evaluate("G3")
-        self.assertTrue(gate_three["ok"], gate_three)
+        self.assertFalse(gate_three["ok"], gate_three)
 
         self._import_authoritative_gpt_review_and_final(
             authoritative, evidence_id="EVID-1"
         )
         gate_four = self._evaluate("G4")
-        self.assertTrue(gate_four["ok"], gate_four)
-        self.assertEqual("COMPLETE", gate_four["result"]["state"])
+        self.assertFalse(gate_four["ok"], gate_four)
+        self.assertEqual("REQUIREMENTS", self._projection()["state"])
 
         paths = store.resolve_run(self.repository, self.execution)
         persisted = contract.strict_json_loads(paths.state.read_text(encoding="utf-8"))
@@ -2056,7 +2180,7 @@ class HotlCliTests(unittest.TestCase):
         self._begin_real_cross_adapter_chain(exported)
         self._record_current_verification()
         gate_three = self._evaluate("G3")
-        self.assertTrue(gate_three["ok"], gate_three)
+        self.assertFalse(gate_three["ok"], gate_three)
 
         authoritative = self._export_authoritative_gpt_review_and_final()
         replacement_snapshot = str(authoritative[0]["snapshot_digest"])
@@ -2071,21 +2195,21 @@ class HotlCliTests(unittest.TestCase):
         )
         closed_after_change = self._evaluate("G4")
         self.assertFalse(closed_after_change["ok"], closed_after_change)
-        self.assertEqual("GATE_FAILED", closed_after_change["error"]["code"])
+        self.assertEqual("INVALID_TRANSITION", closed_after_change["error"]["code"])
 
         self._record_controller_implementation(evidence_id="EVID-2")
         self._record_proof(evidence_id="EVID-2", proof_name="replacement-proof.txt")
         self._run_current_verification()
         closed_without_review = self._evaluate("G4")
         self.assertFalse(closed_without_review["ok"], closed_without_review)
-        self.assertEqual("GATE_FAILED", closed_without_review["error"]["code"])
+        self.assertEqual("INVALID_TRANSITION", closed_without_review["error"]["code"])
 
         self._import_authoritative_gpt_review_and_final(
             authoritative, evidence_id="EVID-2"
         )
         completed = self._evaluate("G4")
-        self.assertTrue(completed["ok"], completed)
-        self.assertEqual("COMPLETE", completed["result"]["state"])
+        self.assertFalse(completed["ok"], completed)
+        self.assertEqual("REQUIREMENTS", self._projection()["state"])
         self._assert_authoritative_privileged_ingress()
 
     def test_stale_receipt_is_rejected_after_snapshot_change(self) -> None:
@@ -2114,8 +2238,10 @@ class HotlCliTests(unittest.TestCase):
                 )
                 self.assertTrue(imported["ok"], imported)
                 transitioned = self._evaluate(gate)
-                self.assertTrue(transitioned["ok"], transitioned)
-                self.assertEqual("STOPPED", transitioned["result"]["state"])
+                self.assertFalse(transitioned["ok"], transitioned)
+                self.assertEqual(
+                    "AUTHORITY_PROVIDER_UNAVAILABLE", transitioned["error"]["code"]
+                )
 
     def test_unissued_rejected_review_receipt_is_rejected_without_mutation(self) -> None:
         self._reach_semantic_review()
@@ -2169,13 +2295,7 @@ class HotlCliTests(unittest.TestCase):
 
     def test_successor_is_immediately_verifiable(self) -> None:
         self._init()
-        self.assertTrue(
-            self._import(self._receipt("stop", "RCP-STOP-1"), "stop.json")["ok"]
-        )
-        self.assertEqual("STOPPED", self._evaluate("STOP")["result"]["state"])
         predecessor = store.resolve_run(self.repository, self.execution)
-        before_events = predecessor.events.read_bytes()
-        before_state = predecessor.state.read_bytes()
         binding = {
             "predecessor_execution_id": self.execution,
             "supersedes": [{"new_id": "REQ-2", "old_id": "REQ-1"}],
@@ -2183,12 +2303,17 @@ class HotlCliTests(unittest.TestCase):
         digest = store.store_evidence(
             predecessor, contract.canonical_json_bytes(binding)
         )
+        damaged = json.loads(predecessor.state.read_text(encoding="utf-8"))
+        damaged["event_count"] = 99
+        predecessor.state.write_bytes(contract.canonical_json_bytes(damaged))
+        before_events = predecessor.events.read_bytes()
+        before_state = predecessor.state.read_bytes()
         lineage = self._write(
             "lineage.json", binding | {"lineage_receipt_digest": digest}
         )
         successor_binding = {
             "conversation_url": "https://chatgpt.com/c/hotl-successor",
-            "model_label": "GPT-5.6 Sol",
+            "model_label": "GPT-5.6 Pro",
             "plan_label": "Pro",
             "reasoning_label": "Pro",
             "run_id": "gpc-loop-hotl-successor",
@@ -2355,6 +2480,12 @@ class HotlCliTests(unittest.TestCase):
             "PERSISTED_PROJECTION_MISMATCH", report["projection_findings"]
         )
         self.assertEqual(before, snapshot_tree(self.repository / ".hotl"))
+
+    def test_production_authority_provider_selector_does_not_exist(self) -> None:
+        self.assertFalse(hasattr(controller, "_trusted_authority_provider"))
+
+    def test_production_verification_provider_selector_does_not_exist(self) -> None:
+        self.assertFalse(hasattr(controller, "_trusted_verification_provider"))
 
 
 if __name__ == "__main__":

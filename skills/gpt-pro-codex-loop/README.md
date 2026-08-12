@@ -22,17 +22,15 @@ SHA-256 digest of the exact canonical persisted `requirements.json` bytes,
 including the terminal LF. HOTL can initialize from that exact artifact while
 retaining its closed list of typed requirement IDs.
 
-For an explicit HOTL-bound run, initialize GPT with the exact deterministic HOTL governance-context artifact; it binds execution, policy, authority, snapshot, nonce, and digest but grants no authority. The accepted requirements receipt is the GPT-bound G1 approval boundary. Preserve this completion ordering:
-`final-verify` -> export the final receipt -> import the receipt into HOTL ->
-evaluate G4. Receipt export does not authorize commits, pushes, pull requests,
+For an explicit HOTL-bound run, initialize GPT with the exact deterministic HOTL governance-context artifact; it binds execution, policy, authority, snapshot, nonce, and digest but grants no authority. Exported receipts are audit evidence only until a caller-independent provider admits them; without one, HOTL G1/G4 remain closed. Receipt export does not authorize commits, pushes, pull requests,
 deployments, requirements changes, or other external actions. Standalone use
 of the GPT Pro controller remains unchanged.
 
-## GPT-5.6 Sol Pro の確認
+## GPT-5.6 Pro の確認
 
-`PRO_CLASS` は単一のモデル名 `Pro` を探しません。ChatGPT画面で、契約プランが `Pro`・`Business`・`Enterprise` のいずれか、モデル系統が `GPT-5.6 Sol`、推論レベルが `Pro` であることを別々に確認します。`非常に高い`（`Extra High` / `Very High`）はPro推論ではないため拒否します。
+`PRO_CLASS` はCodex内ブラウザのChatGPT画面で、契約プランが `Pro`・`Business`・`Enterprise` のいずれか、モデルが `GPT-5.6 Pro`、推論レベルが `Pro` であることを別々に確認します。`GPT-5.6 Sol` はCodex／Sol Advisor側のモデルであり、このGPT Pro経路では拒否します。`非常に高い`（`Extra High` / `Very High`）もPro推論ではないため拒否します。
 
-旧controllerのrunは、会話未固定なら次の通常遷移で新しいモデル証明stateへ更新されます。すでに会話固定済み、またはモデル証明が部分的な旧stateは推測移行せず、`LEGACY_STATE_RESTART_REQUIRED` で停止します。旧runを保持したまま、新しいtask slugで再開始してください。
+旧controllerのrunは、会話未固定でURL・モデル・推論・プランがすべてnullなら、coherentなv2（または旧形式の未束縛state）を次の通常遷移でv3/nullへ更新します。すでに会話固定済み、v2の一部だけが残るstate、またはモデル証明が部分的な旧stateは推測移行せず、`LEGACY_STATE_RESTART_REQUIRED` で停止します。requirements/review/finalのreceipt exportも同じ読み取り専用分類を適用します。旧runを保持したまま、新しいtask slugで再開始してください。
 
 Codex Desktop から、ChatGPT Pro に要件定義と反復的な意味レビューを担当させ、Codex がリポジトリ調査・詳細設計・実装・テスト・ローカル検証を担当する独立 Skill です。`codex-orchestration` には依存しません。
 

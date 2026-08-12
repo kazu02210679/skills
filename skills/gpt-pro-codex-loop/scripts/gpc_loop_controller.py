@@ -697,6 +697,20 @@ def load_json(path: Path) -> dict[str, object]:
     return value
 
 
+def _parse_json_object_bytes(
+    raw: bytes, *, code: str, message: str
+) -> dict[str, object]:
+    """Parse one already-read canonical artifact without touching the filesystem."""
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        value = validate_packet.strict_json_loads(text)
+    except (UnicodeError, ValueError) as exc:
+        raise ControllerError(code, message) from exc
+    if not isinstance(value, dict):
+        raise ControllerError(code, message)
+    return value
+
+
 def _load_mutator_state(paths: RunPaths) -> tuple[dict[str, object], str]:
     """Load canonical trusted state and bind this command to those exact bytes."""
     state = load_json(paths.state)
@@ -712,33 +726,126 @@ def _normalize_model_attestation_state(
     """Upgrade only an unbound legacy state; never infer a bound model identity."""
     version_field = "model_attestation_schema_version"
     observation_fields = ("visible_reasoning_label", "visible_plan_label")
-    attestation_fields = (version_field, *observation_fields)
-    present = {field for field in attestation_fields if field in state}
-    if present == set(attestation_fields):
-        if state.get(version_field) != validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION:
-            raise ControllerError(
-                "LEGACY_STATE_RESTART_REQUIRED",
-                "Model-attestation state version is unsupported; preserve this run and restart with a new task slug.",
+    current_version = validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION
+    has_version = version_field in state
+    version = state.get(version_field)
+    identity_fields = (
+        "bound_conversation_url",
+        "visible_model_label",
+        *observation_fields,
+    )
+    attestation_fields = (
+        "conversation_binding_state",
+        "model_policy",
+        "requested_model_label",
+        *identity_fields,
+    )
+    restart_message = (
+        "Legacy or partial bound model attestation cannot be inferred safely; "
+        "preserve this run and restart with a new task slug."
+    )
+
+    def restart_required() -> None:
+        raise ControllerError("LEGACY_STATE_RESTART_REQUIRED", restart_message)
+
+    def nonempty_string(value: object) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    def valid_policy_shape() -> bool:
+        binding_state = state.get("conversation_binding_state")
+        policy = state.get("model_policy")
+        requested = state.get("requested_model_label")
+        if not isinstance(binding_state, str) or binding_state not in {
+            "CONVERSATION_UNBOUND",
+            "CONVERSATION_BOUND",
+        }:
+            return False
+        if not isinstance(policy, str) or policy not in {"PRO_CLASS", "EXACT_LABEL"}:
+            return False
+        if policy == "PRO_CLASS" and requested is not None:
+            return False
+        if policy == "EXACT_LABEL" and not nonempty_string(requested):
+            return False
+
+        if binding_state == "CONVERSATION_UNBOUND":
+            return all(state.get(field) is None for field in identity_fields)
+
+        if not nonempty_string(state.get("bound_conversation_url")):
+            return False
+        if policy == "PRO_CLASS":
+            return (
+                state.get("visible_model_label")
+                == validate_packet.PRO_CLASS_MODEL_LABEL
+                and state.get("visible_reasoning_label")
+                == validate_packet.PRO_CLASS_REASONING_LABEL
+                and isinstance(state.get("visible_plan_label"), str)
+                and state.get("visible_plan_label") in validate_packet.PRO_CLASS_PLAN_LABELS
             )
+        if state.get("visible_model_label") != requested:
+            return False
+        return all(
+            value is None or nonempty_string(value)
+            for value in (
+                state.get("visible_reasoning_label"),
+                state.get("visible_plan_label"),
+            )
+        )
+
+    has_identity_fields = all(field in state for field in identity_fields)
+    has_attestation_fields = all(field in state for field in attestation_fields)
+    unbound = (
+        has_identity_fields
+        and state.get("conversation_binding_state") == "CONVERSATION_UNBOUND"
+        and all(state.get(field) is None for field in identity_fields)
+    )
+
+    # A current state is trusted only when the schema version and every
+    # attestation/policy field use their exact closed shapes.  In particular,
+    # bool and float values must not pass Python's loose ``== int`` semantics.
+    if type(version) is int and version == current_version:
+        if not has_attestation_fields or not valid_policy_shape():
+            restart_required()
         return state, False
 
-    safely_unbound = (
-        not present
-        and state.get("conversation_binding_state") == "CONVERSATION_UNBOUND"
+    # A v2 state may be upgraded only when every identity field is explicitly
+    # null and the conversation is still unbound.  A bound or partial v2 state
+    # cannot be re-attested without guessing what the old Browser observed.
+    coherent_v2_unbound = (
+        has_version
+        and type(version) is int
+        and version == 2
+        and has_attestation_fields
+        and unbound
+        and valid_policy_shape()
+    )
+    legacy_core_fields = (
+        "conversation_binding_state",
+        "bound_conversation_url",
+        "model_policy",
+        "requested_model_label",
+        "visible_model_label",
+    )
+    legacy_unbound_identity = (
+        state.get("conversation_binding_state") == "CONVERSATION_UNBOUND"
         and state.get("bound_conversation_url") is None
         and state.get("visible_model_label") is None
     )
-    if safely_unbound:
+    legacy_unbound = (
+        not has_version
+        and all(field in state for field in legacy_core_fields)
+        and legacy_unbound_identity
+        and not any(field in state for field in observation_fields)
+        and valid_policy_shape()
+    )
+    if coherent_v2_unbound or legacy_unbound:
         normalized = dict(state)
-        normalized[version_field] = validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION
+        normalized[version_field] = current_version
+        normalized["visible_model_label"] = None
         for field in observation_fields:
             normalized[field] = None
         return normalized, True
 
-    raise ControllerError(
-        "LEGACY_STATE_RESTART_REQUIRED",
-        "Legacy or partial bound model attestation cannot be inferred safely; preserve this run and restart with a new task slug.",
-    )
+    restart_required()
 
 
 def _normalize_approved_paths(approved_existing_paths: Sequence[str]) -> list[str]:
@@ -2221,6 +2328,8 @@ def _advance_report_phase(
     while current.get("phase") in routes:
         candidate = dict(current)
         candidate["phase"] = routes[str(current["phase"])]
+        candidate["resolution_evidence"] = None
+        candidate["resolution_stop_sequence"] = None
         _raise_validation(
             "INVALID_TRANSITION",
             "Report construction failed state validation.",
@@ -2273,6 +2382,8 @@ def build_report(
             "REQUIREMENTS_FROZEN",
             "IMPLEMENTING",
             "LOCAL_VERIFICATION",
+            "REVIEW_PENDING",
+            "FINAL_VERIFICATION",
         }:
             raise ControllerError("INVALID_PHASE", "A report can be built only before review.")
         requirements = _active_requirements(paths, state)
@@ -2299,11 +2410,30 @@ def build_report(
         validate_model_bound_section(
             "implementation_report", _canonical_prompt_json(report)
         )
-        candidate, phase_edges = _advance_report_phase(state)
+        if state.get("phase") == "FINAL_VERIFICATION":
+            candidate = dict(state)
+            candidate.update(
+                phase="REVIEW_PENDING",
+                latest_decision=None,
+                required_actions=[],
+                unresolved_finding_ids=[],
+                blocker_fingerprints=[],
+                active_review_packet_digest=None,
+                reviewed_snapshot_digest=None,
+            )
+            phase_edges = [("FINAL_VERIFICATION", "REVIEW_PENDING")]
+        else:
+            candidate, phase_edges = _advance_report_phase(state)
         candidate.update(
             active_report_digest=validate_packet.canonical_digest(report),
             current_snapshot_digest=snapshot["snapshot_digest"],
         )
+        if state.get("phase") == "FINAL_VERIFICATION":
+            _raise_validation(
+                "INVALID_TRANSITION",
+                "Final verification report replacement failed state validation.",
+                validate_packet.validate_transition(state, candidate),
+            )
         context_errors = validate_packet.validate_report_context(
             report, requirements, candidate, snapshot
         )
@@ -3968,35 +4098,38 @@ def export_governance_receipt(
     receipt_path = _receipt_path(paths, receipt_type)
     if not paths.state.is_file():
         raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    # Exports are read-only, but they must enforce the same attestation trust
+    # boundary as status and mutating commands.  In particular, do not let an
+    # old bound/partial state bypass the restart-required classification simply
+    # because a persisted receipt happens to exist.
     _require_manual_recovery(paths)
+    # Read the state bytes once as the initial artifact snapshot.  Classify
+    # that exact state before checking receipt availability so an untrusted
+    # legacy state cannot turn into a mere "receipt unavailable" response for
+    # another receipt type.  A later full snapshot detects any replacement.
+    initial_state = _read_governance_export_snapshot((paths.state,))
+    state_bytes = initial_state[paths.state]
+    state = _parse_json_object_bytes(
+        state_bytes,
+        code="INVALID_JSON",
+        message="Controller JSON artifact is invalid.",
+    )
+    state, _ = _normalize_model_attestation_state(state)
     if not receipt_path.is_file():
         raise ControllerError(
             "RECEIPT_NOT_AVAILABLE", "Governance receipt is not available."
         )
-    try:
-        state_bytes = paths.state.read_bytes()
-        raw = receipt_path.read_bytes()
-    except OSError as exc:
-        raise ControllerError(
-            "READ_FAILED", "Could not read governance receipt artifacts."
-        ) from exc
-    try:
-        text = raw.decode("utf-8", errors="strict")
-        value = validate_packet.strict_json_loads(text)
-    except (UnicodeError, ValueError) as exc:
-        raise ControllerError(
-            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt is invalid JSON."
-        ) from exc
-    if not isinstance(value, dict):
-        raise ControllerError(
-            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt must be an object."
-        )
+    raw = _read_governance_export_snapshot((receipt_path,))[receipt_path]
+    value = _parse_json_object_bytes(
+        raw,
+        code="INVALID_GOVERNANCE_RECEIPT",
+        message="Governance receipt is invalid JSON.",
+    )
     if _canonical_json_bytes(value) != raw:
         raise ControllerError(
             "NONCANONICAL_GOVERNANCE_RECEIPT",
             "Governance receipt must use canonical JSON bytes.",
         )
-    state = load_json(paths.state)
     artifact_paths = _governance_export_artifact_paths(
         paths, state, value, receipt_type
     )
@@ -4410,7 +4543,6 @@ def next_commands(
             ["approve-requirements"]
             if state["stop_origin_category"] == "REQUIREMENTS_NEED_USER_INPUT"
             and state.get("user_approval_required") is True
-            and isinstance(state.get("active_requirements_revision"), int)
             else []
         )
     return {
@@ -4418,8 +4550,12 @@ def next_commands(
         "REQUIREMENTS_FROZEN": ["build-report"],
         "IMPLEMENTING": ["build-report"],
         "LOCAL_VERIFICATION": ["build-report", "prepare-review"],
-        "REVIEW_PENDING": ["prepare-review"],
-        "FINAL_VERIFICATION": ["final-verify"],
+        "REVIEW_PENDING": ["build-report", "prepare-review"],
+        "FINAL_VERIFICATION": (
+            ["final-verify"]
+            if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS
+            else ["build-report", "final-verify"]
+        ),
         "COMPLETE": [],
         "BLOCKED": [],
         "PREFLIGHT": [],

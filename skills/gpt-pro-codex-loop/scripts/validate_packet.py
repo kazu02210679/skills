@@ -264,10 +264,10 @@ OPTIONAL_STATE_FIELDS: tuple[str, ...] = (
     "hotl_governance_context",
     "hotl_governance_context_digest",
 )
-PRO_CLASS_MODEL_LABEL = "GPT-5.6 Sol"
+PRO_CLASS_MODEL_LABEL = "GPT-5.6 Pro"
 PRO_CLASS_REASONING_LABEL = "Pro"
 PRO_CLASS_PLAN_LABELS = frozenset({"Pro", "Business", "Enterprise"})
-MODEL_ATTESTATION_SCHEMA_VERSION = 2
+MODEL_ATTESTATION_SCHEMA_VERSION = 3
 FINAL_GATE_FIELDS = (
     "schema_version",
     "requirements_digest",
@@ -787,8 +787,6 @@ def validate_report(packet, requirements):
         errors.append("review_round: must be a non-negative integer")
     elif review_round > MAX_REVIEW_ROUNDS:
         errors.append(f"review_round: exceeds maximum of {MAX_REVIEW_ROUNDS}")
-    if req.get("review_round_reset") is True and review_round != 0:
-        errors.append("review_round: material revision requires reset to zero")
     for field in ("snapshot_digest", "tracked_diff_digest", "untracked_manifest_digest"):
         _require_digest(report.get(field), field, errors)
     changed_files = _require_list(report, "changed_files", errors)
@@ -2380,7 +2378,13 @@ def _validate_requirements_promotion(
 
     active_revision = previous_state.get("active_requirements_revision")
     pending_revision = previous_state.get("pending_requirements_revision")
-    if (
+    initial_material_promotion = (
+        active_revision is None
+        and pending_revision == 1
+        and previous_state.get("active_requirements_digest") is None
+        and previous_state.get("pending_supersedes_digest") is None
+    )
+    if not initial_material_promotion and (
         not isinstance(active_revision, int)
         or isinstance(active_revision, bool)
         or pending_revision != active_revision + 1
@@ -2435,8 +2439,11 @@ def _validate_requirements_promotion(
     if reset_attempt:
         actions = previous_state.get("required_actions")
         if (
+            not initial_material_promotion
+            and (
             not isinstance(actions, list)
             or "REQUIREMENTS_REVISION" not in actions
+            )
         ):
             errors.append(
                 "required_actions: material reset requires prior REQUIREMENTS_REVISION routing"

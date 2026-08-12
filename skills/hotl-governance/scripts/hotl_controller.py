@@ -238,10 +238,14 @@ def empty_projection(
                 "INVALID_POLICY",
                 "Verification test artifacts must map each test ID to an explicit argv path.",
             )
-        if len(argv) < 4 or tuple(argv[1:3]) != ("-m", "unittest"):
+        if (
+            len(argv) < 4
+            or tuple(argv[1:3]) != ("-m", "unittest")
+            or Path(argv[0]).resolve() != Path(sys.executable).resolve()
+        ):
             raise ControllerError(
                 "INVALID_POLICY",
-                "Verification uses the shell-free Python unittest runner with explicit test paths.",
+                "Verification uses the controller Python unittest runner with explicit test paths.",
             )
         normalized_specs.append(
             VerificationSpec(tuple(argv), tuple(tests), tuple(paths), tuple(normalized_test_artifacts))
@@ -523,7 +527,16 @@ def project_event(projection: Projection, event: Mapping[str, object]) -> Projec
         finding_id = str(payload["finding_id"])
         if finding_id in projection.finding_state:
             prior = projection.finding_state[finding_id]
-            if prior.root_cause_id != payload["root_cause_id"] or prior.review_id != review_id:
+            resolving_prior = (
+                prior.root_cause_id == payload["root_cause_id"]
+                and prior.status == "open"
+                and payload["status"] == "resolved"
+                and review.status == "accepted"
+                and review.valid
+            )
+            if prior.root_cause_id != payload["root_cause_id"] or (
+                prior.review_id != review_id and not resolving_prior
+            ):
                 raise ControllerError("FINDING_MISMATCH", "Finding identity cannot be rebound.")
         findings = dict(projection.finding_state)
         findings[finding_id] = FindingRecord(
@@ -885,9 +898,9 @@ def evaluate_gate(projection: Projection, gate: str) -> tuple[bool, tuple[str, .
         errors_list = list(completion_errors(projection))
         if not _has_current_receipt(projection, "final", "gpt-pro-codex-loop"):
             errors_list.append("G4:missing_final_receipt")
-        if not _has_current_receipt(projection, "sol_audit", "orchestrate-gpt-pro-sol-advisor"):
-            errors_list.append("G4:missing_sol_audit_receipt")
         errors = tuple(errors_list)
+    if gate in {"G1", "G3", "G4"}:
+        errors = tuple(sorted(set(errors) | {f"{gate}:authority_provider_unavailable"}))
     return not errors, errors
 
 
@@ -919,10 +932,10 @@ def _transition_target(projection: Projection, gate: str) -> State:
             raise ControllerError("GATE_FAILED", ";".join(errors))
         return direct[(projection.state, gate)]
     if gate in {"MATERIAL_CHANGE", "STOP"}:
-        receipt_type = "material_change" if gate == "MATERIAL_CHANGE" else "stop"
-        if not _has_current_receipt(projection, receipt_type, "gpt-pro-codex-loop"):
-            raise ControllerError("GATE_FAILED", f"{gate} requires bound authority.")
-        return State.STOPPED
+        raise ControllerError(
+            "AUTHORITY_PROVIDER_UNAVAILABLE",
+            f"{gate} requires an external authority provider that is not configured.",
+        )
     if projection.state != State.SEMANTIC_REVIEW:
         raise ControllerError("INVALID_TRANSITION", "Decision is not valid from the current state.")
     latest = _latest_valid_round(projection)
@@ -1185,6 +1198,23 @@ def _current_receipt_artifact_findings(
             digest = "sha256:" + hashlib.sha256(content).hexdigest()
             if digest != ref["sha256"]:
                 findings.append(ref["path"] + ":DIGEST_MISMATCH")
+    paths = store.resolve_run(repository, projection.execution_id)
+    current_repository_digest = repository_snapshot_digest(repository)
+    for record in projection.receipt_records.values():
+        if record.receipt_type != "verification" or not _receipt_is_current(
+            projection, record
+        ):
+            continue
+        try:
+            raw = (paths.evidence / record.receipt_digest[7:]).read_bytes()
+            source = contract.strict_json_loads(raw.decode("utf-8", errors="strict"))
+            claims = source["claims"]
+            expected = claims["repository_snapshot_digest"]
+        except (OSError, UnicodeError, KeyError, TypeError, contract.ContractError):
+            findings.append("REPOSITORY_SNAPSHOT_DIGEST_UNAVAILABLE")
+            continue
+        if expected != current_repository_digest:
+            findings.append("REPOSITORY_SNAPSHOT_DIGEST_MISMATCH")
     return findings
 
 
@@ -1721,6 +1751,43 @@ def repository_base_identity(repository: Path) -> str:
     return contract.canonical_digest({"git_head": head, "schema_version": 1})
 
 
+def repository_snapshot_digest(repository: Path) -> str:
+    """Digest the complete Git-visible repository tree outside controller state."""
+    try:
+        completed = subprocess.run(
+            [
+                "git", "-C", str(repository), "ls-files", "--cached", "--others",
+                "--exclude-standard", "-z",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+    except OSError as error:
+        raise ControllerError(
+            "SNAPSHOT_UNAVAILABLE", "Repository snapshot is unavailable."
+        ) from error
+    if completed.returncode != 0:
+        raise ControllerError("SNAPSHOT_UNAVAILABLE", "Repository snapshot is unavailable.")
+    entries: list[dict[str, str]] = []
+    for raw_path in completed.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        try:
+            path = raw_path.decode("utf-8", errors="strict").replace("\\", "/")
+        except UnicodeError as error:
+            raise ControllerError("SNAPSHOT_UNAVAILABLE", "Repository path is not UTF-8.") from error
+        parts = path.split("/")
+        if parts[0] in {".git", ".hotl", ".ai-pro-loop"} or "__pycache__" in parts or path.endswith(".pyc"):
+            continue
+        content = store.read_repository_artifact(repository, path)
+        entries.append(
+            {"path": path, "sha256": "sha256:" + hashlib.sha256(content).hexdigest()}
+        )
+    return contract.canonical_digest({"files": entries, "schema_version": 1})
+
+
 def initialize_execution(
     repository: Path,
     execution_id: str,
@@ -1911,7 +1978,7 @@ def _validate_gpt_binding(
             "GPT Pro model, reasoning, and plan bindings must be nonempty.",
         )
     if (
-        model != "GPT-5.6 Sol"
+        model != "GPT-5.6 Pro"
         or reasoning != "Pro"
         or plan not in {"Pro", "Business", "Enterprise"}
     ):
@@ -2216,7 +2283,7 @@ def _validate_source_receipt(
         ):
             raise ControllerError("INVALID_REVIEW", "Review roots are invalid.")
         if roots != sorted(set(roots)) or (
-            claims["status"] == "accepted" and (roots or findings)
+            claims["status"] == "accepted" and roots
         ) or (claims["status"] == "rejected" and not roots):
             raise ControllerError("INVALID_REVIEW", "Review roots do not match its status.")
         for finding in findings:
@@ -2242,6 +2309,18 @@ def _validate_source_receipt(
             {finding["root_cause_id"] for finding in findings}
         ) != roots:
             raise ControllerError("INVALID_REVIEW", "Findings do not match committed roots.")
+        if claims["status"] == "accepted" and any(
+            finding["status"] != "resolved" for finding in findings
+        ):
+            raise ControllerError(
+                "INVALID_REVIEW", "Accepted reviews may carry only resolved findings."
+            )
+        if claims["status"] == "rejected" and any(
+            finding["status"] != "open" for finding in findings
+        ):
+            raise ControllerError(
+                "INVALID_REVIEW", "Rejected reviews may carry only open findings."
+            )
     return "sha256:" + hashlib.sha256(raw).hexdigest(), claims
 
 
@@ -2630,7 +2709,7 @@ def run_verification(repository: Path, execution_id: str, argv_bytes: bytes) -> 
         ]
         source = {
             "authority_snapshot_digest": projection.authority_snapshot_digest,
-            "claims": {"argv": list(argv), "argv_digest": argv_digest, "artifacts": [{"path": path, "sha256": digest} for path, digest in sorted(before_artifacts.items())], "edges": edges, "exit_status": 0, "stderr_digest": stderr_digest, "stdout_digest": stdout_digest, "test_artifacts": list(spec.test_artifacts), "test_ids": list(spec.test_ids)},
+            "claims": {"argv": list(argv), "argv_digest": argv_digest, "artifacts": [{"path": path, "sha256": digest} for path, digest in sorted(before_artifacts.items())], "edges": edges, "exit_status": 0, "repository_snapshot_digest": repository_snapshot_digest(repository), "stderr_digest": stderr_digest, "stdout_digest": stdout_digest, "test_artifacts": list(spec.test_artifacts), "test_ids": list(spec.test_ids)},
             "cycle_id": projection.cycle_id,
             "evidence_set_digest": projection_evidence_set_digest(projection),
             "execution_id": projection.execution_id,
@@ -2686,18 +2765,37 @@ def import_sol_receipt(repository: Path, execution_id: str, raw: bytes) -> dict[
         if any(value[field] != expected for field, expected in (("execution_id", projection.execution_id), ("authority_snapshot_digest", projection.authority_snapshot_digest), ("nonce", policy["receipt_nonce"]))):
             raise ControllerError("INVALID_SOL_RECEIPT", "Sol receipt identity does not bind this execution.")
         source = {
-            "authority_snapshot_digest": projection.authority_snapshot_digest, "claims": {},
-            "cycle_id": projection.cycle_id, "evidence_set_digest": projection_evidence_set_digest(projection),
-            "execution_id": projection.execution_id, "input_digest": raw_digest, "issued_at_unix": 0,
-            "issuer_skill": "orchestrate-gpt-pro-sol-advisor", "issuer_version": "1", "nonce": policy["receipt_nonce"],
-            "output_digest": raw_digest, "receipt_id": receipt_id, "receipt_schema_version": 1,
-            "receipt_type": "sol_audit", "requirements_digest": projection.requirements_digest,
-            "snapshot_digest": projection.active_snapshot_digest, "transaction_id": "hotl-sol:" + raw_digest[7:19],
+            "authority_snapshot_digest": projection.authority_snapshot_digest,
+            "claims": {},
+            "cycle_id": projection.cycle_id,
+            "evidence_set_digest": projection_evidence_set_digest(projection),
+            "execution_id": projection.execution_id,
+            "input_digest": raw_digest,
+            "issued_at_unix": 0,
+            "issuer_skill": "orchestrate-gpt-pro-sol-advisor",
+            "issuer_version": "1",
+            "nonce": policy["receipt_nonce"],
+            "output_digest": raw_digest,
+            "receipt_id": receipt_id,
+            "receipt_schema_version": 1,
+            "receipt_type": "sol_audit",
+            "requirements_digest": projection.requirements_digest,
+            "snapshot_digest": projection.active_snapshot_digest,
+            "transaction_id": "hotl-sol:" + raw_digest[7:19],
         }
         source_bytes = contract.canonical_json_bytes(source)
         digest = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
-        batch, projected = _admitted_receipt_events(projection, old_events, source, digest, {})
-        return _append_locked(paths, policy, old_events, projected, batch, {digest: source_bytes, raw_digest: raw})
+        batch, projected = _admitted_receipt_events(
+            projection, old_events, source, digest, {}
+        )
+        return _append_locked(
+            paths,
+            policy,
+            old_events,
+            projected,
+            batch,
+            {digest: source_bytes, raw_digest: raw},
+        )
 
 
 def approve_execution(
