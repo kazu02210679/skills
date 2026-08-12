@@ -1,5 +1,27 @@
 # GPT Pro + Sol Advisor composition
 
+## Governance receipts
+
+The production issuer records either a bound `consultation` receipt after
+trusted runtime attestation and Codex disposition, or a `no-consultation`
+receipt with one closed reason. Combined-mode setup, invocation, and
+attestation failures remain hard stops and produce no receipt. The same
+production module owns authoritative routing: it replays the exact scenario and
+requires closed canonical equality with the supplied route result before
+issuing anything. Ordinary route results retain their original shape; the
+domain-separated v1 scenario digest and execution/invocation identity binding
+exist in the audit receipt, not as route provenance.
+
+`issued_at_unix=0` means no authoritative issuance timestamp was supplied.
+Zero is always an unknown-time, non-authoritative sentinel, even when supplied
+explicitly; it never participates in routing, authority, freshness, or
+transition decisions.
+
+A receipt is audit evidence only. It is not Sol approval, final review,
+completion, or permission to mutate files, commit, push, deploy, or skip
+verification.
+
+`gpt-pro-codex-loop` と Sol Advisor を、それぞれ単独利用できる状態を保ちながら明示的に併用するためのルーティング Skill です。
 ## Quota-aware review policy
 
 The composed flow uses GPT Pro for requirements/plan freeze and one final

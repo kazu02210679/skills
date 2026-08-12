@@ -1,5 +1,36 @@
 # GPT Pro Codex Loop
 
+## Governance receipt export
+
+Authoritative requirements-freeze, accepted-review, and successful
+`final-verify` transactions publish canonical immutable receipt artifacts.
+Use the read-only `export-governance-receipt --type requirements|review|final`
+command to export and revalidate the persisted bytes. Repeated export is
+byte-stable and does not read the clock or modify the run.
+
+Requirements receipt history is append-only under
+`governance-receipt-history/`; the fixed receipt filename is the current export
+copy. Export rejects noncanonical requirements bytes, missing or altered
+history, orphan transactions, and artifacts that change between stability
+reads. Complete nonempty conversation/model/reasoning/plan provenance is
+required to issue a receipt; standalone transitions without it remain valid
+but have nothing to export.
+
+The requirements receipt's `output_digest` is the semantic GPT Pro transition
+output (`active_requirements_digest`). Its `requirements_digest` is instead the
+SHA-256 digest of the exact canonical persisted `requirements.json` bytes,
+including the terminal LF. HOTL can initialize from that exact artifact while
+retaining its closed list of typed requirement IDs.
+
+For an explicit HOTL-bound run, initialize GPT with the exact deterministic HOTL governance-context artifact; it binds execution, policy, authority, snapshot, nonce, and digest but grants no authority. Exported receipts are audit evidence only until a caller-independent provider admits them; without one, HOTL G1/G4 remain closed. Receipt export does not authorize commits, pushes, pull requests,
+deployments, requirements changes, or other external actions. Standalone use
+of the GPT Pro controller remains unchanged.
+
+## GPT-5.6 Pro の確認
+
+`PRO_CLASS` はCodex内ブラウザのChatGPT画面で、契約プランが `Pro`・`Business`・`Enterprise` のいずれか、モデルが `GPT-5.6 Pro`、推論レベルが `Pro` であることを別々に確認します。`GPT-5.6 Sol` はCodex／Sol Advisor側のモデルであり、このGPT Pro経路では拒否します。`非常に高い`（`Extra High` / `Very High`）もPro推論ではないため拒否します。
+
+旧controllerのrunは、会話未固定でURL・モデル・推論・プランがすべてnullなら、coherentなv2（または旧形式の未束縛state）を次の通常遷移でv3/nullへ更新します。すでに会話固定済み、v2の一部だけが残るstate、またはモデル証明が部分的な旧stateは推測移行せず、`LEGACY_STATE_RESTART_REQUIRED` で停止します。requirements/review/finalのreceipt exportも同じ読み取り専用分類を適用します。旧runを保持したまま、新しいtask slugで再開始してください。
 In explicit composition mode, a Luna-Max sub-agent handles one bounded
 read-only routine review before the final Pro review. Sol is reserved for one
 bounded read-only high-impact consultation when escalation evidence warrants

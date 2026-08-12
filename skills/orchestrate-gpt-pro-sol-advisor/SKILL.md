@@ -95,6 +95,38 @@ Reject nested orchestration, Sol-to-Sol review, advisor re-entry, duplicate
 consultation, and open-ended loops. Do not fabricate a consultation or accept
 fabricated advice.
 
+## Governance receipt
+
+After routing and Codex disposition, normalize the outcome with the production
+issuer at `scripts/governance_receipt.py`. A `consultation` receipt is valid
+only for advice already admitted by `route()`, after explicit invocation
+success and trusted runtime attestation. That production module is the single
+source of truth for routing and receipt admission. Before issuing anything, it
+replays `route(scenario)` and requires the supplied route result to be the exact
+same closed canonical object: missing, extra, or changed fields fail closed.
+Ordinary route results keep their original contract and do not carry receipt
+identity or provenance fields. The receipt itself binds the domain-separated
+v1 scenario digest, execution and invocation, nonce, input/output/authority
+digests, the actual advisor role/model/effort, the exact opaque permission
+observation, the `read-only` sandbox, and Codex's closed `accept`, `reject`, or
+`partially accept` disposition. Free-text rationale is not an authority or
+routing input.
+
+`issued_at_unix=0` is the sentinel for no authoritative issuance timestamp
+supplied. It means issuance time is unknown and non-authoritative, including
+when zero was supplied explicitly. Never use this sentinel or any issuance
+timestamp for routing, authority, freshness, or transition decisions.
+
+When no consultation occurred, record only a closed `no-consultation` reason:
+`NOT_APPLICABLE`, `NO_MATERIAL_UNCERTAINTY`, `POLICY_NOT_REQUIRED`, or
+`ADVISOR_UNAVAILABLE`. The unavailable reason requires an explicit standalone
+policy in which advisor availability is not a runtime dependency. In combined
+mode, preflight, invocation, and attestation failures remain hard stops and
+emit no receipt; never normalize or downgrade them as no consultation.
+
+The receipt is audit output. It is not Sol approval, final review, completion,
+or permission to edit, mutate, commit, push, deploy, or bypass verification.
+
 ## Test economy and return
 
 The local-evidence schema is closed: each `test_commands` item has only

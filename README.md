@@ -1,6 +1,6 @@
 # Agent Engineering Skills
 
-This repository is the canonical catalog for twelve independent reusable Skills.
+This repository is the canonical catalog for thirteen independent reusable Skills.
 The catalog is generated from each Skill's frontmatter; regenerate it with
 `python scripts/generate-skill-catalog.py` after changing a description.
 
@@ -13,6 +13,7 @@ The catalog is generated from each Skill's frontmatter; regenerate it with
 | [`create-project-map`](skills/create-project-map/README.md) | Create or update a living interactive project architecture map as architecture-map.html plus machine-readable architecture-map.json. Use after a plan or specification is approved, or when the user asks for a project map, architecture map, dependency map, implementation map, module map, system flow visualization, or reusable visual context for later agents. |
 | [`gpt-pro-codex-loop`](skills/gpt-pro-codex-loop/README.md) | Use when the user explicitly asks Codex Desktop to use ChatGPT Pro through the Browser to define or freeze requirements and perform one final semantic review of a Codex implementation until both semantic and local verification gates pass. |
 | [`handoff`](skills/handoff/README.md) | Create a safe, conversation-centered handoff to a fresh task, thread, session, or chat while preserving the original purpose, changes of direction, decisions, constraints, failed approaches, artifacts, unresolved work, and next action. Use when the user explicitly asks to hand off, transfer, continue in a new task, start fresh without losing context, or says phrases such as "引き継いで", "別セッションに移して", "新しいタスクにして", or "move this to a fresh chat"; if the user only remarks that the conversation is long or slow without asking to move it, recommend a handoff but do not create one. |
+| [`hotl-governance`](skills/hotl-governance/README.md) | Use when the user explicitly requests HOTL or governed execution, or when a trusted outer controller supplies a valid governance context, to enforce evidence-gated execution, typed provenance, deterministic replay, and human escalation without implicitly wrapping ordinary standalone workflows. |
 | [`monitoring-subagents`](skills/monitoring-subagents/README.md) | Use when coordinating two or more concurrent subagents, when a user asks who is doing what, when parallel work may be blocked, stale, or failed, or when long-running or cross-session agent work needs a concise intervention view. |
 | [`open-pull-request`](skills/open-pull-request/README.md) | Use when a completed and verified local branch should be published as a pull request. Triggers on requests such as "PRを作って", "プルリクを出して", "open a pull request", "push this and open a PR", or when finished work must be shared for review. Does not apply when the implementation is unfinished, when tracked files have uncommitted changes, or when the current branch is the repository default branch. |
 | [`orchestrate-gpt-pro-sol-advisor`](skills/orchestrate-gpt-pro-sol-advisor/README.md) | Use when the user explicitly requests combined GPT Pro Codex Loop and Sol Advisor handling for one Codex task. |

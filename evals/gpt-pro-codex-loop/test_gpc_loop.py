@@ -26,7 +26,7 @@ import gpc_loop_controller as controller  # noqa: E402
 import gpc_loop as cli  # noqa: E402
 
 
-PRO_MODEL_LABEL = "GPT-5.6 Sol"
+PRO_MODEL_LABEL = "GPT-5.6 Pro"
 PRO_REASONING_LABEL = "Pro"
 PRO_PLAN_LABEL = "Pro"
 
@@ -79,6 +79,14 @@ def valid_requirements(**overrides: object) -> dict[str, object]:
     }
     value.update(overrides)
     return value
+
+
+def file_tree(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 class ControllerCase(unittest.TestCase):
@@ -362,6 +370,681 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(result["phase"], "LOCAL_VERIFICATION")
         return result
 
+    def test_requirements_governance_receipt_binds_frozen_state(self) -> None:
+        self._freeze_initial_requirements()
+
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+        state = self._state()
+
+        self.assertEqual("gpt-pro-codex-loop", receipt["issuer_skill"])
+        self.assertEqual("1", receipt["issuer_version"])
+        self.assertEqual("requirements", receipt["receipt_type"])
+        self.assertEqual(state["active_requirements_digest"], receipt["output_digest"])
+        self.assertEqual(
+            controller.sha256_bytes(
+                (self._run_dir() / "requirements.json").read_bytes()
+            ),
+            receipt["requirements_digest"],
+        )
+        self.assertEqual(
+            controller.governance_execution_id("controller-test"),
+            receipt["execution_id"],
+        )
+        self.assertEqual(
+            controller.governance_receipt_nonce(receipt["binding"]),
+            receipt["nonce"],
+        )
+        self.assertEqual(
+            {
+                "task_slug": "controller-test",
+                "run_id": "gpc-loop-controller-test",
+                "conversation_url": state["bound_conversation_url"],
+                "model_label": state["visible_model_label"],
+                "reasoning_label": state["visible_reasoning_label"],
+                "plan_label": state["visible_plan_label"],
+            },
+            receipt["binding"],
+        )
+        self.assertIsNone(receipt["snapshot_digest"])
+        self.assertIsNone(receipt["evidence_set_digest"])
+        self.assertIsNone(receipt["cycle_id"])
+
+    def test_incomplete_exact_label_provenance_freezes_without_receipt(self) -> None:
+        controller.initialize_run(
+            self.repository,
+            "controller-test",
+            self.request,
+            self.context,
+            [],
+            "EXACT_LABEL",
+            "Legacy Exact",
+            None,
+        )
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.input_directory / "exact-label-requirements.raw.md"
+        write_raw_envelope(raw, expected, valid_requirements())
+
+        result = controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            "Legacy Exact",
+            None,
+            None,
+        )
+
+        self.assertEqual("REQUIREMENTS_FROZEN", result["phase"])
+        self.assertFalse(
+            (self._run_dir() / "governance-receipt-requirements.json").exists()
+        )
+        with self.assertRaises(controller.ControllerError) as caught:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+        self.assertEqual("RECEIPT_NOT_AVAILABLE", caught.exception.code)
+
+    def test_governance_receipt_export_is_read_only_and_byte_stable(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        before = file_tree(run)
+
+        with patch.object(controller.time, "time", return_value=9999999999):
+            first = controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+        middle = file_tree(run)
+        with patch.object(controller.time, "time", side_effect=AssertionError("clock read")):
+            second = controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+        after = file_tree(run)
+
+        self.assertEqual(first, second)
+        self.assertEqual(before, middle)
+        self.assertEqual(middle, after)
+        stored = run / "governance-receipt-requirements.json"
+        self.assertEqual(controller._canonical_json_bytes(first), stored.read_bytes())
+
+    def test_governance_receipt_export_rejects_orphan_transaction_read_only(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        orphan = run / "transactions" / "consume-interrupted"
+        orphan.mkdir()
+        (orphan / "manifest.json").write_bytes(b"preserve exactly\n")
+        before = file_tree(run)
+
+        with self.assertRaises(controller.ControllerError) as caught:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+
+        self.assertEqual("RECOVERY_REQUIRED", caught.exception.code)
+        self.assertEqual(before, file_tree(run))
+        self.assertFalse((run / ".lock").exists())
+
+    def test_governance_receipt_export_rejects_bytes_changed_between_reads(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        receipt_path = run / "governance-receipt-requirements.json"
+        before = file_tree(run)
+        original_read = Path.read_bytes
+        reads = 0
+
+        def unstable_read(path: Path) -> bytes:
+            nonlocal reads
+            raw = original_read(path)
+            if path == receipt_path:
+                reads += 1
+                if reads == 2:
+                    return raw + b" "
+            return raw
+
+        with patch.object(Path, "read_bytes", new=unstable_read):
+            with self.assertRaises(controller.ControllerError) as caught:
+                controller.export_governance_receipt(
+                    self.repository, "controller-test", "requirements"
+                )
+
+        self.assertEqual("RECOVERY_REQUIRED", caught.exception.code)
+        self.assertEqual(before, file_tree(run))
+
+    def test_review_governance_receipt_is_published_only_for_accepted_review(self) -> None:
+        self._accept_pass_review()
+
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "review"
+        )
+
+        self.assertEqual("semantic_review", receipt["receipt_type"])
+        self.assertEqual("accepted", receipt["claims"]["status"])
+        self.assertEqual([], receipt["claims"]["findings"])
+        self.assertEqual([], receipt["claims"]["root_cause_ids"])
+        self.assertEqual(
+            self._state()["reviewed_snapshot_digest"], receipt["snapshot_digest"]
+        )
+
+    def test_review_receipt_persistence_uses_export_claims_source(self) -> None:
+        claims = {
+            "edges": [
+                {
+                    "edge": "reviews",
+                    "source_id": "REV-GPC-CONSOLIDATED",
+                    "target_id": "REQ-1",
+                }
+            ],
+            "findings": [],
+            "review_id": "REV-GPC-CONSOLIDATED",
+            "root_cause_ids": [],
+            "status": "accepted",
+        }
+        with patch.object(
+            controller, "_review_receipt_claims", return_value=claims
+        ):
+            self._accept_pass_review()
+
+        persisted = controller.load_json(
+            self._run_dir() / "governance-receipt-review.json"
+        )
+        self.assertEqual(claims, persisted["claims"])
+
+    def test_rejected_review_does_not_publish_governance_receipt(self) -> None:
+        attempt = self._prepare_valid_review()
+        raw = self._write_review_response(
+            attempt,
+            self._valid_changes_review("CODE_CHANGE", "CORRECTNESS", "missing-guard"),
+        )
+        controller.accept_review(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+
+        self.assertFalse(
+            (self._run_dir() / "governance-receipt-review.json").exists()
+        )
+        with self.assertRaises(controller.ControllerError) as caught:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "review"
+            )
+        self.assertEqual("RECEIPT_NOT_AVAILABLE", caught.exception.code)
+
+    def test_final_governance_receipt_is_unavailable_before_final_verify(self) -> None:
+        self._accept_pass_review()
+
+        with self.assertRaises(controller.ControllerError) as caught:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "final"
+            )
+
+        self.assertEqual("RECEIPT_NOT_AVAILABLE", caught.exception.code)
+
+    def test_final_governance_receipt_binds_successful_final_verify(self) -> None:
+        self._accept_pass_review()
+        controller.final_verify(self.repository, "controller-test")
+
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "final"
+        )
+        gate = controller.load_json(self._run_dir() / "final-gate.json")
+        snapshot = controller.load_json(self._run_dir() / "snapshot.json")
+
+        self.assertEqual("final", receipt["receipt_type"])
+        self.assertEqual(
+            controller.validate_packet.canonical_digest(gate), receipt["output_digest"]
+        )
+        self.assertEqual(snapshot["snapshot_digest"], receipt["snapshot_digest"])
+        self.assertEqual({}, receipt["claims"])
+        self.assertIsNone(receipt["evidence_set_digest"])
+        self.assertIsNone(receipt["cycle_id"])
+
+    def test_governance_receipt_timestamp_is_set_once_during_mutation(self) -> None:
+        self._init_run()
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.input_directory / "requirements-timestamp.raw.md"
+        write_raw_envelope(raw, expected, valid_requirements())
+
+        with patch.object(
+            controller.time,
+            "time",
+            side_effect=[100000000, 123456789, AssertionError("timestamp read twice")],
+        ):
+            controller.accept_requirements(
+                self.repository,
+                "controller-test",
+                raw,
+                "https://chatgpt.com/c/controller-test",
+                PRO_MODEL_LABEL,
+                PRO_REASONING_LABEL,
+                PRO_PLAN_LABEL,
+            )
+
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+        self.assertEqual(123456789, receipt["issued_at_unix"])
+
+    def test_requirements_receipt_history_preserves_prior_revision_bytes(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        current_path = run / "governance-receipt-requirements.json"
+        first_bytes = current_path.read_bytes()
+        first = controller.validate_packet.strict_json_loads(first_bytes.decode("utf-8"))
+        first_history = (
+            run
+            / "governance-receipt-history"
+            / f"requirements-{first['receipt_id']}.json"
+        )
+        self.assertEqual(first_bytes, first_history.read_bytes())
+        self.assertEqual(
+            [(current_path, first)],
+            controller._requirements_receipt_artifacts(
+                paths=controller.resolve_run(self.repository, "controller-test"),
+                receipt=first,
+            ),
+        )
+
+        self._seed_requirements_revision_pending()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=self._state()["active_requirements_digest"],
+                decision="NEED_USER_INPUT",
+                behavior_changed=True,
+                user_approval_required=True,
+                prior_evidence_invalidated=True,
+                review_round_reset=True,
+            ),
+            "history-revision.raw.md",
+        )
+        controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+        approval = self.repository / "history-approval.txt"
+        approval.write_text("Approved exact material proposal.\n", encoding="utf-8")
+        controller.approve_requirements(self.repository, "controller-test", approval)
+
+        second_bytes = current_path.read_bytes()
+        second = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+        second_history = (
+            run
+            / "governance-receipt-history"
+            / f"requirements-{second['receipt_id']}.json"
+        )
+        self.assertNotEqual(first_bytes, second_bytes)
+        self.assertEqual(first_bytes, first_history.read_bytes())
+        self.assertEqual(first["issued_at_unix"], controller.load_json(first_history)["issued_at_unix"])
+        self.assertEqual(second_bytes, second_history.read_bytes())
+
+    def test_requirements_receipt_history_collision_fails_closed(self) -> None:
+        self._freeze_initial_requirements()
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+        history = (
+            self._run_dir()
+            / "governance-receipt-history"
+            / f"requirements-{receipt['receipt_id']}.json"
+        )
+        changed = dict(receipt, issued_at_unix=receipt["issued_at_unix"] + 1)
+        controller.write_json_atomic(history, changed)
+
+        with self.assertRaises(controller.ControllerError) as caught:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+
+        self.assertEqual(
+            "GOVERNANCE_RECEIPT_HISTORY_COLLISION", caught.exception.code
+        )
+
+    def test_approved_revision_rollback_preserves_current_and_history(self) -> None:
+        self._freeze_initial_requirements()
+        self._seed_requirements_revision_pending()
+        _, raw = self._prepare_raw_requirements(
+            valid_requirements(
+                requirements_revision=2,
+                supersedes_digest=self._state()["active_requirements_digest"],
+                decision="NEED_USER_INPUT",
+                behavior_changed=True,
+                user_approval_required=True,
+                prior_evidence_invalidated=True,
+                review_round_reset=True,
+            ),
+            "history-rollback.raw.md",
+        )
+        controller.accept_requirements(
+            self.repository,
+            "controller-test",
+            raw,
+            self._state()["bound_conversation_url"],
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+        paths = controller.resolve_run(self.repository, "controller-test")
+        current_before = (paths.run / "governance-receipt-requirements.json").read_bytes()
+        requirements_before = (paths.run / "requirements.json").read_bytes()
+        history_before = file_tree(paths.run / "governance-receipt-history")
+        state_before = paths.state.read_bytes()
+        approval = self.repository / "history-rollback-approval.txt"
+        approval.write_text("Approved exact material proposal.\n", encoding="utf-8")
+        replace = controller.os.replace
+
+        def fail_state_publish(source: object, destination: object) -> None:
+            if Path(destination) == paths.state:
+                raise OSError("injected state publish failure")
+            replace(source, destination)
+
+        with patch.object(controller.os, "replace", side_effect=fail_state_publish):
+            with self.assertRaises(controller.ControllerError):
+                controller.approve_requirements(
+                    self.repository, "controller-test", approval
+                )
+
+        self.assertEqual(state_before, paths.state.read_bytes())
+        self.assertEqual(requirements_before, (paths.run / "requirements.json").read_bytes())
+        self.assertEqual(
+            current_before,
+            (paths.run / "governance-receipt-requirements.json").read_bytes(),
+        )
+        self.assertEqual(
+            history_before, file_tree(paths.run / "governance-receipt-history")
+        )
+        self.assertEqual([], list(paths.transactions.iterdir()))
+
+    def test_governance_receipt_export_fails_closed_for_tampering(self) -> None:
+        self._freeze_initial_requirements()
+        path = self._run_dir() / "governance-receipt-requirements.json"
+        original = path.read_bytes()
+        receipt = controller.load_json(path)
+        cases = (
+            (
+                "provenance",
+                receipt
+                | {
+                    "binding": dict(
+                        receipt["binding"],
+                        conversation_url="https://chatgpt.com/c/other",
+                    )
+                },
+                "GOVERNANCE_RECEIPT_PROVENANCE_MISMATCH",
+            ),
+            (
+                "stale-output",
+                receipt | {"output_digest": "sha256:" + "d" * 64},
+                "STALE_GOVERNANCE_RECEIPT",
+            ),
+            (
+                "unknown-field",
+                receipt | {"unexpected": True},
+                "INVALID_GOVERNANCE_RECEIPT",
+            ),
+        )
+        for name, changed, code in cases:
+            with self.subTest(name=name):
+                controller.write_json_atomic(path, changed)
+                with self.assertRaises(controller.ControllerError) as caught:
+                    controller.export_governance_receipt(
+                        self.repository, "controller-test", "requirements"
+                    )
+                self.assertEqual(code, caught.exception.code)
+                path.write_bytes(original)
+
+        path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        with self.assertRaises(controller.ControllerError) as noncanonical:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+        self.assertEqual("NONCANONICAL_GOVERNANCE_RECEIPT", noncanonical.exception.code)
+
+        path.write_bytes(b"{not-json}\n")
+        with self.assertRaises(controller.ControllerError) as corrupt:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+        self.assertEqual("INVALID_GOVERNANCE_RECEIPT", corrupt.exception.code)
+
+        path.unlink()
+        with self.assertRaises(controller.ControllerError) as missing:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "requirements"
+            )
+        self.assertEqual("RECEIPT_NOT_AVAILABLE", missing.exception.code)
+
+    def test_export_rejects_noncanonical_requirements_artifact_bytes(self) -> None:
+        self._freeze_initial_requirements()
+        path = self._run_dir() / "requirements.json"
+        original = path.read_bytes()
+        value = controller.validate_packet.strict_json_loads(original.decode("utf-8"))
+        self.assertIsInstance(value, dict)
+        variants = (
+            json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
+            + b"\n",
+            original.removesuffix(b"\n"),
+            json.dumps(
+                dict(reversed(list(value.items()))),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n",
+        )
+        for raw in variants:
+            with self.subTest(raw=raw[:40]):
+                path.write_bytes(raw)
+                with self.assertRaises(controller.ControllerError) as caught:
+                    controller.export_governance_receipt(
+                        self.repository, "controller-test", "requirements"
+                    )
+                self.assertEqual(
+                    "NONCANONICAL_REQUIREMENTS_ARTIFACT", caught.exception.code
+                )
+        path.write_bytes(original)
+
+    def test_export_governance_receipt_rejects_wrong_task_type_and_state(self) -> None:
+        self._accept_pass_review()
+        with self.assertRaises(controller.ControllerError) as wrong_task:
+            controller.export_governance_receipt(
+                self.repository, "different-task", "requirements"
+            )
+        self.assertEqual("RUN_NOT_FOUND", wrong_task.exception.code)
+        with self.assertRaises(controller.ControllerError) as wrong_type:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "approval"
+            )
+        self.assertEqual("INVALID_RECEIPT_TYPE", wrong_type.exception.code)
+
+        state = self._state()
+        state["phase"] = "IMPLEMENTING"
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        with self.assertRaises(controller.ControllerError) as wrong_state:
+            controller.export_governance_receipt(
+                self.repository, "controller-test", "review"
+            )
+        self.assertEqual("RECEIPT_WRONG_STATE", wrong_state.exception.code)
+
+    def test_cli_exports_canonical_governance_receipt_envelope(self) -> None:
+        self._freeze_initial_requirements()
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "gpc_loop.py"),
+                "export-governance-receipt",
+                "--repo",
+                str(self.repository),
+                "--task",
+                "controller-test",
+                "--type",
+                "requirements",
+            ],
+            check=False,
+            capture_output=True,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        envelope = json.loads(completed.stdout)
+        self.assertTrue(envelope["ok"])
+        self.assertEqual("requirements", envelope["result"]["receipt_type"])
+        self.assertEqual(
+            json.dumps(
+                envelope,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n",
+            completed.stdout,
+        )
+
+    def test_unbound_exported_requirements_bytes_are_rejected_by_hotl_closed_seam(self) -> None:
+        """A standalone GPT receipt cannot activate HOTL without its explicit context."""
+        self._freeze_initial_requirements()
+        receipt_path = self._run_dir() / "governance-receipt-requirements.json"
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+        requirements_bytes = (self._run_dir() / "requirements.json").read_bytes()
+        requirements_artifact = controller.validate_packet.strict_json_loads(
+            requirements_bytes.decode("utf-8")
+        )
+        self.assertEqual(
+            controller._canonical_json_bytes(requirements_artifact), requirements_bytes
+        )
+        self.assertEqual(
+            receipt["requirements_digest"], controller.sha256_bytes(requirements_bytes)
+        )
+        hotl_script = (
+            Path(__file__).resolve().parents[2]
+            / "skills"
+            / "hotl-governance"
+            / "scripts"
+            / "hotl_governance.py"
+        )
+        hotl_inputs = self.input_directory / "hotl"
+        hotl_inputs.mkdir()
+        policy_path = hotl_inputs / "policy.json"
+        requirements_path = hotl_inputs / "requirements.json"
+        controller.write_json_atomic(
+            policy_path,
+            {
+                "active_snapshot_digest": "sha256:" + "b" * 64,
+                "approval_mode": "agentic",
+                "authority_snapshot_digest": receipt["authority_snapshot_digest"],
+                "cycle_id": 1,
+                "execution_id": receipt["execution_id"],
+                "host_approval_evidence_digest": None,
+                "receipt_nonce": receipt["nonce"],
+                "schema_version": 1,
+            },
+        )
+        controller.write_json_atomic(
+            requirements_path,
+            {
+                "requirements": sorted(
+                    item["id"] for item in requirements_artifact["requirements"]
+                ),
+                "source_artifact": requirements_artifact,
+                "source_digest": receipt["requirements_digest"],
+            },
+        )
+
+        def run_hotl(*arguments: str) -> dict[str, object]:
+            completed = subprocess.run(
+                [sys.executable, str(hotl_script), *arguments],
+                check=False,
+                capture_output=True,
+            )
+            self.assertTrue(completed.stdout, completed.stderr)
+            return json.loads(completed.stdout)
+
+        initialized = run_hotl(
+            "init",
+            "--repo",
+            str(self.repository),
+            "--execution",
+            str(receipt["execution_id"]),
+            "--policy",
+            str(policy_path),
+            "--requirements",
+            str(requirements_path),
+        )
+        self.assertTrue(initialized["ok"], initialized)
+
+        cases = (
+            ("execution", {"execution_id": "EXEC-000000000BAD"}, "GPT_IDENTITY_MISMATCH"),
+            (
+                "authority",
+                {"authority_snapshot_digest": "sha256:" + "d" * 64},
+                "GPT_IDENTITY_MISMATCH",
+            ),
+            ("nonce", {"nonce": "d" * 32}, "GPT_IDENTITY_MISMATCH"),
+            (
+                "requirements",
+                {"requirements_digest": "sha256:" + "d" * 64},
+                "GPT_RECEIPT_ID_MISMATCH",
+            ),
+            (
+                "snapshot",
+                {"snapshot_digest": "sha256:" + "d" * 64},
+                "GPT_RECEIPT_ID_MISMATCH",
+            ),
+            (
+                "binding",
+                {
+                    "binding": dict(
+                        receipt["binding"],
+                        conversation_url="https://chatgpt.com/c/other",
+                    )
+                },
+                "GPT_IDENTITY_MISMATCH",
+            ),
+            ("unknown", {"unknown": True}, "INVALID_FIELDS"),
+        )
+        for name, changed, code in cases:
+            with self.subTest(name=name):
+                changed_path = hotl_inputs / f"receipt-{name}.json"
+                controller.write_json_atomic(changed_path, receipt | changed)
+                rejected = run_hotl(
+                    "import-receipt",
+                    "--repo",
+                    str(self.repository),
+                    "--execution",
+                    str(receipt["execution_id"]),
+                    "--receipt",
+                    str(changed_path),
+                )
+                self.assertFalse(rejected["ok"], rejected)
+                self.assertEqual(code, rejected["error"]["code"])
+
+        unbound = run_hotl(
+            "import-receipt",
+            "--repo",
+            str(self.repository),
+            "--execution",
+            str(receipt["execution_id"]),
+            "--receipt",
+            str(receipt_path),
+        )
+        self.assertFalse(unbound["ok"], unbound)
+        self.assertEqual("HOTL_CONTEXT_MISMATCH", unbound["error"]["code"])
+
     def _prepare_supplemental_review(self) -> dict[str, object]:
         self._accept_evidence_request()
         supplemental = self.input_directory / "supplemental.txt"
@@ -477,8 +1160,87 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(state["conversation_binding_state"], "CONVERSATION_UNBOUND")
         self.assertIsNone(state["bound_conversation_url"])
         self.assertIsNone(state["visible_model_label"])
-        self.assertEqual(state["model_attestation_schema_version"], 2)
+        self.assertEqual(state["model_attestation_schema_version"], 3)
         self.assertEqual(state["approved_existing_paths"], [])
+
+    def test_init_binds_only_a_closed_hotl_governance_context_artifact(self) -> None:
+        """Removing explicit context validation must not activate the HOTL binding."""
+        body = {
+            "artifact_type": "hotl-governance-context",
+            "authority_snapshot_digest": "sha256:" + "a" * 64,
+            "cycle_id": 1,
+            "execution_id": controller.governance_execution_id("controller-test"),
+            "policy_digest": "sha256:" + "b" * 64,
+            "receipt_nonce": "c" * 32,
+            "requirements_digest": "sha256:" + "d" * 64,
+            "schema_version": 1,
+            "snapshot_digest": "sha256:" + "e" * 64,
+        }
+        context = dict(body) | {"artifact_digest": controller.sha256_bytes(controller._canonical_json_bytes(body))}
+        path = self.input_directory / "hotl-governance-context.json"
+        path.write_bytes(controller._canonical_json_bytes(context))
+
+        controller.initialize_run(
+            self.repository, "controller-test", self.request, self.context,
+            [], "PRO_CLASS", None, governance_context_path=path,
+        )
+
+        state = self._state()
+        self.assertEqual(state["hotl_governance_context"], context)
+        self.assertEqual(
+            state["hotl_governance_context_digest"],
+            controller.sha256_bytes(path.read_bytes()),
+        )
+
+    def test_governance_receipt_carries_the_explicit_hotl_context_binding(self) -> None:
+        """Dropping receipt claims must not leave a HOTL-bound run indistinguishable."""
+        requirements = valid_requirements()
+        binding = {
+            "conversation_url": "https://chatgpt.com/c/controller-test",
+            "model_label": PRO_MODEL_LABEL,
+            "plan_label": PRO_PLAN_LABEL,
+            "reasoning_label": PRO_REASONING_LABEL,
+            "run_id": "gpc-loop-controller-test",
+            "task_slug": "controller-test",
+        }
+        body = {
+            "artifact_type": "hotl-governance-context",
+            "authority_snapshot_digest": controller.sha256_bytes(controller._canonical_json_bytes(binding)),
+            "cycle_id": 1,
+            "execution_id": controller.governance_execution_id("controller-test"),
+            "policy_digest": "sha256:" + "b" * 64,
+            "receipt_nonce": controller.governance_receipt_nonce(binding),
+            "requirements_digest": controller.sha256_bytes(controller._canonical_json_bytes(requirements)),
+            "schema_version": 1,
+            "snapshot_digest": "sha256:" + "e" * 64,
+        }
+        context = dict(body) | {"artifact_digest": controller.sha256_bytes(controller._canonical_json_bytes(body))}
+        path = self.input_directory / "bound-hotl-context.json"
+        path.write_bytes(controller._canonical_json_bytes(context))
+        controller.initialize_run(
+            self.repository, "controller-test", self.request, self.context,
+            [], "PRO_CLASS", None, governance_context_path=path,
+        )
+        attempt = controller.prepare_requirements(self.repository, "controller-test")
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        raw = self.input_directory / "bound-requirements.raw.md"
+        write_raw_envelope(raw, expected, requirements)
+        controller.accept_requirements(
+            self.repository, "controller-test", raw, binding["conversation_url"],
+            PRO_MODEL_LABEL, PRO_REASONING_LABEL, PRO_PLAN_LABEL,
+        )
+
+        receipt = controller.export_governance_receipt(
+            self.repository, "controller-test", "requirements"
+        )
+
+        self.assertEqual(
+            {
+                "hotl_governance_context": context,
+                "hotl_governance_context_digest": controller.sha256_bytes(path.read_bytes()),
+            },
+            receipt["claims"],
+        )
 
     def test_legacy_unbound_state_upgrades_on_next_normal_transition(self) -> None:
         self._init_run()
@@ -496,9 +1258,49 @@ class ControllerCase(unittest.TestCase):
 
         controller.prepare_requirements(self.repository, "controller-test")
         upgraded = self._state()
-        self.assertEqual(upgraded["model_attestation_schema_version"], 2)
+        self.assertEqual(upgraded["model_attestation_schema_version"], 3)
         self.assertIsNone(upgraded["visible_reasoning_label"])
         self.assertIsNone(upgraded["visible_plan_label"])
+
+    def test_coherent_v2_unbound_state_upgrades_on_next_normal_transition(self) -> None:
+        self._init_run()
+        state = self._state()
+        state.update(
+            model_attestation_schema_version=2,
+            bound_conversation_url=None,
+            visible_model_label=None,
+            visible_reasoning_label=None,
+            visible_plan_label=None,
+        )
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual("REQUIREMENTS_PENDING", status["phase"])
+        self.assertTrue(status["legacy_model_attestation_upgrade_pending"])
+        self.assertEqual(before, self._state_bytes())
+
+        controller.prepare_requirements(self.repository, "controller-test")
+        upgraded = self._state()
+        self.assertEqual(upgraded["model_attestation_schema_version"], 3)
+        self.assertIsNone(upgraded["visible_model_label"])
+        self.assertIsNone(upgraded["visible_reasoning_label"])
+        self.assertIsNone(upgraded["visible_plan_label"])
+
+    def test_partial_v2_unbound_state_requires_restart(self) -> None:
+        self._init_run()
+        state = self._state()
+        state["model_attestation_schema_version"] = 2
+        del state["visible_model_label"]
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+        self.assertEqual(status["next_commands"], [])
+        self.assertEqual(before, self._state_bytes())
 
     def test_legacy_bound_state_requires_restart_without_guessing_identity(self) -> None:
         self._freeze_initial_requirements()
@@ -524,6 +1326,136 @@ class ControllerCase(unittest.TestCase):
             controller.prepare_review(self.repository, "controller-test")
         self.assertEqual(raised.exception.code, "LEGACY_STATE_RESTART_REQUIRED")
 
+    def test_v2_sol_bound_state_requires_restart_for_pro_only_contract(self) -> None:
+        self._freeze_initial_requirements()
+        state = self._state()
+        state["model_attestation_schema_version"] = 2
+        state["visible_model_label"] = "GPT-5.6 Sol"
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+        self.assertTrue(status["recovery_required"])
+        self.assertEqual(status["next_commands"], [])
+        self.assertEqual(before, self._state_bytes())
+
+    def test_v3_sol_bound_state_requires_restart_without_advertising_commands(self) -> None:
+        self._freeze_initial_requirements()
+        state = self._state()
+        state["visible_model_label"] = "GPT-5.6 Sol"
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+        self.assertTrue(status["recovery_required"])
+        self.assertEqual(status["next_commands"], [])
+        self.assertEqual(before, self._state_bytes())
+
+    def test_v3_classifier_rejects_noncanonical_policy_shapes_read_only(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        baseline = self._state()
+        variants = {
+            "unsupported-policy": dict(baseline, model_policy="OTHER"),
+            "missing-policy": dict(baseline),
+            "exact-mismatch": dict(
+                baseline,
+                model_policy="EXACT_LABEL",
+                requested_model_label="GPT-5.6 Pro",
+                visible_model_label="GPT-5.6 Sol",
+            ),
+            "float-version": dict(baseline, model_attestation_schema_version=3.0),
+            "bool-version": dict(baseline, model_attestation_schema_version=True),
+        }
+        del variants["missing-policy"]["model_policy"]
+        for name, variant in variants.items():
+            with self.subTest(name=name):
+                controller.write_json_atomic(run / "state.json", variant)
+                before = file_tree(run)
+                status = controller.status_run(self.repository, "controller-test")
+                self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+                self.assertEqual(status["next_commands"], [])
+                self.assertEqual(before, file_tree(run))
+                controller.write_json_atomic(run / "state.json", baseline)
+
+    def test_export_rejects_state_swap_after_initial_state_read(self) -> None:
+        self._freeze_initial_requirements()
+        paths = controller.resolve_run(self.repository, "controller-test")
+        original_state = paths.state.read_bytes()
+        replacement = dict(
+            controller.load_json(paths.state),
+            visible_model_label="GPT-5.6 Sol",
+        )
+        replacement_bytes = controller._canonical_json_bytes(replacement)
+        original_strict_json_loads = controller.validate_packet.strict_json_loads
+        swapped = False
+
+        def swap_after_state_parse(raw: str) -> object:
+            nonlocal swapped
+            value = original_strict_json_loads(raw)
+            if raw.encode("utf-8") == original_state and not swapped:
+                swapped = True
+                paths.state.write_bytes(replacement_bytes)
+            return value
+
+        with patch.object(
+            controller.validate_packet,
+            "strict_json_loads",
+            new=swap_after_state_parse,
+        ):
+            with self.assertRaises(controller.ControllerError) as caught:
+                controller.export_governance_receipt(
+                    self.repository, "controller-test", "requirements"
+                )
+
+        self.assertEqual("RECOVERY_REQUIRED", caught.exception.code)
+        self.assertEqual(replacement_bytes, paths.state.read_bytes())
+        self.assertNotEqual(original_state, paths.state.read_bytes())
+
+    def test_export_rejects_legacy_attestation_for_every_receipt_type_read_only(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        baseline = self._state()
+        variants = {
+            "bound-v2": dict(
+                baseline,
+                model_attestation_schema_version=2,
+            ),
+            "partial-v2": dict(
+                baseline,
+                model_attestation_schema_version=2,
+                visible_reasoning_label=None,
+            ),
+            "wrong-v3-model": dict(
+                baseline,
+                visible_model_label="GPT-5.6 Sol",
+            ),
+            "legacy-bound": dict(baseline),
+        }
+        del variants["legacy-bound"]["model_attestation_schema_version"]
+        del variants["legacy-bound"]["visible_reasoning_label"]
+        del variants["legacy-bound"]["visible_plan_label"]
+
+        for name, variant in variants.items():
+            with self.subTest(name=name):
+                controller.write_json_atomic(run / "state.json", variant)
+                before = file_tree(run)
+                for receipt_type in ("requirements", "review", "final"):
+                    with self.subTest(receipt_type=receipt_type):
+                        with self.assertRaises(controller.ControllerError) as caught:
+                            controller.export_governance_receipt(
+                                self.repository, "controller-test", receipt_type
+                            )
+                        self.assertEqual(
+                            "LEGACY_STATE_RESTART_REQUIRED", caught.exception.code
+                        )
+                self.assertEqual(before, file_tree(run))
+                controller.write_json_atomic(run / "state.json", baseline)
+
     def test_pro_class_requires_current_model_reasoning_and_plan_observation(self) -> None:
         self._init_run()
         state = self._state()
@@ -533,7 +1465,7 @@ class ControllerCase(unittest.TestCase):
             controller.observed_browser_errors(
                 state,
                 observed_url,
-                "GPT-5.6 Sol",
+                "GPT-5.6 Pro",
                 allow_initial_binding=True,
                 observed_reasoning_label="Pro",
                 observed_plan_label="Pro",
@@ -541,11 +1473,22 @@ class ControllerCase(unittest.TestCase):
             [],
         )
         self.assertIn(
-            "observed reasoning level does not satisfy the requested model policy",
+            "observed model family does not satisfy the requested model policy",
             controller.observed_browser_errors(
                 state,
                 observed_url,
                 "GPT-5.6 Sol",
+                allow_initial_binding=True,
+                observed_reasoning_label="Pro",
+                observed_plan_label="Pro",
+            ),
+        )
+        self.assertIn(
+            "observed reasoning level does not satisfy the requested model policy",
+            controller.observed_browser_errors(
+                state,
+                observed_url,
+                "GPT-5.6 Pro",
                 allow_initial_binding=True,
                 observed_reasoning_label="Extra High",
                 observed_plan_label="Pro",
@@ -840,6 +1783,11 @@ class ControllerCase(unittest.TestCase):
                 ("--repo", str(self.repository)),
                 ("--task", "controller-test"),
             ],
+            "export-governance-receipt": [
+                ("--repo", str(self.repository)),
+                ("--task", "controller-test"),
+                ("--type", "requirements"),
+            ],
             "status": [
                 ("--repo", str(self.repository)),
                 ("--task", "controller-test"),
@@ -891,7 +1839,7 @@ class ControllerCase(unittest.TestCase):
                 (
                     Path("."), "run", request, context,
                     ["old.py", "legacy.py"], "EXACT_LABEL", "Pro", None, False,
-                    "FINAL_ONLY",
+                    None, "FINAL_ONLY",
                 ),
             ),
             ("prepare_requirements", ["prepare-requirements", "--repo", ".", "--task", "run", "--conflict-evidence", str(evidence)], (Path("."), "run", evidence)),
@@ -901,6 +1849,7 @@ class ControllerCase(unittest.TestCase):
             ("prepare_review", ["prepare-review", "--repo", ".", "--task", "run", "--supplemental-evidence", str(evidence)], (Path("."), "run", evidence)),
             ("accept_review", ["accept-review", "--repo", ".", "--task", "run", "--raw-response", str(response), "--observed-conversation-url", "https://chatgpt.com/c/1", "--observed-model-label", PRO_MODEL_LABEL, "--observed-reasoning-label", PRO_REASONING_LABEL, "--observed-plan-label", PRO_PLAN_LABEL], (Path("."), "run", response, "https://chatgpt.com/c/1", PRO_MODEL_LABEL, PRO_REASONING_LABEL, PRO_PLAN_LABEL)),
             ("final_verify", ["final-verify", "--repo", ".", "--task", "run"], (Path("."), "run")),
+            ("export_governance_receipt", ["export-governance-receipt", "--repo", ".", "--task", "run", "--type", "review"], (Path("."), "run", "review")),
             ("status_run", ["status", "--repo", ".", "--task", "run"], (Path("."), "run")),
             ("abandon_attempt", ["abandon-attempt", "--repo", ".", "--task", "run", "--send-status", "NOT_SENT", "--not-sent-evidence", str(evidence)], (Path("."), "run", "NOT_SENT", evidence)),
         ]
@@ -1696,6 +2645,98 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(controller.consumed_chain_heads(self._state()), set())
 
     def test_material_proposal_requires_digest_bound_local_approval(self) -> None:
+        initial_task = "initial-material"
+        controller.initialize_run(
+            self.repository,
+            initial_task,
+            self.request,
+            self.context,
+            [],
+            "PRO_CLASS",
+            None,
+        )
+        attempt = controller.prepare_requirements(
+            self.repository,
+            initial_task,
+        )
+        expected = controller.load_json(Path(attempt["expected_header_path"]))
+        proposal = valid_requirements(
+            decision="NEED_USER_INPUT",
+            behavior_changed=True,
+            user_approval_required=True,
+            prior_evidence_invalidated=True,
+            review_round_reset=True,
+        )
+        raw = self.input_directory / "initial-material.raw.md"
+        write_raw_envelope(raw, expected, proposal)
+
+        stopped = controller.accept_requirements(
+            self.repository,
+            initial_task,
+            raw,
+            "https://chatgpt.com/c/controller-test",
+            PRO_MODEL_LABEL,
+            PRO_REASONING_LABEL,
+            PRO_PLAN_LABEL,
+        )
+        self.assertEqual(stopped["phase"], "USER_DECISION_REQUIRED")
+        self.assertEqual(
+            ["approve-requirements"],
+            controller.status_run(self.repository, initial_task)["next_commands"],
+        )
+        evidence = self.input_directory / "initial-material-approval.txt"
+        evidence.write_text("The user approved this exact proposal.\n", encoding="utf-8")
+
+        frozen = controller.approve_requirements(
+            self.repository, initial_task, evidence
+        )
+
+        self.assertEqual(frozen["phase"], "REQUIREMENTS_FROZEN")
+        self.assertEqual(frozen["active_requirements_revision"], 1)
+        self.assertEqual(frozen["review_round"], 0)
+        (self.repository / "example.py").write_text("value = 1\n", encoding="utf-8")
+        first_built = controller.build_report(
+            self.repository,
+            initial_task,
+            self._write_local_evidence({"example.py": "Implement AC-1."}),
+        )
+        resumed = controller.load_json(
+            self.repository / ".ai-pro-loop" / initial_task / "state.json"
+        )
+        self.assertEqual(resumed["phase"], "REVIEW_PENDING")
+        self.assertEqual(
+            ["build-report", "prepare-review"],
+            controller.status_run(self.repository, initial_task)["next_commands"],
+        )
+        self.assertIsNone(resumed["resolution_evidence"])
+        later_report = dict(
+            controller.load_json(
+                self.repository
+                / ".ai-pro-loop"
+                / initial_task
+                / "implementation-report.json"
+            ),
+            review_round=1,
+        )
+        self.assertNotIn(
+            "review_round: material revision requires reset to zero",
+            controller.validate_packet.validate_report(later_report, proposal),
+        )
+        (self.repository / "example.py").write_text("value = 2\n", encoding="utf-8")
+        rebuilt = controller.build_report(
+            self.repository,
+            initial_task,
+            self._write_local_evidence({"example.py": "Correct AC-1."}),
+        )
+        self.assertNotEqual(first_built["snapshot_digest"], rebuilt["snapshot_digest"])
+        self.assertEqual(
+            "REVIEW_PENDING",
+            controller.load_json(
+                self.repository / ".ai-pro-loop" / initial_task / "state.json"
+            )["phase"],
+        )
+        (self.repository / "example.py").unlink()
+
         self._freeze_initial_requirements()
         self._seed_requirements_revision_pending()
         attempt = controller.prepare_requirements(
@@ -1761,6 +2802,9 @@ class ControllerCase(unittest.TestCase):
         self.assertFalse((paths.run / "envelope-01.json").exists())
         self.assertFalse((paths.run / "requirements-revision-01.json").exists())
         self.assertFalse((paths.run / "requirements.json").exists())
+        self.assertFalse(
+            (paths.run / "governance-receipt-requirements.json").exists()
+        )
         self.assertFalse((paths.run / "responses" / f"{expected['turn_id']}.raw.md").exists())
         self.assertEqual(list(paths.transactions.iterdir()), [])
 
@@ -2564,6 +3608,35 @@ class ControllerCase(unittest.TestCase):
         with self.assertRaises(controller.ControllerError):
             controller.final_verify(self.repository, "controller-test")
         self.assertEqual(self._state_bytes(), before)
+        self.assertEqual(
+            ["build-report", "final-verify"],
+            controller.status_run(self.repository, "controller-test")["next_commands"],
+        )
+        final_state = self._state()
+        controller.write_json_atomic(
+            controller.resolve_run(self.repository, "controller-test").state,
+            dict(final_state, review_round=controller.validate_packet.MAX_REVIEW_ROUNDS),
+        )
+        self.assertEqual(
+            ["final-verify"],
+            controller.status_run(self.repository, "controller-test")["next_commands"],
+        )
+        controller.write_json_atomic(
+            controller.resolve_run(self.repository, "controller-test").state,
+            final_state,
+        )
+
+        rebuilt = controller.build_report(
+            self.repository,
+            "controller-test",
+            self._write_local_evidence({"example.py": "Correct AC-1."}),
+        )
+        reopened = self._state()
+        self.assertEqual("REVIEW_PENDING", reopened["phase"])
+        self.assertIsNone(reopened["active_review_packet_digest"])
+        self.assertIsNone(reopened["reviewed_snapshot_digest"])
+        self.assertIsNone(reopened["latest_decision"])
+        self.assertEqual(rebuilt["snapshot_digest"], reopened["current_snapshot_digest"])
 
     def test_correction_loop_replaces_snapshot_and_rejects_first_review_replay(self) -> None:
         first_attempt = self._prepare_valid_review()

@@ -70,6 +70,7 @@ class HostCompatibilityTests(unittest.TestCase):
                 "create-project-map",
                 "gpt-pro-codex-loop",
                 "handoff",
+                "hotl-governance",
                 "monitoring-subagents",
                 "open-pull-request",
                 "orchestrate-gpt-pro-sol-advisor",

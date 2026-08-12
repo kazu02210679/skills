@@ -133,7 +133,7 @@ Use `status` before every controller mutation after `init` and follow only its `
 
 Any `state.json` (including malformed state), unexpected or foreign artifact, ambiguous ownership, malformed lock, link/reparse point, or established-run evidence makes retry return `INIT_RECOVERY_REFUSED` without mutation. A no-state ambiguous run is `INIT_RECOVERY_REQUIRED`. An existing transaction on an established run remains a manual recovery boundary: `status` returns `recovery_required: true`, reports exact transaction paths and unreachable artifacts, and returns an empty `next_commands`; normal mutations return `RECOVERY_REQUIRED`. Preserve `state.json`, the complete transaction directory, its manifest/staged files/backups, and all run artifacts byte-for-byte. Do not delete, rename, restore, publish, or otherwise repair them through the normal controller. Escalate to the user before any resolution.
 
-The shared transport `schema_version` remains 1. Model attestation is independently versioned by `model_attestation_schema_version=2`. If all v2 attestation fields are absent and the legacy run is completely conversation-unbound, the controller normalizes them to version 2 in memory and persists them during the next ordinary state transition. Missing, partial, unsupported, or legacy attestation on a bound run returns `LEGACY_STATE_RESTART_REQUIRED`; `status` is read-only, sets `recovery_required: true`, exposes no next command, and directs the user to preserve the run and restart with a new task slug. No model, reasoning, or plan value may be inferred from the old `visible_model_label`.
+The shared transport `schema_version` remains 1. Model attestation is independently versioned by `model_attestation_schema_version=3`; v3 makes `GPT-5.6 Pro` the sole `PRO_CLASS` model. A completely conversation-unbound state with URL, model, reasoning, and plan all null may normalize to version 3 in memory and persist that upgrade during the next ordinary state transition. This includes a coherent v2 (all four identity fields explicitly null) and an older fieldless unbound legacy state. A bound v2, partial v2, bound legacy, or otherwise partial/unsupported attestation returns `LEGACY_STATE_RESTART_REQUIRED`; `status` is read-only, sets `recovery_required: true`, exposes no next command, and directs the user to preserve the run and restart with a new task slug. Receipt export applies the same classification for requirements, review, and final receipts without writing any run bytes. No model, reasoning, or plan value may be inferred from the old `visible_model_label`.
 
 Re-run the exact read-only status command as needed:
 
@@ -352,10 +352,10 @@ Complete staged `REVIEW_PENDING` state for the PASS review example:
   "bound_conversation_url": "https://chatgpt.com/c/example-conversation",
   "model_policy": "PRO_CLASS",
   "requested_model_label": null,
-  "visible_model_label": "GPT-5.6 Sol",
+  "visible_model_label": "GPT-5.6 Pro",
   "visible_reasoning_label": "Pro",
   "visible_plan_label": "Pro",
-  "model_attestation_schema_version": 2,
+  "model_attestation_schema_version": 3,
   "active_requirements_revision": 1,
   "active_requirements_digest": "sha256:93b668942c44346dda2d59fa8b77b83093f035de6f2f0d6dcdff536ec6232944",
   "approval_sequence": 0,

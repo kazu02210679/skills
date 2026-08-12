@@ -17,7 +17,7 @@ from typing import Sequence
 
 
 SCHEMA_VERSION = 1
-METADATA_DIRECTORY = ".ai-pro-loop"
+METADATA_DIRECTORIES = (".ai-pro-loop", ".hotl")
 SNAPSHOT_DISCOVERY_INTENT = "snapshot-discovered product change"
 MAX_STABILITY_SAMPLES = 3
 PREFLIGHT_FIELDS = {
@@ -140,24 +140,27 @@ def _filesystem_path(repository: Path, normalized: str) -> Path:
 
 def _is_metadata_path(repository: Path, path: str) -> bool:
     first = path.split("/", 1)[0]
-    if first == METADATA_DIRECTORY:
-        return True
-    if first.casefold() != METADATA_DIRECTORY.casefold():
-        return False
-    if os.path.normcase(first) == os.path.normcase(METADATA_DIRECTORY):
-        return True
-    actual = repository / first
-    canonical = repository / METADATA_DIRECTORY
-    try:
-        return actual.exists() and canonical.exists() and actual.samefile(canonical)
-    except OSError as exc:
-        raise SnapshotError("could not determine metadata path identity") from exc
+    for metadata_directory in METADATA_DIRECTORIES:
+        if first == metadata_directory:
+            return True
+        if first.casefold() != metadata_directory.casefold():
+            continue
+        if os.path.normcase(first) == os.path.normcase(metadata_directory):
+            return True
+        actual = repository / first
+        canonical = repository / metadata_directory
+        try:
+            if actual.exists() and canonical.exists() and actual.samefile(canonical):
+                return True
+        except OSError as exc:
+            raise SnapshotError("could not determine metadata path identity") from exc
+    return False
 
 
 def _check_product_path(repository: Path, raw_path: str) -> str:
     path = _normalize_path(repository, raw_path)
     if _is_metadata_path(repository, path):
-        raise SnapshotError(".ai-pro-loop metadata must not be tracked or staged")
+        raise SnapshotError("reserved controller metadata must not be tracked or staged")
     return path
 
 
@@ -450,7 +453,10 @@ def _preflight_errors(
         )
         if not structurally_valid:
             return False
-        if candidate.parts[0].casefold() != METADATA_DIRECTORY.casefold():
+        if all(
+            candidate.parts[0].casefold() != directory.casefold()
+            for directory in METADATA_DIRECTORIES
+        ):
             return True
         if repository is None:
             return False

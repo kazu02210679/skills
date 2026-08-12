@@ -25,6 +25,53 @@ import validate_packet
 
 
 SCHEMA_VERSION = 1
+GOVERNANCE_RECEIPT_SCHEMA_VERSION = 1
+GOVERNANCE_RECEIPT_HISTORY_DIRECTORY = "governance-receipt-history"
+GOVERNANCE_RECEIPT_TYPES = {
+    "requirements": "requirements",
+    "review": "semantic_review",
+    "final": "final",
+}
+GOVERNANCE_BINDING_FIELDS = {
+    "task_slug",
+    "run_id",
+    "conversation_url",
+    "model_label",
+    "reasoning_label",
+    "plan_label",
+}
+GOVERNANCE_RECEIPT_FIELDS = {
+    "authority_snapshot_digest",
+    "binding",
+    "claims",
+    "cycle_id",
+    "evidence_set_digest",
+    "execution_id",
+    "input_digest",
+    "issued_at_unix",
+    "issuer_skill",
+    "issuer_version",
+    "nonce",
+    "output_digest",
+    "receipt_id",
+    "receipt_schema_version",
+    "receipt_type",
+    "requirements_digest",
+    "snapshot_digest",
+    "transaction_id",
+}
+HOTL_GOVERNANCE_CONTEXT_FIELDS = {
+    "artifact_digest",
+    "artifact_type",
+    "authority_snapshot_digest",
+    "cycle_id",
+    "execution_id",
+    "policy_digest",
+    "receipt_nonce",
+    "requirements_digest",
+    "schema_version",
+    "snapshot_digest",
+}
 TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
 TEMPLATE_TOKEN = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 ATTEMPT_NAME = re.compile(r"(?:expected|abandoned|consumed)-attempt-(\d+)\.json\Z")
@@ -241,7 +288,8 @@ class RunPaths:
 
 
 def _repository_root(repository: Path) -> Path:
-    supplied = Path(repository).resolve()
+    lexical = Path(repository).absolute()
+    supplied = lexical.resolve()
     if not supplied.is_dir():
         raise ControllerError("INVALID_REPOSITORY", "Repository path is not a directory.")
     completed = subprocess.run(
@@ -253,12 +301,16 @@ def _repository_root(repository: Path) -> Path:
     if completed.returncode:
         raise ControllerError("INVALID_REPOSITORY", "Repository path is not a Git repository root.")
     try:
-        root = Path(completed.stdout.decode("utf-8", errors="strict").strip()).resolve()
+        reported = Path(completed.stdout.decode("utf-8", errors="strict").strip())
+        root = reported.resolve()
     except UnicodeDecodeError as exc:
         raise ControllerError("INVALID_REPOSITORY", "Git returned an invalid repository path.") from exc
     if root != supplied:
         raise ControllerError("INVALID_REPOSITORY", "Repository path must be the Git repository root.")
-    return root
+    # Windows may canonicalize a caller's long path to an equivalent 8.3 path.
+    # Preserve the original absolute spelling so read-stability hooks and
+    # transaction manifests address one lexical path consistently.
+    return lexical if os.name == "nt" else root
 
 
 def _is_contained(path: Path, parent: Path) -> bool:
@@ -275,10 +327,11 @@ def resolve_run(repository: Path, task_slug: str) -> RunPaths:
     if not isinstance(task_slug, str) or TASK_SLUG.fullmatch(task_slug) is None:
         raise ControllerError("INVALID_TASK_SLUG", "Invalid task slug.")
     metadata = root / ".ai-pro-loop"
+    resolved_root = root.resolve(strict=False)
     resolved_metadata = metadata.resolve(strict=False)
     run = metadata / task_slug
     resolved_run = run.resolve(strict=False)
-    if not _is_contained(resolved_metadata, root) or not _is_contained(
+    if not _is_contained(resolved_metadata, resolved_root) or not _is_contained(
         resolved_run, resolved_metadata
     ):
         raise ControllerError("UNSAFE_RUN_PATH", "Run path escapes the repository metadata directory.")
@@ -358,6 +411,142 @@ def _normalize_prompt(value: str) -> str:
 
 def sha256_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def governance_execution_id(task_slug: str) -> str:
+    """Map one validated GPT Pro run identity to the closed HOTL execution shape."""
+    if not isinstance(task_slug, str) or TASK_SLUG.fullmatch(task_slug) is None:
+        raise ControllerError("INVALID_TASK_SLUG", "Invalid task slug.")
+    identity = _canonical_json_bytes(
+        {
+            "issuer_skill": "gpt-pro-codex-loop",
+            "run_id": f"gpc-loop-{task_slug}",
+            "task_slug": task_slug,
+        }
+    )
+    return "EXEC-" + hashlib.sha256(identity).hexdigest()[:12].upper()
+
+
+def governance_receipt_nonce(binding: Mapping[str, object]) -> str:
+    """Derive the stable outer receipt nonce without exposing the attempt nonce key."""
+    return hashlib.sha256(
+        _canonical_json_bytes(
+            {
+                "binding": dict(binding),
+                "purpose": "gpt-pro-governance-receipt-nonce-v1",
+            }
+        )
+    ).hexdigest()[:32]
+
+
+def _governance_provenance_complete(state: Mapping[str, object]) -> bool:
+    return state.get("conversation_binding_state") == "CONVERSATION_BOUND" and all(
+        isinstance(state.get(field), str) and bool(str(state[field]).strip())
+        for field in (
+            "bound_conversation_url",
+            "visible_model_label",
+            "visible_reasoning_label",
+            "visible_plan_label",
+        )
+    )
+
+
+def _governance_binding(
+    paths: RunPaths, state: Mapping[str, object]
+) -> dict[str, object]:
+    binding = {
+        "task_slug": paths.task_slug,
+        "run_id": f"gpc-loop-{paths.task_slug}",
+        "conversation_url": state.get("bound_conversation_url"),
+        "model_label": state.get("visible_model_label"),
+        "reasoning_label": state.get("visible_reasoning_label"),
+        "plan_label": state.get("visible_plan_label"),
+    }
+    if not _governance_provenance_complete(state):
+        raise ControllerError(
+            "PROVENANCE_INCOMPLETE",
+            "Governance receipt requires complete Browser and model provenance.",
+        )
+    return binding
+
+
+def _governance_authority_digest(binding: Mapping[str, object]) -> str:
+    return sha256_bytes(_canonical_json_bytes(dict(binding)))
+
+
+def _governance_receipt(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    receipt_type: str,
+    *,
+    input_digest: str,
+    output_digest: str,
+    requirements_digest: str,
+    transaction_id: str,
+    snapshot_digest: object,
+    claims: Mapping[str, object],
+    issued_at_unix: int,
+) -> dict[str, object]:
+    binding = _governance_binding(paths, state)
+    authority_digest = _governance_authority_digest(binding)
+    nonce = governance_receipt_nonce(binding)
+    receipt_claims = dict(claims)
+    hotl_context = state.get("hotl_governance_context")
+    hotl_context_digest = state.get("hotl_governance_context_digest")
+    if hotl_context is not None:
+        if (
+            not isinstance(hotl_context, dict)
+            or not isinstance(hotl_context_digest, str)
+            or sha256_bytes(_canonical_json_bytes(hotl_context)) != hotl_context_digest
+            or hotl_context.get("execution_id") != governance_execution_id(paths.task_slug)
+            or hotl_context.get("authority_snapshot_digest") != authority_digest
+            or hotl_context.get("receipt_nonce") != nonce
+            or hotl_context.get("requirements_digest") != requirements_digest
+        ):
+            raise ControllerError(
+                "HOTL_CONTEXT_MISMATCH",
+                "HOTL governance context does not bind the authoritative receipt.",
+            )
+        receipt_claims.update(
+            hotl_governance_context=dict(hotl_context),
+            hotl_governance_context_digest=hotl_context_digest,
+        )
+    receipt_id_seed = _canonical_json_bytes(
+        {
+            "authority_snapshot_digest": authority_digest,
+            "binding": binding,
+            "claims": receipt_claims,
+            "execution_id": governance_execution_id(paths.task_slug),
+            "input_digest": input_digest,
+            "issued_at_unix": issued_at_unix,
+            "nonce": nonce,
+            "output_digest": output_digest,
+            "receipt_type": receipt_type,
+            "requirements_digest": requirements_digest,
+            "snapshot_digest": snapshot_digest,
+            "transaction_id": transaction_id,
+        }
+    )
+    return {
+        "authority_snapshot_digest": authority_digest,
+        "binding": binding,
+        "claims": receipt_claims,
+        "cycle_id": None,
+        "evidence_set_digest": None,
+        "execution_id": governance_execution_id(paths.task_slug),
+        "input_digest": input_digest,
+        "issued_at_unix": issued_at_unix,
+        "issuer_skill": "gpt-pro-codex-loop",
+        "issuer_version": "1",
+        "nonce": nonce,
+        "output_digest": output_digest,
+        "receipt_id": "RCP-GPC-" + hashlib.sha256(receipt_id_seed).hexdigest()[:20].upper(),
+        "receipt_schema_version": GOVERNANCE_RECEIPT_SCHEMA_VERSION,
+        "receipt_type": receipt_type,
+        "requirements_digest": requirements_digest,
+        "snapshot_digest": snapshot_digest,
+        "transaction_id": transaction_id,
+    }
 
 
 def _parse_template(
@@ -514,6 +703,20 @@ def load_json(path: Path) -> dict[str, object]:
     return value
 
 
+def _parse_json_object_bytes(
+    raw: bytes, *, code: str, message: str
+) -> dict[str, object]:
+    """Parse one already-read canonical artifact without touching the filesystem."""
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        value = validate_packet.strict_json_loads(text)
+    except (UnicodeError, ValueError) as exc:
+        raise ControllerError(code, message) from exc
+    if not isinstance(value, dict):
+        raise ControllerError(code, message)
+    return value
+
+
 def _load_mutator_state(paths: RunPaths) -> tuple[dict[str, object], str]:
     """Load canonical trusted state and bind this command to those exact bytes."""
     state = load_json(paths.state)
@@ -529,33 +732,126 @@ def _normalize_model_attestation_state(
     """Upgrade only an unbound legacy state; never infer a bound model identity."""
     version_field = "model_attestation_schema_version"
     observation_fields = ("visible_reasoning_label", "visible_plan_label")
-    attestation_fields = (version_field, *observation_fields)
-    present = {field for field in attestation_fields if field in state}
-    if present == set(attestation_fields):
-        if state.get(version_field) != validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION:
-            raise ControllerError(
-                "LEGACY_STATE_RESTART_REQUIRED",
-                "Model-attestation state version is unsupported; preserve this run and restart with a new task slug.",
+    current_version = validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION
+    has_version = version_field in state
+    version = state.get(version_field)
+    identity_fields = (
+        "bound_conversation_url",
+        "visible_model_label",
+        *observation_fields,
+    )
+    attestation_fields = (
+        "conversation_binding_state",
+        "model_policy",
+        "requested_model_label",
+        *identity_fields,
+    )
+    restart_message = (
+        "Legacy or partial bound model attestation cannot be inferred safely; "
+        "preserve this run and restart with a new task slug."
+    )
+
+    def restart_required() -> None:
+        raise ControllerError("LEGACY_STATE_RESTART_REQUIRED", restart_message)
+
+    def nonempty_string(value: object) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    def valid_policy_shape() -> bool:
+        binding_state = state.get("conversation_binding_state")
+        policy = state.get("model_policy")
+        requested = state.get("requested_model_label")
+        if not isinstance(binding_state, str) or binding_state not in {
+            "CONVERSATION_UNBOUND",
+            "CONVERSATION_BOUND",
+        }:
+            return False
+        if not isinstance(policy, str) or policy not in {"PRO_CLASS", "EXACT_LABEL"}:
+            return False
+        if policy == "PRO_CLASS" and requested is not None:
+            return False
+        if policy == "EXACT_LABEL" and not nonempty_string(requested):
+            return False
+
+        if binding_state == "CONVERSATION_UNBOUND":
+            return all(state.get(field) is None for field in identity_fields)
+
+        if not nonempty_string(state.get("bound_conversation_url")):
+            return False
+        if policy == "PRO_CLASS":
+            return (
+                state.get("visible_model_label")
+                == validate_packet.PRO_CLASS_MODEL_LABEL
+                and state.get("visible_reasoning_label")
+                == validate_packet.PRO_CLASS_REASONING_LABEL
+                and isinstance(state.get("visible_plan_label"), str)
+                and state.get("visible_plan_label") in validate_packet.PRO_CLASS_PLAN_LABELS
             )
+        if state.get("visible_model_label") != requested:
+            return False
+        return all(
+            value is None or nonempty_string(value)
+            for value in (
+                state.get("visible_reasoning_label"),
+                state.get("visible_plan_label"),
+            )
+        )
+
+    has_identity_fields = all(field in state for field in identity_fields)
+    has_attestation_fields = all(field in state for field in attestation_fields)
+    unbound = (
+        has_identity_fields
+        and state.get("conversation_binding_state") == "CONVERSATION_UNBOUND"
+        and all(state.get(field) is None for field in identity_fields)
+    )
+
+    # A current state is trusted only when the schema version and every
+    # attestation/policy field use their exact closed shapes.  In particular,
+    # bool and float values must not pass Python's loose ``== int`` semantics.
+    if type(version) is int and version == current_version:
+        if not has_attestation_fields or not valid_policy_shape():
+            restart_required()
         return state, False
 
-    safely_unbound = (
-        not present
-        and state.get("conversation_binding_state") == "CONVERSATION_UNBOUND"
+    # A v2 state may be upgraded only when every identity field is explicitly
+    # null and the conversation is still unbound.  A bound or partial v2 state
+    # cannot be re-attested without guessing what the old Browser observed.
+    coherent_v2_unbound = (
+        has_version
+        and type(version) is int
+        and version == 2
+        and has_attestation_fields
+        and unbound
+        and valid_policy_shape()
+    )
+    legacy_core_fields = (
+        "conversation_binding_state",
+        "bound_conversation_url",
+        "model_policy",
+        "requested_model_label",
+        "visible_model_label",
+    )
+    legacy_unbound_identity = (
+        state.get("conversation_binding_state") == "CONVERSATION_UNBOUND"
         and state.get("bound_conversation_url") is None
         and state.get("visible_model_label") is None
     )
-    if safely_unbound:
+    legacy_unbound = (
+        not has_version
+        and all(field in state for field in legacy_core_fields)
+        and legacy_unbound_identity
+        and not any(field in state for field in observation_fields)
+        and valid_policy_shape()
+    )
+    if coherent_v2_unbound or legacy_unbound:
         normalized = dict(state)
-        normalized[version_field] = validate_packet.MODEL_ATTESTATION_SCHEMA_VERSION
+        normalized[version_field] = current_version
+        normalized["visible_model_label"] = None
         for field in observation_fields:
             normalized[field] = None
         return normalized, True
 
-    raise ControllerError(
-        "LEGACY_STATE_RESTART_REQUIRED",
-        "Legacy or partial bound model attestation cannot be inferred safely; preserve this run and restart with a new task slug.",
-    )
+    restart_required()
 
 
 def _normalize_approved_paths(approved_existing_paths: Sequence[str]) -> list[str]:
@@ -579,9 +875,11 @@ def initial_state(
     model_policy: str,
     requested_label: str | None,
     review_policy: str = validate_packet.DEFAULT_REVIEW_POLICY,
+    hotl_governance_context: Mapping[str, object] | None = None,
+    hotl_governance_context_digest: str | None = None,
 ) -> dict[str, object]:
     """Build the complete, preflight-only trusted state object."""
-    return {
+    state = {
         "schema_version": SCHEMA_VERSION,
         "phase": "PREFLIGHT",
         "review_round": 0,
@@ -638,6 +936,40 @@ def initial_state(
         "nonce_derivation_key": secrets.token_hex(32),
         "approved_existing_paths": sorted(approved_paths),
     }
+    if hotl_governance_context is not None:
+        state["hotl_governance_context"] = dict(hotl_governance_context)
+        state["hotl_governance_context_digest"] = hotl_governance_context_digest
+    return state
+
+
+def _load_hotl_governance_context(
+    path: Path, task_slug: str
+) -> tuple[dict[str, object], str]:
+    """Read one explicit, canonical, self-digesting HOTL context artifact."""
+    try:
+        raw = Path(path).read_bytes()
+        value = validate_packet.strict_json_loads(raw.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context is unreadable.") from exc
+    if not isinstance(value, dict) or _canonical_json_bytes(value) != raw:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context must be canonical JSON.")
+    if set(value) != HOTL_GOVERNANCE_CONTEXT_FIELDS:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context fields are invalid.")
+    body = {key: value[key] for key in value if key != "artifact_digest"}
+    if value["artifact_type"] != "hotl-governance-context" or value["schema_version"] != 1:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context schema is invalid.")
+    if value["execution_id"] != governance_execution_id(task_slug):
+        raise ControllerError("HOTL_CONTEXT_MISMATCH", "HOTL governance context execution does not match the task.")
+    if value["artifact_digest"] != sha256_bytes(_canonical_json_bytes(body)):
+        raise ControllerError("HOTL_CONTEXT_DIGEST_MISMATCH", "HOTL governance context artifact digest is invalid.")
+    if any(
+        not isinstance(value[field], str) or DIGEST.fullmatch(value[field]) is None
+        for field in ("authority_snapshot_digest", "policy_digest", "requirements_digest", "snapshot_digest")
+    ) or not isinstance(value["receipt_nonce"], str) or NONCE.fullmatch(value["receipt_nonce"]) is None:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context bindings are invalid.")
+    if not isinstance(value["cycle_id"], int) or isinstance(value["cycle_id"], bool) or value["cycle_id"] < 1:
+        raise ControllerError("INVALID_HOTL_CONTEXT", "HOTL governance context cycle is invalid.")
+    return dict(value), sha256_bytes(raw)
 
 
 def _validate_model_policy(model_policy: str, requested_label: str | None) -> None:
@@ -1012,7 +1344,11 @@ def _valid_initialization_marker(path: Path, paths: RunPaths) -> bool:
         set(marker) == INITIALIZATION_MARKER_FIELDS
         and marker.get("schema_version") == SCHEMA_VERSION
         and marker.get("kind") == "gpc-loop-initialization"
-        and marker.get("repository") == str(paths.repository)
+        and isinstance(marker.get("repository"), str)
+        and os.path.normcase(
+            str(Path(marker["repository"]).resolve(strict=False))
+        )
+        == os.path.normcase(str(paths.repository.resolve(strict=False)))
         and marker.get("task") == paths.task_slug
         and isinstance(marker.get("baseline_head"), str)
         and isinstance(marker.get("pid"), int)
@@ -1237,6 +1573,7 @@ def initialize_run(
     requested_model_label: str | None,
     approved_existing_path_manifest: Path | None = None,
     retry_incomplete: bool = False,
+    governance_context_path: Path | None = None,
     review_policy: str = validate_packet.DEFAULT_REVIEW_POLICY,
 ) -> dict[str, object]:
     """Create a fully validated, conversation-unbound controller run."""
@@ -1245,6 +1582,12 @@ def initialize_run(
     _validate_review_policy(review_policy)
     request_text = _read_input(request_path, "request")
     context_text = _read_input(repository_context_path, "repository context")
+    hotl_context: dict[str, object] | None = None
+    hotl_context_digest: str | None = None
+    if governance_context_path is not None:
+        hotl_context, hotl_context_digest = _load_hotl_governance_context(
+            governance_context_path, task_slug
+        )
     validate_model_bound_section("user_request", request_text)
     validate_model_bound_section("repository_evidence", context_text)
     if approved_existing_path_manifest is not None and approved_existing_paths:
@@ -1385,6 +1728,8 @@ def initialize_run(
                     model_policy,
                     requested_model_label,
                     review_policy,
+                    hotl_context,
+                    hotl_context_digest,
                 )
                 candidate = dict(previous)
                 candidate["phase"] = "REQUIREMENTS_PENDING"
@@ -1941,9 +2286,35 @@ def _load_local_evidence(
     return evidence
 
 
-def _active_requirements(paths: RunPaths, state: Mapping[str, object]) -> dict[str, object]:
-    requirements = load_json(paths.run / "requirements.json")
-    requirements_errors = validate_packet.validate_requirements(requirements)
+def _active_requirements_artifact(
+    paths: RunPaths, state: Mapping[str, object]
+) -> tuple[dict[str, object], bytes]:
+    path = paths.run / "requirements.json"
+    try:
+        raw = path.read_bytes()
+        value = validate_packet.strict_json_loads(raw.decode("utf-8", errors="strict"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ControllerError(
+            "INVALID_REQUIREMENTS_ARTIFACT",
+            "Stored requirements artifact is invalid.",
+        ) from exc
+    if not isinstance(value, dict) or _canonical_json_bytes(value) != raw:
+        raise ControllerError(
+            "NONCANONICAL_REQUIREMENTS_ARTIFACT",
+            "Stored requirements artifact must use exact canonical JSON bytes.",
+        )
+    requirements = value
+    revision = requirements.get("requirements_revision")
+    previous_requirements = (
+        load_json(_requirements_revision_path(paths, revision - 1))
+        if isinstance(revision, int)
+        and not isinstance(revision, bool)
+        and revision > 1
+        else None
+    )
+    requirements_errors = validate_packet.validate_requirements(
+        requirements, previous_requirements
+    )
     _raise_validation(
         "INVALID_STATE", "Stored requirements are invalid.", requirements_errors
     )
@@ -1951,7 +2322,11 @@ def _active_requirements(paths: RunPaths, state: Mapping[str, object]) -> dict[s
         raise ControllerError("INVALID_STATE", "Stored requirements do not match trusted state.")
     if requirements.get("requirements_revision") != state.get("active_requirements_revision"):
         raise ControllerError("INVALID_STATE", "Stored requirements revision does not match trusted state.")
-    return requirements
+    return requirements, raw
+
+
+def _active_requirements(paths: RunPaths, state: Mapping[str, object]) -> dict[str, object]:
+    return _active_requirements_artifact(paths, state)[0]
 
 
 def _capture_snapshot(paths: RunPaths, state: Mapping[str, object]) -> dict[str, object]:
@@ -2004,6 +2379,8 @@ def _advance_report_phase(
     while current.get("phase") in routes:
         candidate = dict(current)
         candidate["phase"] = routes[str(current["phase"])]
+        candidate["resolution_evidence"] = None
+        candidate["resolution_stop_sequence"] = None
         _raise_validation(
             "INVALID_TRANSITION",
             "Report construction failed state validation.",
@@ -2056,6 +2433,8 @@ def build_report(
             "REQUIREMENTS_FROZEN",
             "IMPLEMENTING",
             "LOCAL_VERIFICATION",
+            "REVIEW_PENDING",
+            "FINAL_VERIFICATION",
         }:
             raise ControllerError("INVALID_PHASE", "A report can be built only before review.")
         requirements = _active_requirements(paths, state)
@@ -2082,11 +2461,30 @@ def build_report(
         validate_model_bound_section(
             "implementation_report", _canonical_prompt_json(report)
         )
-        candidate, phase_edges = _advance_report_phase(state)
+        if state.get("phase") == "FINAL_VERIFICATION":
+            candidate = dict(state)
+            candidate.update(
+                phase="REVIEW_PENDING",
+                latest_decision=None,
+                required_actions=[],
+                unresolved_finding_ids=[],
+                blocker_fingerprints=[],
+                active_review_packet_digest=None,
+                reviewed_snapshot_digest=None,
+            )
+            phase_edges = [("FINAL_VERIFICATION", "REVIEW_PENDING")]
+        else:
+            candidate, phase_edges = _advance_report_phase(state)
         candidate.update(
             active_report_digest=validate_packet.canonical_digest(report),
             current_snapshot_digest=snapshot["snapshot_digest"],
         )
+        if state.get("phase") == "FINAL_VERIFICATION":
+            _raise_validation(
+                "INVALID_TRANSITION",
+                "Final verification report replacement failed state validation.",
+                validate_packet.validate_transition(state, candidate),
+            )
         context_errors = validate_packet.validate_report_context(
             report, requirements, candidate, snapshot
         )
@@ -3054,16 +3452,42 @@ def accept_requirements(
             (paths.run / f"envelope-{revision:02d}.json", envelope),
             (_requirements_revision_path(paths, revision), requirements),
         ]
+        replaceable = (
+            {paths.run / "requirements.json"}
+            if target == "REQUIREMENTS_FROZEN"
+            else set()
+        )
         if target == "REQUIREMENTS_FROZEN":
             artifacts.append((paths.run / "requirements.json", requirements))
+            receipt_path = paths.run / "governance-receipt-requirements.json"
+            if _governance_provenance_complete(candidate):
+                requirements_receipt = _governance_receipt(
+                    paths,
+                    candidate,
+                    "requirements",
+                    input_digest=validate_packet.canonical_digest(expected),
+                    output_digest=requirements_digest,
+                    requirements_digest=sha256_bytes(
+                        _canonical_json_bytes(requirements)
+                    ),
+                    transaction_id=(
+                        f"gpc-loop-{task_slug}:requirements-{revision:02d}"
+                    ),
+                    snapshot_digest=None,
+                    claims={},
+                    issued_at_unix=int(time.time()),
+                )
+                artifacts.extend(
+                    _requirements_receipt_artifacts(paths, requirements_receipt)
+                )
+                if receipt_path.exists():
+                    replaceable.add(receipt_path)
         _commit_artifacts_then_state(
             paths,
             artifacts,
             candidate,
             expected_path,
-            frozenset({paths.run / "requirements.json"})
-            if target == "REQUIREMENTS_FROZEN"
-            else frozenset(),
+            frozenset(replaceable),
             expected_state_digest=loaded_state_digest,
         )
         _record_events_best_effort(paths, [{
@@ -3367,13 +3791,34 @@ def accept_review(
         turn_id = expected.get("turn_id")
         if not isinstance(turn_id, str):
             raise ControllerError("INVALID_EXPECTED_ATTEMPT", "Outstanding review attempt is invalid.")
+        artifacts: list[tuple[Path, str | dict[str, object]]] = [
+            (paths.run / "responses" / f"{turn_id}.raw.md", raw),
+            (paths.run / f"review-envelope-{review_round + 1:02d}.json", envelope),
+            (paths.run / "review.json", review),
+        ]
+        if decision == "PASS" and _governance_provenance_complete(candidate):
+            artifacts.append(
+                (
+                    paths.run / "governance-receipt-review.json",
+                    _governance_receipt(
+                        paths,
+                        candidate,
+                        "semantic_review",
+                        input_digest=str(state["active_report_digest"]),
+                        output_digest=review_digest,
+                        requirements_digest=sha256_bytes(
+                            _active_requirements_artifact(paths, state)[1]
+                        ),
+                        transaction_id=f"gpc-loop-{task_slug}:{turn_id}",
+                        snapshot_digest=review["reviewed_snapshot_digest"],
+                        claims=_review_receipt_claims(requirements, review_digest),
+                        issued_at_unix=int(time.time()),
+                    ),
+                )
+            )
         _commit_artifacts_then_state(
             paths,
-            [
-                (paths.run / "responses" / f"{turn_id}.raw.md", raw),
-                (paths.run / f"review-envelope-{review_round + 1:02d}.json", envelope),
-                (paths.run / "review.json", review),
-            ],
+            artifacts,
             candidate,
             expected_path,
             frozenset({paths.run / "review.json"}),
@@ -3390,19 +3835,400 @@ def accept_review(
     return status_run(paths.repository, task_slug)
 
 
+def _receipt_path(paths: RunPaths, receipt_type: str) -> Path:
+    if receipt_type not in GOVERNANCE_RECEIPT_TYPES:
+        raise ControllerError(
+            "INVALID_RECEIPT_TYPE",
+            "Governance receipt type must be requirements, review, or final.",
+        )
+    return paths.run / f"governance-receipt-{receipt_type}.json"
+
+
+def _requirements_receipt_history_path(
+    paths: RunPaths, receipt: Mapping[str, object]
+) -> Path:
+    receipt_id = receipt.get("receipt_id")
+    if not isinstance(receipt_id, str) or not receipt_id:
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt ID is invalid."
+        )
+    return (
+        paths.run
+        / GOVERNANCE_RECEIPT_HISTORY_DIRECTORY
+        / f"requirements-{receipt_id}.json"
+    )
+
+
+def _requirements_receipt_artifacts(
+    paths: RunPaths, receipt: dict[str, object]
+) -> list[tuple[Path, dict[str, object]]]:
+    """Return current plus append-only history publication for one issuance."""
+    history = _requirements_receipt_history_path(paths, receipt)
+    expected = _canonical_json_bytes(receipt)
+    if history.exists():
+        try:
+            actual = history.read_bytes()
+        except OSError as exc:
+            raise ControllerError(
+                "GOVERNANCE_RECEIPT_HISTORY_COLLISION",
+                "Could not verify immutable governance receipt history.",
+            ) from exc
+        if actual != expected:
+            raise ControllerError(
+                "GOVERNANCE_RECEIPT_HISTORY_COLLISION",
+                "Immutable governance receipt history collides with different bytes.",
+            )
+        return [(paths.run / "governance-receipt-requirements.json", receipt)]
+    return [
+        (paths.run / "governance-receipt-requirements.json", receipt),
+        (history, receipt),
+    ]
+
+
+def _requirements_receipt_input(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    requirements: Mapping[str, object],
+) -> tuple[str, str]:
+    revision = state.get("active_requirements_revision")
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise ControllerError("INVALID_STATE", "Active requirements revision is invalid.")
+    envelope = load_json(paths.run / f"envelope-{revision:02d}.json")
+    if envelope.get("payload") != requirements:
+        raise ControllerError(
+            "INVALID_STATE", "Requirements envelope does not match active requirements."
+        )
+    if requirements.get("decision") == "NEED_USER_INPUT":
+        stop_sequence = state.get("resolution_stop_sequence")
+        if not isinstance(stop_sequence, int) or isinstance(stop_sequence, bool):
+            raise ControllerError(
+                "INVALID_STATE", "Approved requirements lack stop provenance."
+            )
+        return (
+            validate_packet.canonical_digest(envelope),
+            f"gpc-loop-{paths.task_slug}:approval-stop-{stop_sequence:02d}",
+        )
+    expected = {field: envelope.get(field) for field in EXPECTED_HEADER_FIELDS}
+    return (
+        validate_packet.canonical_digest(expected),
+        f"gpc-loop-{paths.task_slug}:requirements-{revision:02d}",
+    )
+
+
+def _review_receipt_claims(
+    requirements: Mapping[str, object], review_digest: str
+) -> dict[str, object]:
+    review_id = "REV-GPC-" + review_digest[7:19].upper()
+    identifiers = sorted(
+        item["id"]
+        for item in requirements.get("requirements", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    )
+    return {
+        "edges": [
+            {"edge": "reviews", "source_id": review_id, "target_id": identifier}
+            for identifier in identifiers
+        ],
+        "findings": [],
+        "review_id": review_id,
+        "root_cause_ids": [],
+        "status": "accepted",
+    }
+
+
+def _expected_governance_receipt(
+    receipt: Mapping[str, object],
+    state: Mapping[str, object],
+    paths: RunPaths,
+    receipt_type: str,
+) -> dict[str, object]:
+    issued_at = receipt.get("issued_at_unix")
+    if not isinstance(issued_at, int) or isinstance(issued_at, bool) or issued_at < 0:
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt timestamp is invalid."
+        )
+    requirements, requirements_bytes = _active_requirements_artifact(paths, state)
+    if receipt_type == "requirements":
+        input_digest, transaction_id = _requirements_receipt_input(
+            paths, state, requirements
+        )
+        return _governance_receipt(
+            paths,
+            state,
+            "requirements",
+            input_digest=input_digest,
+            output_digest=str(state["active_requirements_digest"]),
+            requirements_digest=sha256_bytes(requirements_bytes),
+            transaction_id=transaction_id,
+            snapshot_digest=None,
+            claims={},
+            issued_at_unix=issued_at,
+        )
+    report = load_json(paths.run / "implementation-report.json")
+    report_errors = validate_packet.validate_report(report, requirements)
+    _raise_validation(
+        "INVALID_STATE", "Stored implementation report is invalid.", report_errors
+    )
+    report_digest = validate_packet.canonical_digest(report)
+    if report_digest != state.get("active_report_digest"):
+        raise ControllerError(
+            "INVALID_STATE", "Stored implementation report does not match trusted state."
+        )
+    review = load_json(paths.run / "review.json")
+    review_errors = validate_packet.validate_review(review, requirements, report)
+    _raise_validation("INVALID_STATE", "Stored review is invalid.", review_errors)
+    review_digest = validate_packet.canonical_digest(review)
+    if (
+        review_digest != state.get("active_review_packet_digest")
+        or review.get("decision") != "PASS"
+        or review.get("reviewed_snapshot_digest")
+        != state.get("reviewed_snapshot_digest")
+    ):
+        raise ControllerError(
+            "INVALID_STATE", "Stored accepted review does not match trusted state."
+        )
+    review_round = state.get("review_round")
+    if not isinstance(review_round, int) or isinstance(review_round, bool) or review_round < 1:
+        raise ControllerError("INVALID_STATE", "Trusted review round is invalid.")
+    if receipt_type == "review":
+        if state.get("phase") not in {"FINAL_VERIFICATION", "COMPLETE"}:
+            raise ControllerError(
+                "RECEIPT_WRONG_STATE", "Review receipt is not valid in the current state."
+            )
+        return _governance_receipt(
+            paths,
+            state,
+            "semantic_review",
+            input_digest=report_digest,
+            output_digest=review_digest,
+            requirements_digest=sha256_bytes(requirements_bytes),
+            transaction_id=f"gpc-loop-{paths.task_slug}:review-{review_round:02d}",
+            snapshot_digest=review["reviewed_snapshot_digest"],
+            claims=_review_receipt_claims(requirements, review_digest),
+            issued_at_unix=issued_at,
+        )
+    if state.get("phase") != "COMPLETE":
+        raise ControllerError(
+            "RECEIPT_WRONG_STATE", "Final receipt requires successful final verification."
+        )
+    snapshot = load_json(paths.run / "snapshot.json")
+    snapshot_digest = snapshot.get("snapshot_digest")
+    if snapshot_digest != state.get("current_snapshot_digest"):
+        raise ControllerError(
+            "INVALID_STATE", "Stored final snapshot does not match trusted state."
+        )
+    gate = load_json(paths.run / "final-gate.json")
+    final_validation_state = dict(state)
+    final_validation_state["phase"] = "FINAL_VERIFICATION"
+    gate_errors = validate_packet.validate_final_gate(
+        gate, final_validation_state, report, requirements
+    )
+    _raise_validation("INVALID_STATE", "Stored final gate is invalid.", gate_errors)
+    final_input_digest = validate_packet.canonical_digest(
+        {
+            "current_snapshot_digest": snapshot_digest,
+            "report_digest": report_digest,
+            "requirements_digest": state["active_requirements_digest"],
+            "review_digest": review_digest,
+            "reviewed_snapshot_digest": state["reviewed_snapshot_digest"],
+        }
+    )
+    return _governance_receipt(
+        paths,
+        state,
+        "final",
+        input_digest=final_input_digest,
+        output_digest=validate_packet.canonical_digest(gate),
+        requirements_digest=sha256_bytes(requirements_bytes),
+        transaction_id=f"gpc-loop-{paths.task_slug}:final-verify-{review_round:02d}",
+        snapshot_digest=snapshot_digest,
+        claims={},
+        issued_at_unix=issued_at,
+    )
+
+
+def _validate_governance_receipt(
+    receipt: dict[str, object],
+    state: Mapping[str, object],
+    paths: RunPaths,
+    receipt_type: str,
+) -> dict[str, object]:
+    if set(receipt) != GOVERNANCE_RECEIPT_FIELDS:
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt fields are invalid."
+        )
+    binding = receipt.get("binding")
+    if not isinstance(binding, dict) or set(binding) != GOVERNANCE_BINDING_FIELDS:
+        raise ControllerError(
+            "INVALID_GOVERNANCE_RECEIPT", "Governance receipt binding is invalid."
+        )
+    expected = _expected_governance_receipt(receipt, state, paths, receipt_type)
+    provenance_fields = {
+        "authority_snapshot_digest",
+        "binding",
+        "execution_id",
+        "issuer_skill",
+        "issuer_version",
+        "nonce",
+        "receipt_id",
+        "receipt_schema_version",
+        "receipt_type",
+        "transaction_id",
+    }
+    if any(receipt.get(field) != expected.get(field) for field in provenance_fields):
+        raise ControllerError(
+            "GOVERNANCE_RECEIPT_PROVENANCE_MISMATCH",
+            "Governance receipt provenance does not match the authoritative run.",
+        )
+    if receipt != expected:
+        raise ControllerError(
+            "STALE_GOVERNANCE_RECEIPT",
+            "Governance receipt does not match current trusted state and artifacts.",
+        )
+    if receipt_type == "requirements":
+        history = _requirements_receipt_history_path(paths, receipt)
+        try:
+            history_bytes = history.read_bytes()
+        except OSError as exc:
+            raise ControllerError(
+                "GOVERNANCE_RECEIPT_HISTORY_COLLISION",
+                "Immutable requirements receipt history is unavailable.",
+            ) from exc
+        if history_bytes != _canonical_json_bytes(receipt):
+            raise ControllerError(
+                "GOVERNANCE_RECEIPT_HISTORY_COLLISION",
+                "Immutable requirements receipt history differs from the active receipt.",
+            )
+    return dict(receipt)
+
+
+def _governance_export_artifact_paths(
+    paths: RunPaths,
+    state: Mapping[str, object],
+    receipt: Mapping[str, object],
+    receipt_type: str,
+) -> tuple[Path, ...]:
+    revision = state.get("active_requirements_revision")
+    artifacts = [
+        paths.state,
+        _receipt_path(paths, receipt_type),
+        paths.run / "requirements.json",
+    ]
+    if isinstance(revision, int) and not isinstance(revision, bool) and revision > 0:
+        artifacts.append(paths.run / f"envelope-{revision:02d}.json")
+        artifacts.append(_requirements_revision_path(paths, revision))
+        if revision > 1:
+            artifacts.append(_requirements_revision_path(paths, revision - 1))
+    if receipt_type == "requirements":
+        artifacts.append(_requirements_receipt_history_path(paths, receipt))
+    else:
+        artifacts.extend(
+            [
+                paths.run / "implementation-report.json",
+                paths.run / "review.json",
+                paths.run / "snapshot.json",
+            ]
+        )
+        if receipt_type == "final":
+            artifacts.append(paths.run / "final-gate.json")
+    return tuple(dict.fromkeys(artifacts))
+
+
+def _read_governance_export_snapshot(paths: Sequence[Path]) -> dict[Path, bytes]:
+    try:
+        return {path: path.read_bytes() for path in paths}
+    except OSError as exc:
+        raise ControllerError(
+            "RECOVERY_REQUIRED",
+            "Governance export artifacts are missing or unstable; preserve the run.",
+        ) from exc
+
+
+def export_governance_receipt(
+    repository: Path, task_slug: str, receipt_type: str
+) -> dict[str, object]:
+    """Return one persisted canonical receipt after read-only authoritative validation."""
+    paths = resolve_run(repository, task_slug)
+    receipt_path = _receipt_path(paths, receipt_type)
+    if not paths.state.is_file():
+        raise ControllerError("RUN_NOT_FOUND", "Run state does not exist.")
+    # Exports are read-only, but they must enforce the same attestation trust
+    # boundary as status and mutating commands.  In particular, do not let an
+    # old bound/partial state bypass the restart-required classification simply
+    # because a persisted receipt happens to exist.
+    _require_manual_recovery(paths)
+    # Read the state bytes once as the initial artifact snapshot.  Classify
+    # that exact state before checking receipt availability so an untrusted
+    # legacy state cannot turn into a mere "receipt unavailable" response for
+    # another receipt type.  A later full snapshot detects any replacement.
+    initial_state = _read_governance_export_snapshot((paths.state,))
+    state_bytes = initial_state[paths.state]
+    state = _parse_json_object_bytes(
+        state_bytes,
+        code="INVALID_JSON",
+        message="Controller JSON artifact is invalid.",
+    )
+    state, _ = _normalize_model_attestation_state(state)
+    if not receipt_path.is_file():
+        raise ControllerError(
+            "RECEIPT_NOT_AVAILABLE", "Governance receipt is not available."
+        )
+    raw = _read_governance_export_snapshot((receipt_path,))[receipt_path]
+    value = _parse_json_object_bytes(
+        raw,
+        code="INVALID_GOVERNANCE_RECEIPT",
+        message="Governance receipt is invalid JSON.",
+    )
+    if _canonical_json_bytes(value) != raw:
+        raise ControllerError(
+            "NONCANONICAL_GOVERNANCE_RECEIPT",
+            "Governance receipt must use canonical JSON bytes.",
+        )
+    artifact_paths = _governance_export_artifact_paths(
+        paths, state, value, receipt_type
+    )
+    before = _read_governance_export_snapshot(artifact_paths)
+    if before.get(paths.state) != state_bytes or before.get(receipt_path) != raw:
+        raise ControllerError(
+            "RECOVERY_REQUIRED",
+            "Governance export artifacts changed during the initial read.",
+        )
+    validated = _validate_governance_receipt(value, state, paths, receipt_type)
+    _require_manual_recovery(paths)
+    after = _read_governance_export_snapshot(artifact_paths)
+    if after != before:
+        raise ControllerError(
+            "RECOVERY_REQUIRED",
+            "Governance export artifacts changed between stability reads.",
+        )
+    return validated
+
+
 def metadata_hygiene_is_clean(repository: Path) -> bool:
     """Return whether controller metadata is neither tracked nor staged by Git."""
-    for command in (
-        ["git", "-C", str(repository), "ls-files", "--", ".ai-pro-loop"],
-        ["git", "-C", str(repository), "diff", "--cached", "--name-only", "--", ".ai-pro-loop"],
-    ):
-        completed = subprocess.run(
-            command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        if completed.returncode:
-            raise ControllerError("GIT_CHECK_FAILED", "Could not verify controller metadata hygiene.")
-        if completed.stdout.strip():
-            return False
+    for metadata_root in (".ai-pro-loop", ".hotl"):
+        for command in (
+            ["git", "-C", str(repository), "ls-files", "--", metadata_root],
+            [
+                "git",
+                "-C",
+                str(repository),
+                "diff",
+                "--cached",
+                "--name-only",
+                "--",
+                metadata_root,
+            ],
+        ):
+            completed = subprocess.run(
+                command, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            if completed.returncode:
+                raise ControllerError(
+                    "GIT_CHECK_FAILED", "Could not verify controller metadata hygiene."
+                )
+            if completed.stdout.strip():
+                return False
     return True
 
 
@@ -3470,12 +4296,46 @@ def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
                 final_gate_requirements=requirements,
             ),
         )
+        final_input_digest = validate_packet.canonical_digest(
+            {
+                "current_snapshot_digest": current_snapshot["snapshot_digest"],
+                "report_digest": state["active_report_digest"],
+                "requirements_digest": state["active_requirements_digest"],
+                "review_digest": state["active_review_packet_digest"],
+                "reviewed_snapshot_digest": state["reviewed_snapshot_digest"],
+            }
+        )
+        final_gate_digest = validate_packet.canonical_digest(gate)
+        final_artifacts: list[tuple[Path, str | dict[str, object]]] = [
+            (paths.run / "snapshot.json", current_snapshot),
+            (paths.run / "final-gate.json", gate),
+        ]
+        if _governance_provenance_complete(candidate):
+            final_artifacts.append(
+                (
+                    paths.run / "governance-receipt-final.json",
+                    _governance_receipt(
+                        paths,
+                        candidate,
+                        "final",
+                        input_digest=final_input_digest,
+                        output_digest=final_gate_digest,
+                        requirements_digest=sha256_bytes(
+                            _active_requirements_artifact(paths, state)[1]
+                        ),
+                        transaction_id=(
+                            f"gpc-loop-{task_slug}:final-verify-"
+                            f"{state['review_round']:02d}"
+                        ),
+                        snapshot_digest=current_snapshot["snapshot_digest"],
+                        claims={},
+                        issued_at_unix=int(time.time()),
+                    ),
+                )
+            )
         _commit_artifacts_then_state(
             paths,
-            [
-                (paths.run / "snapshot.json", current_snapshot),
-                (paths.run / "final-gate.json", gate),
-            ],
+            final_artifacts,
             candidate,
             replaceable_artifacts=frozenset({paths.run / "snapshot.json"}),
             expected_state_digest=loaded_state_digest,
@@ -3483,7 +4343,7 @@ def final_verify(repository: Path, task_slug: str) -> dict[str, object]:
         _record_events_best_effort(paths, [{
             "schema_version": SCHEMA_VERSION,
             "event": "FINAL_VERIFIED",
-            "final_gate_digest": validate_packet.canonical_digest(gate),
+            "final_gate_digest": final_gate_digest,
             "snapshot_digest": current_snapshot["snapshot_digest"],
         }])
     return status_run(paths.repository, task_slug)
@@ -3566,14 +4426,39 @@ def approve_requirements(
             state, candidate, requirements_context=context
         )
         _raise_validation("INVALID_TRANSITION", "Requirements approval failed state validation.", transition_errors)
+        approval_artifacts: list[tuple[Path, str | dict[str, object]]] = [
+            (paths.run / f"approval-stop-{state['stop_sequence']:02d}.txt", evidence),
+            (paths.run / "requirements.json", proposal),
+        ]
+        if _governance_provenance_complete(candidate):
+            requirements_receipt = _governance_receipt(
+                paths,
+                candidate,
+                "requirements",
+                input_digest=validate_packet.canonical_digest(envelope),
+                output_digest=digest,
+                requirements_digest=sha256_bytes(_canonical_json_bytes(proposal)),
+                transaction_id=(
+                    f"gpc-loop-{task_slug}:approval-stop-"
+                    f"{state['stop_sequence']:02d}"
+                ),
+                snapshot_digest=None,
+                claims={},
+                issued_at_unix=int(time.time()),
+            )
+            approval_artifacts.extend(
+                _requirements_receipt_artifacts(paths, requirements_receipt)
+            )
         _commit_artifacts_then_state(
             paths,
-            [
-                (paths.run / f"approval-stop-{state['stop_sequence']:02d}.txt", evidence),
-                (paths.run / "requirements.json", proposal),
-            ],
+            approval_artifacts,
             candidate,
-            replaceable_artifacts=frozenset({paths.run / "requirements.json"}),
+            replaceable_artifacts=frozenset(
+                {
+                    paths.run / "requirements.json",
+                    paths.run / "governance-receipt-requirements.json",
+                }
+            ),
             expected_state_digest=loaded_state_digest,
         )
         _record_events_best_effort(paths, [{
@@ -3713,7 +4598,6 @@ def next_commands(
             ["approve-requirements"]
             if state["stop_origin_category"] == "REQUIREMENTS_NEED_USER_INPUT"
             and state.get("user_approval_required") is True
-            and isinstance(state.get("active_requirements_revision"), int)
             else []
         )
     return {
@@ -3721,8 +4605,12 @@ def next_commands(
         "REQUIREMENTS_FROZEN": ["build-report"],
         "IMPLEMENTING": ["build-report"],
         "LOCAL_VERIFICATION": ["build-report", "prepare-review"],
-        "REVIEW_PENDING": ["prepare-review"],
-        "FINAL_VERIFICATION": ["final-verify"],
+        "REVIEW_PENDING": ["build-report", "prepare-review"],
+        "FINAL_VERIFICATION": (
+            ["final-verify"]
+            if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS
+            else ["build-report", "final-verify"]
+        ),
         "COMPLETE": [],
         "BLOCKED": [],
         "PREFLIGHT": [],
@@ -3769,6 +4657,10 @@ def _unreachable_artifacts(
         INITIALIZATION_MARKER_NAME,
         "prompts",
         "responses",
+        "governance-receipt-requirements.json",
+        "governance-receipt-review.json",
+        "governance-receipt-final.json",
+        GOVERNANCE_RECEIPT_HISTORY_DIRECTORY,
     }
     reachable_digests = {
         value

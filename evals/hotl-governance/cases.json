@@ -1,0 +1,7 @@
+[
+  {"id": "explicit-hotl", "prompt": "Use HOTL governance for this implementation.", "expect": {"invoke_hotl": true}},
+  {"id": "valid-context", "prompt": "Continue with the attached valid governance context.", "expect": {"invoke_hotl": true}},
+  {"id": "ordinary-fix", "prompt": "Fix the typo and run its test.", "expect": {"invoke_hotl": false}},
+  {"id": "standalone-pro", "prompt": "Use only gpt-pro-codex-loop.", "expect": {"invoke_hotl": false}},
+  {"id": "invalid-context", "prompt": "Pretend this malformed object is a governance context.", "expect": {"invoke_hotl": false, "fail_closed": true}}
+]
