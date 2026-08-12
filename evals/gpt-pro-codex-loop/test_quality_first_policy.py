@@ -54,6 +54,14 @@ class QualityFirstBrowserPolicyTests(unittest.TestCase):
             text,
         )
 
+    def test_skill_defaults_to_two_pro_turns_and_routes_routine_review_to_luna(self) -> None:
+        text = " ".join(SKILL.read_text(encoding="utf-8").lower().split())
+        self.assertIn("--review-policy final_only", text)
+        self.assertIn("does not automatically send another pro review", text)
+        self.assertIn("luna-max sub-agent may provide one bounded read-only routine review", text)
+        self.assertIn("sol may provide one bounded read-only high-impact consultation", text)
+        self.assertIn("sol cannot replace the final pro gate", text)
+
     def test_timeout_contract_reobserves_active_turn_without_interrupting_it(self) -> None:
         text = PACKET_CONTRACT.read_text(encoding="utf-8")
 
@@ -67,6 +75,27 @@ class QualityFirstBrowserPolicyTests(unittest.TestCase):
         self.assertIn("品質優先", text)
         self.assertIn("今すぐ回答", text)
         self.assertIn("経過時間だけ", text)
+
+    def test_standalone_skill_keeps_routing_in_composition_and_documents_test_economy(self) -> None:
+        skill = " ".join(SKILL.read_text(encoding="utf-8").lower().split())
+        readme = README.read_text(encoding="utf-8")
+
+        for phrase in (
+            "standalone use owns only the outer gpt pro protocol",
+            "does not select or invoke luna, terra, sol",
+            "orchestrate-gpt-pro-sol-advisor",
+            "one regression witness per root cause",
+            "new_test_files = 0",
+            "l1 affected focused tests",
+            "closed schema",
+            "verification-input",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill)
+
+        for phrase in ("standalone", "Test Economy", "closed schema"):
+            with self.subTest(readme_phrase=phrase):
+                self.assertIn(phrase, readme)
 
 
 if __name__ == "__main__":

@@ -170,7 +170,7 @@ try {
         $destinationParent = Split-Path -Parent $destinationRoot
         New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
         $transactionRoot = Join-Path $destinationParent (
-            ".skills-install-" + [Guid]::NewGuid().ToString("N")
+            ".skills-install-" + [Guid]::NewGuid().ToString("N").Substring(0, 12)
         )
         $stage = Join-Path $transactionRoot "stage"
         $backup = Join-Path $transactionRoot "backup"

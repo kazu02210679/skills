@@ -31,43 +31,58 @@ of the GPT Pro controller remains unchanged.
 `PRO_CLASS` はCodex内ブラウザのChatGPT画面で、契約プランが `Pro`・`Business`・`Enterprise` のいずれか、モデルが `GPT-5.6 Pro`、推論レベルが `Pro` であることを別々に確認します。`GPT-5.6 Sol` はCodex／Sol Advisor側のモデルであり、このGPT Pro経路では拒否します。`非常に高い`（`Extra High` / `Very High`）もPro推論ではないため拒否します。
 
 旧controllerのrunは、会話未固定でURL・モデル・推論・プランがすべてnullなら、coherentなv2（または旧形式の未束縛state）を次の通常遷移でv3/nullへ更新します。すでに会話固定済み、v2の一部だけが残るstate、またはモデル証明が部分的な旧stateは推測移行せず、`LEGACY_STATE_RESTART_REQUIRED` で停止します。requirements/review/finalのreceipt exportも同じ読み取り専用分類を適用します。旧runを保持したまま、新しいtask slugで再開始してください。
+In explicit composition mode, a Luna-Max sub-agent handles one bounded
+read-only routine review before the final Pro review. Sol is reserved for one
+bounded read-only high-impact consultation when escalation evidence warrants
+it; it never replaces the final Pro gate.
 
-Codex Desktop から、ChatGPT Pro に要件定義と反復的な意味レビューを担当させ、Codex がリポジトリ調査・詳細設計・実装・テスト・ローカル検証を担当する独立 Skill です。`codex-orchestration` には依存しません。
+このSkillは、Codex DesktopのBrowser経由でChatGPT Proに要件・Acceptance
+Criteria・semantic reviewを担当させ、Codexが実装とlocal verificationを担当する
+外側のプロトコルです。
 
-ユーザーが「ChatGPT Pro で要件を定義または固定し、Codex の実装を合格まで反復レビューする」組み合わせを明示的に依頼した場合だけ使います。要件相談だけ、単発レビュー、通常の実装では起動しません。
+## Proの使用量を抑える既定
 
-Codex Desktop の Browser、サインイン済みの ChatGPT Pro、同一会話の固定、厳格な JSON envelope、正規化 snapshot、ローカル検証が必要です。Pro の `PASS` だけでは完了しません。
+新規runは `FINAL_ONLY` が既定です。通常の1 runでProを使うのは、要件・計画の
+固定時と、Codexが実装・local verificationを終えた後の最終semantic reviewの
+2回だけです。最終reviewが `CHANGES_REQUESTED` または `BLOCK` になった場合は
+controllerが停止し、Proへの自動再レビューは行いません。
 
-## Pro応答の待機方針
+反復レビューが本当に必要で、Proの使用量を受け入れる場合だけ
+`--review-policy ITERATIVE` を明示します。通常のdiff review・テスト結果の確認・
+local verificationはCodexが担当し、明示的なcomposition modeではLuna-Max sub-agentを
+最終Pro review前のbounded read-only routine reviewに使います。Solは高影響な
+read-only consultationに限定し、完了判定
+やProの最終gateを代替しません。
 
-このSkillは品質優先です。Proが同じターンで正常に推論・生成中なら、経過時間だけを理由に `今すぐ回答`（`Answer now`）を押したり、生成停止・再生成・再送信・モデル切替を行ったりしません。Browser操作のタイムアウト時は同じ会話とターンを再確認し、完了または明示的な生成エラーまで待機します。
+## standaloneの責務
 
-`今すぐ回答` を使えるのは、現在のユーザーがそのターンについて推論の深さより速度を優先すると直接明示した場合だけです。許可は使用可能という意味であり、使用必須ではありません。締切、経過時間、関係者からの要望、Codex自身の判断をユーザー許可として推測しません。送信状態が曖昧、会話を再取得できない、または明示的な生成エラーがある場合は、推測で介入せず復旧・停止ルールに従います。
+GPT Pro単独で使う場合、このSkillはLuna・Terra・Solやnative worker roleを
+起動・選択しません。GPT ProとSol Advisorを明示的に組み合わせる場合だけ、
+`orchestrate-gpt-pro-sol-advisor`を追加で使います。単独Skillが別モデルの
+導入・実装・レビューまで引き受けることはありません。
 
-## 初期化
+## Test Economy
 
-既存ファイルがある通常のリポジトリでは、まず run state を作らずに対象パスを manifest へ出力します。manifest は対象リポジトリの外に置いてください。
+テストはcoverage最大化ではなく、Acceptance Criteriaを証明する最小のverification
+witnessを目標にします。
 
-```powershell
-python skills/gpt-pro-codex-loop/scripts/gpc_loop.py inspect-init --repo REPOSITORY --task TASK --write-approval-manifest ..\REPOSITORY-TASK-approved-existing-paths.json
-```
+- 新しいテストはAcceptance Criterion、material risk、bug root causeのいずれかに紐付ける。
+- `new_test_files = 0`をデフォルトにし、既存ファイルで表現できない理由がある場合だけ追加する。
+- bug fixはroot causeごとに原則1 regression witnessとし、同じ契約の入力はtable-drivenにまとめる。
+- privateな実装詳細ではなく、observable behaviorやpublic contractをテストする。
+- 検証はL0（diff/static）→L1（affected focused test）を基本とし、共有API・依存・schema等だけL2/L3へ上げる。
+- 成功済みのverificationは、commandだけでなくbase/tree・関連file・lock/config・必要な環境を含むfingerprintが同じ場合にだけ再実行を省略する。
 
-manifest の全パスを確認して明示的な承認を得た後、その同じ manifest を `init` に渡します。生成しただけでは承認になりません。
+`--local-evidence`はclosed schemaです。`test_commands`の各要素は
+`command`・`outcome`・`output_summary`だけを持ちます。exit code、test count、
+duration、test delta、verification fingerprintはunknown fieldとして追加せず、
+boundedな`output_summary`へcompact encodingします。
 
-```powershell
-python skills/gpt-pro-codex-loop/scripts/gpc_loop.py init --repo REPOSITORY --task TASK --request REQUEST.md --repository-context CONTEXT.md --model-policy PRO_CLASS --approved-existing-path-manifest ..\REPOSITORY-TASK-approved-existing-paths.json
-```
+## Quality-first Browser
 
-少数なら従来どおり `--approved-existing-path PATH` を繰り返せます。両方式の併用はエラーです。`init` はロック下で再検査するため、生成後にパス集合が変わった manifest、別リポジトリ・別タスク用、重複・絶対・親参照などを含む manifest は state 公開前に拒否されます。
+Browser上でProがreasoning中なら品質優先で同じturnを待ちます。`今すぐ回答`は
+現ユーザーがそのturnで速度を優先すると明示した場合だけ許可し、経過時間だけでは
+中断理由にしません。
 
-未承認パスのエラーは最大20件の preview、総数、省略数、集合 digest、manifest 生成と再実行に使える JSON argv を返します。数百件をエラー本文へ列挙しません。
-
-## 中断からの復旧
-
-`status` が `INIT_INCOMPLETE` と `init --retry-incomplete` を返した場合だけ、元の入力と承認をすべて付けて明示的に再実行できます。
-
-```powershell
-python skills/gpt-pro-codex-loop/scripts/gpc_loop.py init --repo REPOSITORY --task TASK --retry-incomplete --request REQUEST.md --repository-context CONTEXT.md --model-policy PRO_CLASS --approved-existing-path-manifest ..\REPOSITORY-TASK-approved-existing-paths.json
-```
-
-生きたロック、`state.json` がある run、壊れた state、想定外ファイル、リンク／reparse point、所有権が曖昧な状態は変更せず拒否します。確立済み run や orphan transaction の自動修復は行いません。真に存在しないタスクの `status` は従来どおり `RUN_NOT_FOUND` です。
+通常のcontroller手順とBrowser上のPro attestationは、[SKILL.md](SKILL.md)と
+`references/packet-contract.md`を参照してください。

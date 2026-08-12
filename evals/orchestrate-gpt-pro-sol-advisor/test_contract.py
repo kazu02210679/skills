@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import importlib.util
-from copy import deepcopy
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,81 +14,21 @@ SKILL_ROOT = ROOT / "skills" / "orchestrate-gpt-pro-sol-advisor"
 CASES = Path(__file__).with_name("cases.json")
 PRESSURE_RESULTS = Path(__file__).with_name("pressure-results.json")
 POLICY_PATH = Path(__file__).with_name("policy.py")
-
-DIGEST_ONE = "sha256:" + "1" * 64
-DIGEST_TWO = "sha256:" + "2" * 64
-DIGEST_THREE = "sha256:" + "3" * 64
-DIGEST_FOUR = "sha256:" + "4" * 64
-RECEIPT_FIELDS = {
-    "authority_snapshot_digest",
-    "execution_id",
-    "input_digest",
-    "invocation_id",
-    "issued_at_unix",
-    "issuer_skill",
-    "issuer_version",
-    "nonce",
-    "output_digest",
-    "receipt_id",
-    "receipt_schema_version",
-    "receipt_type",
-    "scenario_digest",
-}
-CONSULTATION_BINDING_FIELDS = {
-    "advice_admitted",
-    "advisor_invocation_succeeded",
-    "effort",
-    "model",
-    "permission_profile",
-    "role",
-    "runtime_attested",
-    "runtime_observation_trusted",
-    "sandbox",
-}
-PRE_TASK7_ROUTE_SHA256 = {
-    "advisor-invocation-failure-stops": "9f5086c2888fcbc6d833531f53e444e0762529b308445d1ed8224cebb1b61f34",
-    "advisor-requested-reentry-is-suppressed": "479bf85d3e4043225b95c60b30be2dece49017a6113492399b7a0e574b293c68",
-    "ambiguous-installation-does-not-compose": "0952c9dc8b835d42cdd7af14f9de32ae0ce13644eb143bb7d0c33972f1909a26",
-    "attestation-failure-emits-no-receipt": "dd70651953d29ae425c663665f2c9c57aec24370cf4a48fba50b850a6d77606f",
-    "attested-advice-emits-bound-receipt": "aee11d894191bcf4905358bde86c5f13db0a589e3238d2e7522929791c53d28b",
-    "authority-escalation-is-rejected": "abdd9d8f9841c90c601de1d18c6793d2b005c4d2b1b493ec5420a230e09bb687",
-    "conflicting-advice-is-rejected": "38d9febc2bf1d4c91521bd4b944e876dd1f821abcb94574c5ae0548182c7f2c0",
-    "explicit-combined-low-risk-skips-sol": "ab8182d5c8b1a090c949981d4a00082247ae1ddc74b08162476e5ce566358762",
-    "implementer-role-is-rejected": "5ba80eb0bb874387902ed25091b1b3b5b4c12533aa1d690bd01b9a6380851d4c",
-    "invocation-failure-emits-no-receipt": "9f5086c2888fcbc6d833531f53e444e0762529b308445d1ed8224cebb1b61f34",
-    "legacy-only-does-not-fallback": "93a6b58a6afbc2cfb4916f4b983e7182a7e154038e878b22c7d1bb1f352cf7de",
-    "legacy-reviewer-config-is-rejected": "4670e777eb7b2f933b2942308581858cca850886a4016d4df34ae764a5e71e90",
-    "low-risk-emits-no-consultation": "ab8182d5c8b1a090c949981d4a00082247ae1ddc74b08162476e5ce566358762",
-    "mandatory-final-sol-review-is-suppressed": "ab8182d5c8b1a090c949981d4a00082247ae1ddc74b08162476e5ce566358762",
-    "material-follow-up-is-bounded": "8366ab5a7fe58dfa7dc19940ed143b05e7365e5ec1121b475aa38684deda0571",
-    "missing-client-profile-is-rejected": "4a0ebfdd7ddc9842f1385e7e57231908388c439b32e8cda4c768ec7988e7ef62",
-    "missing-profile-key-is-rejected": "45d8c43236e7349c4cc57c12e90e3f0937acd0dfad47e30abfe9bcb644dcf2d3",
-    "missing-setup-stops-before-gpc": "1d27d4d0b7cf9223d1111486b8f597a3b6a46730584dfccab6e31a476bf1da06",
-    "nested-orchestration-is-rejected": "6d3ae0e935a6176898996e7e0c79fe33bd6a85569495dc72dd2032f9638eadf0",
-    "pro-correction-does-not-force-sol-loop": "c225a87c516a45d32c433a4792950d79d9185c7103ab62efe9ade4282b7078de",
-    "retained-implementer-config-is-rejected": "15b7aa3483f34fcb8e9d58b17f6d84ec098b80c132b6b1f745d127c1f904f3e0",
-    "runtime-attestation-unavailable": "ff81d63e3c59310a0f67829593a0eda9bd9648e4491e718124f19ca642c9fce2",
-    "runtime-effort-mismatch-is-rejected": "1aa1c86b23cad445ed6420ecd6eef522bc7c5b5dde2403a2b9f11f7c9a57cd21",
-    "runtime-model-mismatch-is-rejected": "72164b32fce49437a05436d06c30e77fae13d14166b1f01b9460bc6c0985d1c7",
-    "runtime-permission-blank-is-rejected": "2b28de7652b095a6ec65448177d9d14257915494c81a440a0ad455a39d873ec9",
-    "runtime-permission-missing-is-rejected": "dc186995b116ed23892d41a6e6262ff52c6c09772c1c3dc68ea319b3904a4519",
-    "runtime-role-mismatch-is-rejected": "ff3ee2078d70747972fdba3713650418403d709a359b58888507a7d79d592d43",
-    "runtime-writable-sandbox-is-rejected": "a4eca2d6f1b1ee374a38d4b8441c0584165ddb956e2705c1e0cb9339018c83ae",
-    "setup-change-requires-fresh-task": "7f6a88947cb5f0c309ed3075857cab3dd1ae49c280f01d70d3266fa55120d714",
-    "standalone-gpt-pro-remains-standalone": "09a224eb831fb2ddbcc1b9ef8904ea6ec60d4ad1b02e865ba88e65f203ca3034",
-    "standalone-sol-remains-standalone": "c570d052e99979d760de1698347601db203f3e962e71355fde7c350995506820",
-    "technical-question-selects-configured-advisor": "aee11d894191bcf4905358bde86c5f13db0a589e3238d2e7522929791c53d28b",
-    "unchanged-follow-up-is-suppressed": "4cf4f7bbf11923b178470e5a33da16b4ac679de585a88d01348ccda86dd9c3ae",
-    "wrong-client-profile-is-rejected": "4a0ebfdd7ddc9842f1385e7e57231908388c439b32e8cda4c768ec7988e7ef62",
-    "wrong-profile-key-is-rejected": "45d8c43236e7349c4cc57c12e90e3f0937acd0dfad47e30abfe9bcb644dcf2d3",
-    "wrong-workspace-profile-is-rejected": "82b26c14cd3b43d1dda67e7f0320352fb499c6153447a2b4f2594c253e36d917",
-}
+FINGERPRINT_PATH = ROOT / "scripts" / "verification_fingerprint.py"
 
 SPEC = importlib.util.spec_from_file_location("composition_policy", POLICY_PATH)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"Unable to load {POLICY_PATH}")
 POLICY = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(POLICY)
+
+FINGERPRINT_SPEC = importlib.util.spec_from_file_location(
+    "verification_fingerprint", FINGERPRINT_PATH
+)
+if FINGERPRINT_SPEC is None or FINGERPRINT_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load {FINGERPRINT_PATH}")
+FINGERPRINT = importlib.util.module_from_spec(FINGERPRINT_SPEC)
+FINGERPRINT_SPEC.loader.exec_module(FINGERPRINT)
 
 
 def valid_combined(**overrides: object) -> dict[str, object]:
@@ -112,52 +52,274 @@ def valid_combined(**overrides: object) -> dict[str, object]:
     return scenario
 
 
+def public_observations(**overrides: object) -> dict[str, object]:
+    observed: dict[str, object] = {
+        "role": "sol_advisor_advisor",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "sandbox": "read-only",
+        "permission_profile": "managed",
+    }
+    observed.update(overrides)
+    return observed
+
+
+def inspector_output(
+    thread_id: str = "11111111-1111-7111-8111-111111111111",
+    **overrides: object,
+) -> dict[str, object]:
+    output: dict[str, object] = {
+        "thread_id": thread_id,
+        "parent_thread_id": "00000000-0000-7000-8000-000000000000",
+        "agent_role": "sol_advisor_advisor",
+        "agent_path": "agents/sol_advisor_advisor.toml",
+        "model_provider": "openai",
+        "model": "gpt-5.6-sol",
+        "effort": "high",
+        "sandbox_policy_type": "read-only",
+        "permission_profile_type": "managed",
+        "cwd": "/repo/current",
+    }
+    output.update(overrides)
+    return output
+
+
+def installed_plugin_root(codex_home: str | None = None) -> Path:
+    return (
+        Path(codex_home or os.environ["CODEX_HOME"])
+        / "plugins"
+        / "cache"
+        / "sol-advisor"
+        / "sol-advisor"
+        / "0.5.0"
+    )
+
+
+def inspector_evidence(
+    thread_id: str = "11111111-1111-7111-8111-111111111111",
+    **overrides: object,
+) -> dict[str, object]:
+    plugin_root = installed_plugin_root()
+    evidence: dict[str, object] = {
+        "runtime_inspector_exit_code": 0,
+        "runtime_inspector_origin_skill_path": str(
+            plugin_root / "skills" / "orchestration" / "SKILL.md"
+        ),
+        "runtime_inspector_script_path": str(
+            plugin_root / "scripts" / "inspect-agent-runtime.sh"
+        ),
+        "runtime_inspector_output": inspector_output(thread_id),
+    }
+    evidence.update(overrides)
+    return evidence
+
+
+def trusted_catalog_context(**overrides: object) -> dict[str, object]:
+    context: dict[str, object] = {
+        "selected_sol_advisor_orchestration_skill_path": str(
+            installed_plugin_root() / "skills" / "orchestration" / "SKILL.md"
+        )
+    }
+    context.update(overrides)
+    return context
+
+
+def trusted_host_context(
+    thread_id: str = "11111111-1111-7111-8111-111111111111",
+    **overrides: object,
+) -> dict[str, object]:
+    context: dict[str, object] = {
+        "advisor_thread_id": thread_id,
+        "terminal_state": "completed",
+        "source": "native-result",
+    }
+    context.update(overrides)
+    return context
+
+
+def luna_runtime_context(**overrides: object) -> dict[str, object]:
+    runtime: dict[str, object] = {
+        "source": "native-capability-preflight",
+        "capabilities": [
+            "list_projects",
+            "create_thread",
+            "list_threads",
+            "wait_threads",
+            "read_thread",
+            "send_message_to_thread",
+        ],
+        "project_type": "git",
+        "workspace_mode": "worktree",
+        "project_id": "project-123",
+        "thread_id": "11111111-1111-7111-8111-111111111111",
+        "host_id": "host-123",
+        "identity_source": "native-create-thread",
+        "task_state": "created",
+        "requested_model": "gpt-5.6-luna",
+        "requested_thinking": "max",
+    }
+    runtime.update(overrides)
+    return runtime
+
+
+def terra_runtime_context(**overrides: object) -> dict[str, object]:
+    runtime: dict[str, object] = {
+        "source": "native-role-preflight",
+        "available_roles": ["sol_advisor_terra_implementer"],
+        "requested_role": "sol_advisor_terra_implementer",
+        "role": "sol_advisor_terra_implementer",
+        "model": "gpt-5.6-terra",
+        "effort": "high",
+        "project_id": "project-123",
+        "thread_id": "22222222-2222-7222-8222-222222222222",
+        "host_id": "host-123",
+        "identity_source": "native-role-spawn",
+        "task_state": "created",
+        "role_template_path": "roles/sol_advisor_terra_implementer.toml",
+        "role_template_status": "exact",
+        "role_template_digest": "sha256:" + "a" * 64,
+        "shipped_role_template_digest": "sha256:" + "a" * 64,
+    }
+    runtime.update(overrides)
+    return runtime
+
+
+def execution_context(
+    thread_id: str,
+    *,
+    outcome: str,
+    **overrides: object,
+) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "source": "native-task-result",
+        "project_id": "project-123",
+        "thread_id": thread_id,
+        "host_id": "host-123",
+        "outcome": outcome,
+    }
+    if outcome == "blocked":
+        evidence.update(
+            {
+                "high_impact_decision_pending": True,
+                "decision_key": "auth-boundary-invariant",
+            }
+        )
+    else:
+        evidence.update(
+            {
+                "root_cause_key": "auth-expiry",
+                "attempt_count": 2,
+                "correction_count": 1,
+                "same_root_cause": True,
+            }
+        )
+    evidence.update(overrides)
+    return evidence
+
+
+_RAW_ROUTE = POLICY.route
+_DEFAULT_TRUSTED_HOST = object()
+
+
+def _route_with_trusted_host(
+    scenario: dict[str, object],
+    *,
+    trusted_catalog: dict[str, object] | None = None,
+    trusted_host: dict[str, object] | None | object = _DEFAULT_TRUSTED_HOST,
+    trusted_luna_runtime: dict[str, object] | None = None,
+    trusted_terra_runtime: dict[str, object] | None = None,
+    trusted_luna_execution: dict[str, object] | None = None,
+    trusted_terra_execution: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if trusted_host is _DEFAULT_TRUSTED_HOST:
+        thread_id = scenario.get(
+            "advisor_thread_id", "11111111-1111-7111-8111-111111111111"
+        )
+        trusted_host = trusted_host_context(str(thread_id))
+    return _RAW_ROUTE(
+        scenario,
+        trusted_catalog=trusted_catalog,
+        trusted_host=trusted_host if isinstance(trusted_host, dict) else None,
+        trusted_luna_runtime=trusted_luna_runtime,
+        trusted_terra_runtime=trusted_terra_runtime,
+        trusted_luna_execution=trusted_luna_execution,
+        trusted_terra_execution=trusted_terra_execution,
+    )
+
+
+POLICY.route = _route_with_trusted_host
+
+
 def attested_combined(**overrides: object) -> dict[str, object]:
+    public = public_observations()
+    for field, legacy_key in POLICY.RUNTIME_FIELDS.items():
+        if legacy_key in overrides:
+            public[field] = overrides.pop(legacy_key)
     evidence: dict[str, object] = {
         "advisor_invocation_succeeded": True,
-        "runtime_observation_trusted": True,
-        "observed_advisor_role": "sol_advisor_advisor",
-        "observed_advisor_model": "gpt-5.6-sol",
-        "observed_advisor_effort": "high",
-        "observed_advisor_sandbox": "read-only",
-        "observed_permission_profile": "managed",
+        "advisor_thread_id": "11111111-1111-7111-8111-111111111111",
+        "public_runtime_thread_id": "11111111-1111-7111-8111-111111111111",
+        "public_runtime_observations": public,
     }
     evidence.update(overrides)
     return valid_combined(**evidence)
 
 
-def receipt_identity(**overrides: object) -> dict[str, object]:
-    identity: dict[str, object] = {
-        "execution_id": "EXEC-123456789ABC",
-        "invocation_id": "INV-1",
-        "input_digest": DIGEST_ONE,
-        "output_digest": DIGEST_TWO,
-        "authority_snapshot_digest": DIGEST_THREE,
-        "nonce": "a" * 32,
-    }
-    identity.update(overrides)
-    return identity
-
-
-def admitted_scenario(**overrides: object) -> dict[str, object]:
-    values: dict[str, object] = {
-        **receipt_identity(),
-        "codex_commitment_boundary": True,
-        "concrete_question": True,
-        "precise_question": "Does this boundary hold?",
-        "material_risk": True,
-        "decision_value": True,
-    }
-    values.update(overrides)
-    return attested_combined(**values)
-
-
 class CompositionContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.codex_home = tempfile.TemporaryDirectory()
+        plugin_root = installed_plugin_root(cls.codex_home.name)
+        skill = plugin_root / "skills" / "orchestration" / "SKILL.md"
+        script = plugin_root / "scripts" / "inspect-agent-runtime.sh"
+        skill.parent.mkdir(parents=True)
+        script.parent.mkdir(parents=True)
+        skill.write_text("# installed orchestration\n", encoding="utf-8")
+        script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        stale_root = plugin_root.parent / "0.4.0"
+        stale_skill = stale_root / "skills" / "orchestration" / "SKILL.md"
+        stale_script = stale_root / "scripts" / "inspect-agent-runtime.sh"
+        stale_skill.parent.mkdir(parents=True)
+        stale_script.parent.mkdir(parents=True)
+        stale_skill.write_text("# stale orchestration\n", encoding="utf-8")
+        stale_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        cls.stale_paths = (str(stale_skill), str(stale_script))
+        cls.lookalike_root = tempfile.TemporaryDirectory()
+        lookalike = Path(cls.lookalike_root.name)
+        fake_skill = lookalike / "skills" / "orchestration" / "SKILL.md"
+        fake_script = lookalike / "scripts" / "inspect-agent-runtime.sh"
+        fake_skill.parent.mkdir(parents=True)
+        fake_script.parent.mkdir(parents=True)
+        fake_skill.write_text("# repo lookalike\n", encoding="utf-8")
+        fake_script.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+        escaped_version = (
+            Path(cls.codex_home.name)
+            / "plugins"
+            / "cache"
+            / "sol-advisor"
+            / "sol-advisor"
+            / "0.6.0"
+        )
+        escaped_version.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            escaped_version.symlink_to(lookalike, target_is_directory=True)
+            cls.symlink_escape_paths = (
+                str(escaped_version / "skills" / "orchestration" / "SKILL.md"),
+                str(escaped_version / "scripts" / "inspect-agent-runtime.sh"),
+            )
+        except OSError:
+            cls.symlink_escape_paths = None
+        cls.env_patch = patch.dict(os.environ, {"CODEX_HOME": cls.codex_home.name})
+        cls.env_patch.start()
         cls.skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         cls.readme = (SKILL_ROOT / "README.md").read_text(encoding="utf-8")
         cls.cases = json.loads(CASES.read_text(encoding="utf-8"))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.env_patch.stop()
+        cls.codex_home.cleanup()
+        cls.lookalike_root.cleanup()
 
     def test_routes_only_explicit_combined_mode(self) -> None:
         for phrase in (
@@ -183,7 +345,8 @@ class CompositionContractTests(unittest.TestCase):
 
     def test_forbids_duplicate_review_recursion_and_silent_downgrade(self) -> None:
         for phrase in (
-            "do not make sol a mandatory pre-pro or final gate",
+            "sol is not a mandatory completion gate",
+            "cannot replace the final pro review",
             "reject nested",
             "sol-to-sol review",
             "fabricate a",
@@ -191,6 +354,304 @@ class CompositionContractTests(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, self.skill.lower())
+
+    def test_luna_first_routing_has_bounded_terra_and_sol_escalation(self) -> None:
+        skill_text = " ".join(self.skill.lower().split())
+        for phrase in (
+            "implementation_policy: luna_first",
+            "gpt-5.6-luna",
+            "thinking: max",
+            "gpt-5.6-terra",
+            "difficult scope",
+            "at most two coarse-grained",
+            "dependency-unavailable",
+            "sol never edits",
+            "outside the routing scenario",
+            "optional",
+            "role template",
+            "execution evidence",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, skill_text)
+
+        lane = SKILL_ROOT / "references" / "luna-implementation-lane.md"
+        self.assertTrue(lane.is_file())
+        lane_text = " ".join(lane.read_text(encoding="utf-8").lower().split())
+        for phrase in (
+            "clientthreadid",
+            "project_id",
+            "identity_source",
+            "task_state",
+            "requirements_digest",
+            "task_state",
+            "one precise correction to the same task",
+            "sol_advisor_terra_implementer",
+            "never silently fall back",
+        ):
+            with self.subTest(reference_phrase=phrase):
+                self.assertIn(phrase, lane_text)
+
+    def test_verification_economy_is_explicit(self) -> None:
+        economy = " ".join(
+            (SKILL_ROOT / "references" / "verification-economy.md")
+            .read_text(encoding="utf-8")
+            .lower()
+            .split()
+        )
+        for phrase in (
+            "new_test_files = 0",
+            "one regression witness per root cause",
+            "observable behavior",
+            "test_delta",
+            "primary_anchor",
+            "also_proves",
+            "existing acceptance",
+            "five cases",
+            "verification_fingerprint.py",
+            "verification_input",
+            "no external fingerprint argument",
+            "unknown siblings are rejected",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, economy)
+
+    def test_standalone_gpc_does_not_own_worker_routing(self) -> None:
+        gpc = " ".join(
+            (ROOT / "skills" / "gpt-pro-codex-loop" / "SKILL.md")
+            .read_text(encoding="utf-8")
+            .lower()
+            .split()
+        )
+        self.assertIn("standalone use owns only the outer gpt pro protocol", gpc)
+        self.assertIn("does not select or invoke luna, terra, sol", gpc)
+        self.assertIn("orchestrate-gpt-pro-sol-advisor", gpc)
+        self.assertNotIn("default implementation worker", gpc)
+        self.assertNotIn("sol_advisor_terra_implementer", gpc)
+
+    def test_verification_skip_requires_the_complete_input_fingerprint(self) -> None:
+        command = "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py"
+        trusted_fingerprint = FINGERPRINT.compute_fingerprint(ROOT, command=command)
+        self.assertEqual(
+            {"action": "skip", "reason": "unchanged-successful-input"},
+            POLICY.verification_reuse_decision(
+                ROOT,
+                command,
+                {
+                    "outcome": "PASS",
+                    "command": command,
+                    "verification_input_fingerprint": trusted_fingerprint,
+                },
+            ),
+        )
+        for previous in (
+            {
+                "outcome": "FAIL",
+                "command": command,
+                "verification_input_fingerprint": trusted_fingerprint,
+            },
+            {
+                "outcome": "PASS",
+                "command": command,
+                "verification_input_fingerprint": "sha256:" + "b" * 64,
+            },
+            {
+                "outcome": "PASS",
+                "command": command + " --other",
+                "verification_input_fingerprint": trusted_fingerprint,
+            },
+        ):
+            with self.subTest(previous=previous):
+                self.assertEqual(
+                    {"action": "run", "reason": "verification-input-changed"},
+                    POLICY.verification_reuse_decision(
+                        ROOT,
+                        command,
+                        previous,
+                    ),
+                )
+
+        self.assertEqual(
+            {"action": "run", "reason": "verification-input-changed"},
+            POLICY.verification_reuse_decision(
+                ROOT,
+                command,
+                {
+                    "outcome": "PASS",
+                    "command": command,
+                    "verification_input_fingerprint": "sha256:" + "a" * 64,
+                },
+            ),
+        )
+
+    def test_worker_runtime_evidence_must_be_external_and_identity_bound(self) -> None:
+        self_claim = POLICY.route(
+            valid_combined(
+                implementation_request=True,
+                luna_runtime_preflight=luna_runtime_context(),
+            )
+        )
+        self.assertEqual("luna-capability-preflight-failed", self_claim["terminal"])
+
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(),
+        )
+        self.assertEqual("luna-implementation", accepted["terminal"])
+        self.assertEqual("project-123", accepted["implementation_preflight"]["luna"]["project_id"])
+        self.assertEqual("host-123", accepted["implementation_preflight"]["luna"]["host_id"])
+        self.assertEqual(
+            "11111111-1111-7111-8111-111111111111",
+            accepted["implementation_preflight"]["luna"]["thread_id"],
+        )
+
+    def test_luna_model_observation_is_optional_but_mismatch_is_rejected(self) -> None:
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(),
+        )
+        self.assertTrue(accepted["implementation_available"])
+
+        mismatched = POLICY.route(
+            valid_combined(implementation_request=True),
+            trusted_luna_runtime=luna_runtime_context(
+                observed_model="gpt-5.6-terra",
+                observed_thinking="max",
+            ),
+        )
+        self.assertEqual("luna-capability-preflight-failed", mismatched["terminal"])
+
+    def test_luna_escalation_requires_separate_execution_evidence(self) -> None:
+        scenario = valid_combined(
+            implementation_request=True,
+            luna_same_root_cause_failed=True,
+        )
+        missing_execution = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("luna-execution-evidence-failed", missing_execution["terminal"])
+
+        escalated = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_luna_execution=execution_context(
+                "11111111-1111-7111-8111-111111111111", outcome="failed"
+            ),
+        )
+        self.assertEqual("terra-implementation", escalated["terminal"])
+
+        over_budget = POLICY.route(
+            scenario,
+            trusted_luna_runtime=luna_runtime_context(),
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_luna_execution=execution_context(
+                "11111111-1111-7111-8111-111111111111",
+                outcome="failed",
+                attempt_count=3,
+                correction_count=2,
+            ),
+        )
+        self.assertEqual("luna-execution-evidence-failed", over_budget["terminal"])
+
+    def test_terra_requires_exact_shipped_role_template_provenance(self) -> None:
+        missing_template = POLICY.route(
+            valid_combined(implementation_request=True, difficult_scope=True),
+            trusted_terra_runtime=terra_runtime_context(
+                role_template_status="stale"
+            ),
+        )
+        self.assertEqual("terra-capability-preflight-failed", missing_template["terminal"])
+
+        accepted = POLICY.route(
+            valid_combined(implementation_request=True, difficult_scope=True),
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("terra-implementation", accepted["terminal"])
+
+    def test_terra_to_sol_escalation_requires_blocked_execution_evidence(self) -> None:
+        scenario = attested_combined(
+            implementation_request=True,
+            terra_blocked=True,
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Which safety invariant must Terra preserve?",
+            material_risk=True,
+            decision_value=True,
+        )
+        missing_execution = POLICY.route(
+            scenario,
+            trusted_terra_runtime=terra_runtime_context(),
+        )
+        self.assertEqual("terra-execution-evidence-failed", missing_execution["terminal"])
+
+        admitted = POLICY.route(
+            scenario,
+            trusted_terra_runtime=terra_runtime_context(),
+            trusted_terra_execution=execution_context(
+                "22222222-2222-7222-8222-222222222222", outcome="blocked"
+            ),
+        )
+        self.assertEqual("primary-disposition", admitted["terminal"])
+        self.assertEqual(1, admitted["sol_calls"])
+
+    def test_test_witnesses_have_one_primary_anchor_and_bounded_growth(self) -> None:
+        self.assertEqual(
+            {"action": "allow-minimal-witness", "reason": "anchored-witness"},
+            POLICY.test_witness_decision(
+                [
+                    {
+                        "primary_anchor": "AC-3",
+                        "also_proves": ["RISK-1", "BUG-auth-expiry"],
+                        "case_count": 2,
+                    }
+                ],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unbounded-anchor-growth"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-3", "also_proves": [], "case_count": 20}],
+                {"AC-3"},
+                set(),
+                set(),
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "duplicate-primary-anchor"},
+            POLICY.test_witness_decision(
+                [
+                    {"primary_anchor": "AC-3", "also_proves": [], "case_count": 1},
+                    {"primary_anchor": "AC-3", "also_proves": [], "case_count": 1},
+                ],
+                {"AC-3"},
+                set(),
+                set(),
+            ),
+        )
+
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unknown-primary-anchor"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "BANANA-123", "also_proves": [], "case_count": 1}],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
+            ),
+        )
+        self.assertEqual(
+            {"action": "reject-test-addition", "reason": "unknown-secondary-anchor"},
+            POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-3", "also_proves": ["BANANA-123"], "case_count": 1}],
+                {"AC-3"},
+                {"RISK-1"},
+                {"BUG-auth-expiry"},
+            ),
+        )
 
     def test_combined_mode_does_not_invoke_sol_orchestration(self) -> None:
         lower = self.skill.lower()
@@ -341,9 +802,7 @@ class CompositionContractTests(unittest.TestCase):
     def test_canonicalization_exception_fails_closed(self) -> None:
         workspace = r"C:\repo\current"
         with patch.object(
-            POLICY.RECEIPT_ISSUER.os.path,
-            "normpath",
-            side_effect=ValueError("invalid path"),
+            POLICY.os.path, "normpath", side_effect=ValueError("invalid path")
         ):
             result = POLICY.route(
                 valid_combined(
@@ -448,7 +907,8 @@ class CompositionContractTests(unittest.TestCase):
     def test_runtime_attestation_is_required_before_advice_disposition(self) -> None:
         base = valid_combined(
             advisor_invocation_succeeded=True,
-            runtime_observation_trusted=True,
+            advisor_thread_id="11111111-1111-7111-8111-111111111111",
+            public_runtime_thread_id="11111111-1111-7111-8111-111111111111",
             codex_commitment_boundary=True,
             concrete_question=True,
             precise_question="Does this auth boundary preserve tenant isolation?",
@@ -456,7 +916,9 @@ class CompositionContractTests(unittest.TestCase):
             decision_value=True,
         )
         unavailable = POLICY.route(base)
-        self.assertEqual("advisor-attestation-unavailable", unavailable["terminal"])
+        self.assertEqual(
+            "advisor-attestation-provenance-invalid", unavailable["terminal"]
+        )
         self.assertEqual(1, unavailable["sol_calls"])
         self.assertFalse(unavailable["advice_accepted"])
 
@@ -492,7 +954,13 @@ class CompositionContractTests(unittest.TestCase):
         }
         for field, evidence in mismatches.items():
             with self.subTest(field=field):
-                result = POLICY.route({**base, **evidence})
+                public = {
+                    name: evidence[key]
+                    for name, key in POLICY.RUNTIME_FIELDS.items()
+                }
+                result = POLICY.route(
+                    {**base, "public_runtime_observations": public}
+                )
                 self.assertEqual("advisor-attestation-mismatch", result["terminal"])
                 self.assertEqual(field, result["attestation_failure"])
                 self.assertFalse(result["advice_accepted"])
@@ -505,16 +973,31 @@ class CompositionContractTests(unittest.TestCase):
             material_risk=True,
             decision_value=True,
         )
-        for key in POLICY.RUNTIME_FIELDS.values():
-            with self.subTest(missing=key):
-                result = POLICY.route({**base, key: None})
-                self.assertEqual("advisor-attestation-unavailable", result["terminal"])
+        for field in POLICY.RUNTIME_FIELDS:
+            with self.subTest(missing=field):
+                public = dict(base["public_runtime_observations"])
+                public.pop(field)
+                result = POLICY.route(
+                    {**base, "public_runtime_observations": public}
+                )
+                expected = (
+                    "advisor-attestation-provenance-invalid"
+                    if field == "role"
+                    else "advisor-attestation-inspector-unavailable"
+                )
+                self.assertEqual(expected, result["terminal"])
                 self.assertTrue(result["advice_discarded"])
                 self.assertEqual(0, result["downstream_advice_propagations"])
                 self.assertEqual(0, result["fallback_calls"])
 
-        malformed = POLICY.route({**base, "observed_advisor_model": ["gpt-5.6-sol"]})
-        self.assertEqual("advisor-attestation-unavailable", malformed["terminal"])
+        malformed_public = dict(base["public_runtime_observations"])
+        malformed_public["model"] = ["gpt-5.6-sol"]
+        malformed = POLICY.route(
+            {**base, "public_runtime_observations": malformed_public}
+        )
+        self.assertEqual(
+            "advisor-attestation-provenance-invalid", malformed["terminal"]
+        )
 
     def test_advisor_invocation_failure_discards_advice_without_fallback(self) -> None:
         base = attested_combined(
@@ -537,25 +1020,386 @@ class CompositionContractTests(unittest.TestCase):
                 self.assertEqual(0, result["downstream_advice_propagations"])
                 self.assertEqual(0, result["fallback_calls"])
 
-    def test_runtime_observation_provenance_must_be_trusted(self) -> None:
-        base = attested_combined(
+    def test_caller_boolean_cannot_promote_or_veto_runtime_provenance(self) -> None:
+        public = attested_combined(
             codex_commitment_boundary=True,
             concrete_question=True,
-            precise_question="Can matching self-claims be trusted?",
+            precise_question="Can a caller Boolean decide provenance?",
             material_risk=True,
             decision_value=True,
-            advice_body="I promise these fields came from the runtime.",
         )
-        for trusted in (None, False, "true"):
-            with self.subTest(trusted=trusted):
+        for claimed in (None, False, True, "true"):
+            with self.subTest(claimed=claimed):
+                result = POLICY.route({**public, "runtime_observation_trusted": claimed})
+                self.assertEqual("primary-disposition", result["terminal"])
+                self.assertEqual(1, result["advice_admitted"])
+
+    def test_runtime_attestation_prefers_public_native_details(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        public = {
+            "role": "sol_advisor_advisor",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "sandbox": "read-only",
+            "permission_profile": "managed",
+        }
+        result = POLICY.route(
+            valid_combined(
+                advisor_invocation_succeeded=True,
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                public_runtime_observations=public,
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Do public native details prove the runtime route?",
+                material_risk=True,
+                decision_value=True,
+            )
+        )
+        self.assertEqual("primary-disposition", result["terminal"])
+        self.assertEqual(thread_id, result["advisor_thread_id"])
+        self.assertEqual(thread_id, result.get("public_runtime_thread_id"))
+        self.assertEqual(public, result["runtime_observations"])
+        self.assertEqual(
+            {field: "public-native-details" for field in POLICY.RUNTIME_FIELDS},
+            result["runtime_observation_sources"],
+        )
+
+    def test_public_details_are_bound_to_the_spawned_advisor_thread(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        base = attested_combined(
+            advisor_thread_id=thread_id,
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Are these public details from the spawned advisor?",
+            material_risk=True,
+            decision_value=True,
+        )
+        for public_thread_id in (
+            None,
+            "22222222-2222-7222-8222-222222222222",
+            "not-a-thread-id",
+        ):
+            with self.subTest(public_thread_id=public_thread_id):
                 result = POLICY.route(
-                    {**base, "runtime_observation_trusted": trusted}
+                    {**base, "public_runtime_thread_id": public_thread_id}
                 )
-                self.assertEqual("advisor-attestation-untrusted", result["terminal"])
-                self.assertTrue(result["advice_discarded"])
+                self.assertEqual(
+                    "advisor-attestation-thread-mismatch", result["terminal"]
+                )
                 self.assertEqual(0, result["advice_admitted"])
-                self.assertEqual(0, result["downstream_advice_propagations"])
-                self.assertEqual(0, result["fallback_calls"])
+                self.assertTrue(result["advice_discarded"])
+
+    def test_inspector_path_is_derived_from_the_installed_orchestration_skill(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        lookalike = Path(self.lookalike_root.name)
+        paths = (
+            (
+                "/plugins/sol-advisor/0.5.0/skills/orchestration/SKILL.md",
+                "/repo/scripts/inspect-agent-runtime.sh",
+            ),
+            (
+                str(lookalike / "skills" / "orchestration" / "SKILL.md"),
+                str(lookalike / "scripts" / "inspect-agent-runtime.sh"),
+            ),
+            (
+                "/plugins/ghost/9.9.9/skills/orchestration/SKILL.md",
+                "/plugins/ghost/9.9.9/scripts/inspect-agent-runtime.sh",
+            ),
+        )
+        for skill_path, script_path in paths:
+            with self.subTest(skill_path=skill_path, script_path=script_path):
+                result = POLICY.route(
+                    attested_combined(
+                        public_runtime_observations={"role": "sol_advisor_advisor"},
+                        advisor_thread_id=thread_id,
+                        public_runtime_thread_id=thread_id,
+                        runtime_inspector_exit_code=0,
+                        runtime_inspector_origin_skill_path=skill_path,
+                        runtime_inspector_script_path=script_path,
+                        runtime_inspector_output=inspector_output(thread_id),
+                        codex_commitment_boundary=True,
+                        concrete_question=True,
+                        precise_question="Is this the installed package inspector?",
+                        material_risk=True,
+                        decision_value=True,
+                    ),
+                    trusted_catalog=trusted_catalog_context(),
+                )
+                self.assertEqual(
+                    "advisor-attestation-inspector-unavailable", result["terminal"]
+                )
+                self.assertEqual(0, result["advice_admitted"])
+
+    def test_catalog_symlink_cannot_escape_to_a_repo_lookalike(self) -> None:
+        if self.symlink_escape_paths is None:
+            self.skipTest("file symlinks are unavailable on this Windows host")
+        skill_path, script_path = self.symlink_escape_paths
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        result = POLICY.route(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                runtime_inspector_exit_code=0,
+                runtime_inspector_origin_skill_path=skill_path,
+                runtime_inspector_script_path=script_path,
+                runtime_inspector_output=inspector_output(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can a catalog symlink escape its plugin root?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("advisor-attestation-inspector-unavailable", result["terminal"])
+        self.assertEqual(0, result["advice_admitted"])
+
+    def test_stale_cached_version_cannot_replace_catalog_selected_skill(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        stale_skill, stale_script = self.stale_paths
+        result = POLICY.route(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                **inspector_evidence(
+                    thread_id,
+                    runtime_inspector_origin_skill_path=stale_skill,
+                    runtime_inspector_script_path=stale_script,
+                ),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can a stale cached version replace the selected Skill?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("advisor-attestation-inspector-unavailable", result["terminal"])
+        self.assertEqual(0, result["advice_admitted"])
+
+    def test_paired_scenario_override_cannot_replace_trusted_catalog_identity(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        lookalike = Path(self.lookalike_root.name)
+        fake_skill = str(lookalike / "skills" / "orchestration" / "SKILL.md")
+        fake_script = str(lookalike / "scripts" / "inspect-agent-runtime.sh")
+        result = POLICY.route(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                catalog_selected_sol_advisor_orchestration_skill_path=fake_skill,
+                runtime_inspector_exit_code=0,
+                runtime_inspector_origin_skill_path=fake_skill,
+                runtime_inspector_script_path=fake_script,
+                runtime_inspector_output=inspector_output(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can paired scenario values override the catalog?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("advisor-attestation-inspector-unavailable", result["terminal"])
+        self.assertEqual(0, result["advice_admitted"])
+
+    def test_inspector_success_is_derived_from_exit_zero_and_exact_json(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        result = POLICY.route(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                **inspector_evidence(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Did the official inspector complete?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("primary-disposition", result["terminal"])
+        self.assertEqual(1, result["advice_admitted"])
+        self.assertEqual(1, result["runtime_inspector"]["rollout_count"])
+        self.assertEqual(
+            "success", result["runtime_inspector"]["inspection_status"]
+        )
+        self.assertNotIn("status", result["runtime_inspector"])
+        self.assertEqual(
+            {
+                "thread_id": thread_id,
+                "terminal_state": "completed",
+                "source": "native-result",
+            },
+            result["advisor_completion"],
+        )
+
+    def test_inspector_exit_zero_does_not_prove_advisor_completion(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        result = _RAW_ROUTE(
+            attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                **inspector_evidence(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Did the advisor itself reach a terminal state?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("advisor-completion-unavailable", result["terminal"])
+        self.assertEqual(0, result["advice_admitted"])
+        self.assertTrue(result["advice_discarded"])
+
+    def test_completion_must_be_host_confirmed_for_the_same_thread(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        scenario = attested_combined(
+            advisor_thread_id=thread_id,
+            public_runtime_thread_id=thread_id,
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Is completion proven by the host for this thread?",
+            material_risk=True,
+            decision_value=True,
+        )
+        invalid = (
+            None,
+            True,
+            trusted_host_context(
+                "22222222-2222-7222-8222-222222222222"
+            ),
+            trusted_host_context(thread_id, terminal_state="running"),
+            trusted_host_context(thread_id, source="local-runtime-inspector"),
+        )
+        for trusted_host in invalid:
+            with self.subTest(trusted_host=trusted_host):
+                result = _RAW_ROUTE(scenario, trusted_host=trusted_host)
+                self.assertEqual("advisor-completion-unavailable", result["terminal"])
+                self.assertEqual(0, result["advice_admitted"])
+                self.assertTrue(result["advice_discarded"])
+
+    def test_runtime_attestation_uses_same_thread_inspector_only_for_omissions(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        inspector = {
+            "role": "sol_advisor_advisor",
+            "model": "gpt-5.6-sol",
+            "effort": "high",
+            "sandbox": "read-only",
+            "permission_profile": "managed",
+        }
+        result = POLICY.route(
+            valid_combined(
+                advisor_invocation_succeeded=True,
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id=thread_id,
+                public_runtime_thread_id=thread_id,
+                **inspector_evidence(thread_id),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can omitted native details be filled safely?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("primary-disposition", result["terminal"])
+        self.assertEqual(inspector, result["runtime_observations"])
+        self.assertEqual("public-native-details", result["runtime_observation_sources"]["role"])
+        for field in ("model", "effort", "sandbox", "permission_profile"):
+            with self.subTest(field=field):
+                self.assertEqual(
+                    "local-runtime-inspector",
+                    result["runtime_observation_sources"][field],
+                )
+
+    def test_inspector_requires_official_path_exit_zero_and_exact_result(self) -> None:
+        thread_id = "11111111-1111-7111-8111-111111111111"
+        complete = {
+            "advisor_thread_id": thread_id,
+            "public_runtime_thread_id": thread_id,
+            **inspector_evidence(thread_id),
+        }
+        base = attested_combined(
+            public_runtime_observations={"role": "sol_advisor_advisor"},
+            codex_commitment_boundary=True,
+            concrete_question=True,
+            precise_question="Is the local inspector result admissible?",
+            material_risk=True,
+            decision_value=True,
+        )
+        invalid = (
+            ("runtime_inspector_exit_code", None),
+            ("runtime_inspector_exit_code", 1),
+            ("runtime_inspector_exit_code", True),
+            ("runtime_inspector_origin_skill_path", None),
+            ("runtime_inspector_script_path", None),
+            ("runtime_inspector_script_path", "/repo/scripts/inspect-agent-runtime.sh"),
+            (
+                "runtime_inspector_output",
+                {key: value for key, value in inspector_output().items() if key != "cwd"},
+            ),
+            (
+                "runtime_inspector_output",
+                {**inspector_output(), "advice_body": "not allowlisted"},
+            ),
+        )
+        for field, value in invalid:
+            with self.subTest(field=field, value=value):
+                evidence = {**complete, field: value}
+                result = POLICY.route(
+                    {**base, **evidence},
+                    trusted_catalog=trusted_catalog_context(),
+                )
+                self.assertEqual(
+                    "advisor-attestation-inspector-unavailable", result["terminal"]
+                )
+                self.assertEqual(0, result["advice_admitted"])
+                self.assertTrue(result["advice_discarded"])
+
+    def test_self_claims_and_failed_inspector_cannot_satisfy_provenance(self) -> None:
+        gate = {
+            "codex_commitment_boundary": True,
+            "concrete_question": True,
+            "precise_question": "Can useful advice bypass runtime provenance?",
+            "material_risk": True,
+            "decision_value": True,
+        }
+        self_claim = POLICY.route(
+            valid_combined(
+                **gate,
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
+            )
+        )
+        self.assertEqual("advisor-attestation-provenance-invalid", self_claim["terminal"])
+        self.assertEqual(0, self_claim["advice_admitted"])
+        self.assertTrue(self_claim["advice_discarded"])
+
+        failed_inspector = POLICY.route(
+            attested_combined(
+                **gate,
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                runtime_inspector_exit_code=1,
+                advisor_thread_id="11111111-1111-7111-8111-111111111111",
+            )
+        )
+        self.assertEqual(
+            "advisor-attestation-inspector-unavailable",
+            failed_inspector["terminal"],
+        )
+        self.assertEqual(0, failed_inspector["advice_admitted"])
+        self.assertTrue(failed_inspector["advice_discarded"])
 
     def test_permission_profile_is_observed_but_not_a_saved_preference(self) -> None:
         for permission in (
@@ -593,9 +1437,16 @@ class CompositionContractTests(unittest.TestCase):
         for permission in (None, "", "   "):
             with self.subTest(permission=permission):
                 result = POLICY.route(
-                    {**base, "observed_permission_profile": permission}
+                    {
+                        **base,
+                        "public_runtime_observations": public_observations(
+                            permission_profile=permission
+                        ),
+                    }
                 )
-                self.assertEqual("advisor-attestation-unavailable", result["terminal"])
+                self.assertEqual(
+                    "advisor-attestation-provenance-invalid", result["terminal"]
+                )
                 self.assertTrue(result["advice_discarded"])
 
         for sandbox in (
@@ -607,9 +1458,16 @@ class CompositionContractTests(unittest.TestCase):
             "workspace-write",
         ):
             with self.subTest(sandbox=sandbox):
-                result = POLICY.route({**base, "observed_advisor_sandbox": sandbox})
+                result = POLICY.route(
+                    {
+                        **base,
+                        "public_runtime_observations": public_observations(
+                            sandbox=sandbox
+                        ),
+                    }
+                )
                 expected = (
-                    "advisor-attestation-unavailable"
+                    "advisor-attestation-provenance-invalid"
                     if sandbox in (None, "")
                     else "advisor-attestation-mismatch"
                 )
@@ -679,6 +1537,69 @@ class CompositionContractTests(unittest.TestCase):
         self.assertEqual("sol_advisor_advisor", result["selected_lane"])
         self.assertEqual(1, result["sol_calls"])
 
+    def test_routine_review_uses_luna_max_before_final_pro_review(self) -> None:
+        result = POLICY.route(
+            attested_combined(
+                routine_review=True,
+                routine_review_evidence=["focused tests pass", "diff scope is bounded"],
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does this focused diff preserve the acceptance criteria?",
+                decision_value=True,
+                material_risk=False,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+            trusted_luna_runtime=luna_runtime_context(),
+        )
+        self.assertEqual("combined", result["selected_mode"])
+        self.assertEqual("luna", result["selected_lane"])
+        self.assertEqual("gpt-5.6-luna", result["review_model"])
+        self.assertEqual("max", result["review_thinking"])
+        self.assertTrue(result["review_as_subagent"])
+        self.assertEqual(1, result["review_calls"])
+        self.assertEqual(0, result["sol_calls"])
+        self.assertTrue(result["routine_review"])
+        self.assertTrue(result["routine_review_read_only"])
+        self.assertEqual("FINAL_ONLY", result["pro_review_policy"])
+        self.assertTrue(result["pro_review_retained"])
+        self.assertEqual("routine-luna-review-then-pro", result["terminal"])
+
+    def test_routine_luna_review_cannot_be_reentered(self) -> None:
+        result = POLICY.route(
+            attested_combined(
+                routine_review=True,
+                prior_routine_review_calls=1,
+                routine_review_evidence=["focused tests pass"],
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Should the routine review run again?",
+                decision_value=True,
+                material_risk=False,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual(0, result["review_calls"])
+        self.assertEqual(0, result["sol_calls"])
+        self.assertTrue(result["review_discarded"])
+        self.assertEqual("routine-review-already-consumed", result["terminal"])
+
+    def test_routine_review_requires_trusted_luna_runtime(self) -> None:
+        result = POLICY.route(
+            attested_combined(
+                routine_review=True,
+                routine_review_evidence=["focused tests pass"],
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does this focused diff preserve the acceptance criteria?",
+                decision_value=True,
+                material_risk=False,
+            ),
+            trusted_catalog=trusted_catalog_context(),
+        )
+        self.assertEqual("luna-review-capability-preflight-failed", result["terminal"])
+        self.assertEqual(0, result["review_calls"])
+        self.assertEqual(0, result["sol_calls"])
+
     def test_legacy_only_roles_do_not_trigger_compatibility_fallback(self) -> None:
         result = POLICY.route(
             valid_combined(
@@ -710,454 +1631,6 @@ class CompositionContractTests(unittest.TestCase):
         self.assertEqual("non-advisor-role-rejected", implementer["terminal"])
         self.assertEqual(0, implementer["sol_calls"])
 
-    def test_eval_policy_delegates_to_the_production_receipt_issuer(self) -> None:
-        self.assertIs(
-            POLICY.governance_receipt,
-            POLICY.RECEIPT_ISSUER.governance_receipt,
-        )
-        self.assertIs(POLICY.route, POLICY.RECEIPT_ISSUER.route)
-
-    def test_route_preserves_the_pre_task7_closed_output_contract(self) -> None:
-        scenarios = {
-            "gpt-pro-only": {
-                **receipt_identity(),
-                "intent": "gpt-pro-only",
-            },
-            "sol-only": {"intent": "sol-only"},
-            "standalone": {"intent": "standalone"},
-        }
-        expected = {
-            "gpt-pro-only": {
-                "selected_mode": "gpt-pro-only",
-                "gpt_pro_calls": 1,
-                "sol_calls": 0,
-                "terminal": "continue-outer-loop",
-            },
-            "sol-only": {
-                "selected_mode": "sol-only",
-                "gpt_pro_calls": 0,
-                "sol_calls": 1,
-                "terminal": "continue-sol-standalone",
-            },
-            "standalone": {
-                "selected_mode": "unselected",
-                "composition_active": False,
-                "sol_calls": 0,
-                "terminal": "clarify",
-            },
-        }
-
-        for name, scenario in scenarios.items():
-            with self.subTest(name=name):
-                self.assertEqual(expected[name], POLICY.route(scenario))
-
-    def test_attested_consultation_receipt_is_bound_and_dispositioned(self) -> None:
-        scenario = admitted_scenario(issued_at_unix=1_723_000_000)
-        routed = POLICY.route(scenario)
-
-        receipt = POLICY.governance_receipt(
-            scenario,
-            routed,
-            {"disposition": "accept", "rationale": "Compatible."},
-        )
-
-        self.assertEqual(RECEIPT_FIELDS | {"binding", "disposition"}, set(receipt))
-        self.assertEqual(CONSULTATION_BINDING_FIELDS, set(receipt["binding"]))
-        self.assertEqual("consultation", receipt["receipt_type"])
-        self.assertEqual("orchestrate-gpt-pro-sol-advisor", receipt["issuer_skill"])
-        self.assertEqual("sol_advisor_advisor", receipt["binding"]["role"])
-        self.assertEqual("read-only", receipt["binding"]["sandbox"])
-        self.assertEqual("managed", receipt["binding"]["permission_profile"])
-        self.assertIs(True, receipt["binding"]["advisor_invocation_succeeded"])
-        self.assertIs(True, receipt["binding"]["runtime_attested"])
-        self.assertEqual("accept", receipt["disposition"])
-        self.assertEqual(1_723_000_000, receipt["issued_at_unix"])
-        self.assertEqual(
-            POLICY.RECEIPT_ISSUER.scenario_digest(scenario),
-            receipt["scenario_digest"],
-        )
-
-    def test_receipt_is_deterministic_and_rationale_has_no_authority(self) -> None:
-        scenario = admitted_scenario()
-        routed = POLICY.route(scenario)
-
-        first = POLICY.governance_receipt(
-            scenario,
-            routed,
-            {"disposition": "partially accept", "rationale": "Use subset A."},
-        )
-        second = POLICY.governance_receipt(
-            scenario,
-            routed,
-            {"disposition": "partially accept", "rationale": "Different prose."},
-        )
-
-        self.assertEqual(first, second)
-        self.assertEqual(0, first["issued_at_unix"])
-        self.assertNotIn("rationale", first)
-        self.assertNotIn("rationale", first["binding"])
-
-    def test_low_risk_and_standalone_routes_emit_closed_no_consultation_receipt(self) -> None:
-        low_risk = attested_combined(
-            **receipt_identity(),
-            codex_commitment_boundary=True,
-            concrete_question=True,
-            precise_question="Is advice useful for this low-risk edit?",
-            material_risk=False,
-            decision_value=True,
-        )
-        standalone = {
-            **receipt_identity(invocation_id="INV-2"),
-            "intent": "gpt-pro-only",
-        }
-
-        low_receipt = POLICY.governance_receipt(
-            low_risk, POLICY.route(low_risk), None
-        )
-        standalone_receipt = POLICY.governance_receipt(
-            standalone, POLICY.route(standalone), None
-        )
-
-        self.assertEqual(RECEIPT_FIELDS | {"reason_code"}, set(low_receipt))
-        self.assertEqual("no-consultation", low_receipt["receipt_type"])
-        self.assertEqual("NO_MATERIAL_UNCERTAINTY", low_receipt["reason_code"])
-        self.assertEqual("NOT_APPLICABLE", standalone_receipt["reason_code"])
-
-    def test_no_consultation_receipt_reasons_are_closed_and_unavailable_is_standalone_only(self) -> None:
-        base = {
-            **receipt_identity(),
-            "intent": "gpt-pro-only",
-        }
-        reason_scenarios = {
-            "NOT_APPLICABLE": {**base, "no_consultation_reason": "NOT_APPLICABLE"},
-            "NO_MATERIAL_UNCERTAINTY": attested_combined(
-                **receipt_identity(invocation_id="INV-LOW-RISK"),
-                codex_commitment_boundary=True,
-                concrete_question=True,
-                precise_question="Does this low-risk route need advice?",
-                material_risk=False,
-                decision_value=True,
-                no_consultation_reason="NO_MATERIAL_UNCERTAINTY",
-            ),
-            "POLICY_NOT_REQUIRED": {
-                **base,
-                "consultation_policy_required": False,
-                "no_consultation_reason": "POLICY_NOT_REQUIRED",
-            },
-        }
-        for reason, scenario in reason_scenarios.items():
-            with self.subTest(reason=reason):
-                receipt = POLICY.governance_receipt(
-                    scenario, POLICY.route(scenario), None
-                )
-                self.assertEqual(reason, receipt["reason_code"])
-
-        unavailable = {
-            **receipt_identity(),
-            "intent": "standalone",
-            "no_consultation_reason": "ADVISOR_UNAVAILABLE",
-            "standalone_policy_allows_advisor_unavailable": True,
-            "advisor_availability_is_runtime_dependency": False,
-        }
-        unavailable_route = POLICY.route(unavailable)
-        self.assertEqual("unselected", unavailable_route["selected_mode"])
-        self.assertEqual("clarify", unavailable_route["terminal"])
-        self.assertEqual(
-            "ADVISOR_UNAVAILABLE",
-            POLICY.governance_receipt(
-                unavailable, unavailable_route, None
-            )["reason_code"],
-        )
-
-        invalid_scenarios = (
-            {**base, "no_consultation_reason": "OTHER"},
-            {**base, "no_consultation_reason": "ADVISOR_UNAVAILABLE"},
-            {
-                **unavailable,
-                "advisor_availability_is_runtime_dependency": True,
-            },
-            {
-                **unavailable,
-                "standalone_policy_allows_advisor_unavailable": False,
-            },
-            {**unavailable, "intent": "ambiguous"},
-        )
-        for scenario in invalid_scenarios:
-            with self.subTest(scenario=scenario):
-                with self.assertRaises(POLICY.ReceiptError):
-                    POLICY.governance_receipt(
-                        scenario, POLICY.route(scenario), None
-                    )
-
-    def test_receipt_requires_valid_scenario_identity(self) -> None:
-        disposition = {"disposition": "accept", "rationale": "Bound."}
-        malformed_scenarios = (
-            admitted_scenario(invocation_id=None),
-            admitted_scenario(execution_id="not-an-execution"),
-            admitted_scenario(input_digest=DIGEST_FOUR[:-1]),
-        )
-        for malformed_scenario in malformed_scenarios:
-            with self.subTest(scenario=malformed_scenario):
-                with self.assertRaises(POLICY.ReceiptError):
-                    POLICY.governance_receipt(
-                        malformed_scenario,
-                        POLICY.route(malformed_scenario),
-                        disposition,
-                    )
-
-    def test_receipt_rejects_consultation_and_no_consultation_scenario_substitution(self) -> None:
-        admitted = admitted_scenario()
-        admitted_route = POLICY.route(admitted)
-        admitted_hard_stop = admitted_scenario(advisor_invocation_succeeded=False)
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(
-                admitted_hard_stop,
-                admitted_route,
-                {"disposition": "accept"},
-            )
-
-        low_risk = admitted_scenario(material_risk=False)
-        low_risk_route = POLICY.route(low_risk)
-        low_risk_hard_stop = admitted_scenario(
-            material_risk=False,
-            setup_status="missing",
-        )
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(
-                low_risk_hard_stop,
-                low_risk_route,
-                None,
-            )
-
-    def test_consultation_receipt_disposition_must_match_routed_disposition(self) -> None:
-        scenario = admitted_scenario(
-            authority_escalation=True,
-            sol_response={"claims_approval": True},
-        )
-        routed = POLICY.route(scenario)
-        self.assertEqual("reject", routed["disposition"])
-
-        receipt = POLICY.governance_receipt(
-            scenario,
-            routed,
-            {"disposition": "reject", "rationale": "Codex rejects it."},
-        )
-        self.assertEqual("reject", receipt["disposition"])
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(
-                scenario,
-                routed,
-                {"disposition": "accept", "rationale": "Contradiction."},
-            )
-
-        missing_routed_disposition = dict(routed)
-        missing_routed_disposition.pop("disposition")
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(
-                scenario,
-                missing_routed_disposition,
-                {"disposition": "accept", "rationale": "Deleted contradiction."},
-            )
-
-    def test_receipt_malformed_membership_values_raise_stable_receipt_error(self) -> None:
-        scenario = admitted_scenario()
-        routed = POLICY.route(scenario)
-        malformed_consultation_routes = (
-            routed | {"terminal": []},
-            routed | {"selected_mode": {}},
-            routed | {"disposition": []},
-        )
-        for route_result in malformed_consultation_routes:
-            with self.subTest(route_result=route_result):
-                with self.assertRaises(POLICY.ReceiptError):
-                    POLICY.governance_receipt(
-                        scenario,
-                        route_result,
-                        {"disposition": "accept"},
-                    )
-
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(
-                scenario,
-                routed,
-                {"disposition": []},  # type: ignore[dict-item]
-            )
-
-        low_risk = admitted_scenario(material_risk=False)
-        low_risk_route = POLICY.route(low_risk)
-        for route_result in (
-            low_risk_route | {"selected_mode": []},
-            low_risk_route | {"terminal": {}},
-        ):
-            with self.subTest(route_result=route_result):
-                with self.assertRaises(POLICY.ReceiptError):
-                    POLICY.governance_receipt(low_risk, route_result, None)
-
-        malformed_reason = {
-            **receipt_identity(),
-            "intent": "gpt-pro-only",
-            "no_consultation_reason": [],
-        }
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(
-                malformed_reason, POLICY.route(malformed_reason), None
-            )
-
-        malformed_setup = POLICY.route(valid_combined(setup_status=[]))
-        self.assertEqual("setup-status-unavailable", malformed_setup["terminal"])
-
-    def test_unavailable_combined_advisor_cannot_be_downgraded_to_no_consultation_receipt(self) -> None:
-        failures = (
-            valid_combined(**receipt_identity(), setup_status="missing"),
-            admitted_scenario(advisor_invocation_succeeded=False),
-            admitted_scenario(runtime_observation_trusted=False),
-            admitted_scenario(observed_advisor_sandbox="workspace-write"),
-        )
-        for scenario in failures:
-            with self.subTest(terminal=POLICY.route(scenario)["terminal"]):
-                with self.assertRaises(POLICY.ReceiptError):
-                    POLICY.governance_receipt(
-                        scenario, POLICY.route(scenario), None
-                    )
-
-    def test_consultation_receipt_rejects_forged_route_result_and_untrusted_runtime(self) -> None:
-        low_risk = admitted_scenario(material_risk=False)
-        forged_admission = POLICY.route(low_risk) | {
-            "advice_admitted": 1,
-            "runtime_observation_trusted": True,
-            "runtime_observations": {
-                "role": "sol_advisor_advisor",
-                "model": "gpt-5.6-sol",
-                "effort": "high",
-                "sandbox": "read-only",
-                "permission_profile": "managed",
-            },
-        }
-        untrusted = admitted_scenario(runtime_observation_trusted=False)
-        forged_trust = POLICY.route(untrusted) | {
-            "advice_admitted": 1,
-            "runtime_observation_trusted": True,
-        }
-        for scenario, route_result in (
-            (low_risk, forged_admission),
-            (untrusted, forged_trust),
-        ):
-            with self.subTest(terminal=route_result["terminal"]):
-                with self.assertRaises(POLICY.ReceiptError):
-                    POLICY.governance_receipt(
-                        scenario,
-                        route_result,
-                        {"disposition": "accept", "rationale": "Forged."},
-                    )
-
-    def test_receipt_rejects_same_scenario_forged_consultation(self) -> None:
-        scenario = admitted_scenario(setup_status="missing")
-        hard_stop_route = POLICY.route(scenario)
-        forged_admission = POLICY.route(admitted_scenario())
-        for field in (
-            "scenario_digest",
-            "execution_id",
-            "invocation_id",
-            "input_digest",
-            "output_digest",
-            "authority_snapshot_digest",
-            "nonce",
-        ):
-            if field in hard_stop_route:
-                forged_admission[field] = hard_stop_route[field]
-
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(
-                scenario,
-                forged_admission,
-                {"disposition": "accept", "rationale": "Forged admission."},
-            )
-
-    def test_receipt_rejects_same_scenario_forged_no_consultation(self) -> None:
-        scenario = admitted_scenario(
-            setup_status="missing",
-            material_risk=False,
-            no_consultation_reason="NO_MATERIAL_UNCERTAINTY",
-        )
-        hard_stop_route = POLICY.route(scenario)
-        forged_no_consultation = POLICY.route(
-            admitted_scenario(
-                material_risk=False,
-                no_consultation_reason="NO_MATERIAL_UNCERTAINTY",
-            )
-        )
-        for field in (
-            "scenario_digest",
-            "execution_id",
-            "invocation_id",
-            "input_digest",
-            "output_digest",
-            "authority_snapshot_digest",
-            "nonce",
-        ):
-            if field in hard_stop_route:
-                forged_no_consultation[field] = hard_stop_route[field]
-
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(scenario, forged_no_consultation, None)
-
-    def test_consultation_receipt_rejects_invalid_disposition_or_unknown_field(self) -> None:
-        scenario = admitted_scenario()
-        routed = POLICY.route(scenario)
-        invalid_dispositions = (
-            None,
-            {"disposition": "approve"},
-            {"disposition": "accept", "approval": "granted"},
-            {"disposition": "accept", "rationale": 7},
-        )
-        for disposition in invalid_dispositions:
-            with self.subTest(disposition=disposition):
-                with self.assertRaises(POLICY.ReceiptError):
-                    POLICY.governance_receipt(scenario, routed, disposition)
-
-    def test_receipt_rejects_runtime_binding_and_digest_mismatch(self) -> None:
-        scenario = admitted_scenario()
-        mismatched_routes = []
-        for field, value in (
-            ("role", "sol_advisor_high"),
-            ("model", "gpt-5.6-terra"),
-            ("sandbox", "workspace-write"),
-        ):
-            routed = deepcopy(POLICY.route(scenario))
-            routed["runtime_observations"][field] = value
-            mismatched_routes.append(routed)
-        mismatched_routes.append(POLICY.route(scenario) | {"input_digest": DIGEST_FOUR})
-
-        for routed in mismatched_routes:
-            with self.subTest(route_result=routed):
-                with self.assertRaises(POLICY.ReceiptError):
-                    POLICY.governance_receipt(
-                        scenario,
-                        routed,
-                        {"disposition": "reject", "rationale": "Mismatch."},
-                    )
-
-        malformed_identity = admitted_scenario(input_digest="sha256:short")
-        with self.assertRaises(POLICY.ReceiptError):
-            POLICY.governance_receipt(
-                malformed_identity,
-                POLICY.route(malformed_identity),
-                {"disposition": "reject"},
-            )
-
-    def test_receipt_issuer_does_not_mutate_route_result(self) -> None:
-        scenario = admitted_scenario()
-        routed = POLICY.route(scenario)
-        before = deepcopy(routed)
-
-        POLICY.governance_receipt(
-            scenario,
-            routed,
-            {"disposition": "accept", "rationale": "Compatible."},
-        )
-
-        self.assertEqual(before, routed)
-
     def test_cases_cover_routing_and_failure_boundaries(self) -> None:
         cases = {case["id"]: case for case in self.cases}
         self.assertEqual(
@@ -1170,6 +1643,7 @@ class CompositionContractTests(unittest.TestCase):
                 "legacy-only-does-not-fallback",
                 "nested-orchestration-is-rejected",
                 "explicit-combined-low-risk-skips-sol",
+                "routine-review-uses-luna-max-before-final-pro",
                 "technical-question-selects-configured-advisor",
                 "authority-escalation-is-rejected",
                 "conflicting-advice-is-rejected",
@@ -1194,10 +1668,20 @@ class CompositionContractTests(unittest.TestCase):
                 "retained-implementer-config-is-rejected",
                 "runtime-permission-missing-is-rejected",
                 "runtime-permission-blank-is-rejected",
-                "attested-advice-emits-bound-receipt",
-                "low-risk-emits-no-consultation",
-                "invocation-failure-emits-no-receipt",
-                "attestation-failure-emits-no-receipt",
+                "public-native-attestation-is-preferred",
+                "inspector-fills-public-omissions",
+                "inspector-thread-mismatch-stops",
+                "self-claims-do-not-establish-provenance",
+                "luna-is-default-implementation-worker",
+                "luna-same-root-cause-escalates-terra",
+                "difficult-scope-starts-at-terra",
+                "terra-blocker-uses-sol-read-only-advice",
+                "test-economy-policy-is-explicit",
+                "luna-capability-missing-fails-closed",
+                "luna-wrong-model-fails-closed",
+                "luna-client-thread-handle-fails-closed",
+                "terra-capability-missing-fails-closed",
+                "terra-wrong-role-fails-closed",
             },
             set(cases),
         )
@@ -1206,47 +1690,36 @@ class CompositionContractTests(unittest.TestCase):
             with self.subTest(case_id=case_id):
                 scenario = case["scenario"]
                 if scenario.get("intent") == "combined":
+                    if scenario.get("runtime_inspector_output") is not None:
+                        output = scenario["runtime_inspector_output"]
+                        scenario = {
+                            **scenario,
+                            **inspector_evidence(
+                                str(scenario.get("advisor_thread_id"))
+                            ),
+                            "runtime_inspector_output": output,
+                        }
                     scenario = attested_combined(**scenario)
-                actual = POLICY.route(scenario)
+                trusted_runtime = case.get("trusted_runtime", {})
+                trusted_execution = case.get("trusted_execution", {})
+                actual = POLICY.route(
+                    scenario,
+                    trusted_catalog=trusted_catalog_context(),
+                    trusted_luna_runtime=trusted_runtime.get("luna")
+                    if isinstance(trusted_runtime, dict)
+                    else None,
+                    trusted_terra_runtime=trusted_runtime.get("terra")
+                    if isinstance(trusted_runtime, dict)
+                    else None,
+                    trusted_luna_execution=trusted_execution.get("luna")
+                    if isinstance(trusted_execution, dict)
+                    else None,
+                    trusted_terra_execution=trusted_execution.get("terra")
+                    if isinstance(trusted_execution, dict)
+                    else None,
+                )
                 for key, value in case["expect"].items():
                     self.assertEqual(value, actual.get(key), key)
-                canonical_route = json.dumps(
-                    actual,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode("utf-8")
-                self.assertEqual(
-                    PRE_TASK7_ROUTE_SHA256[case_id],
-                    hashlib.sha256(canonical_route).hexdigest(),
-                    "exact pre-Task7 route keys/values changed",
-                )
-                receipt_case = case.get("receipt")
-                if receipt_case is not None:
-                    disposition = (
-                        {
-                            "disposition": receipt_case["disposition"],
-                            "rationale": "Case fixture rationale.",
-                        }
-                        if "disposition" in receipt_case
-                        else None
-                    )
-                    if receipt_case.get("expect_error"):
-                        with self.assertRaises(POLICY.ReceiptError):
-                            POLICY.governance_receipt(scenario, actual, disposition)
-                    else:
-                        receipt = POLICY.governance_receipt(
-                            scenario, actual, disposition
-                        )
-                        self.assertEqual(
-                            receipt_case["expect_type"], receipt["receipt_type"]
-                        )
-                        if "expect_reason" in receipt_case:
-                            self.assertEqual(
-                                receipt_case["expect_reason"],
-                                receipt["reason_code"],
-                            )
 
     def test_consultation_packet_is_bounded_and_dispositioned(self) -> None:
         source = {
@@ -1318,8 +1791,13 @@ class CompositionContractTests(unittest.TestCase):
                 material_risk=True,
                 decision_value=True,
             ),
-            "pro-green-selfclaim": attested_combined(
-                runtime_observation_trusted=False,
+            "pro-green-selfclaim": valid_combined(
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
                 codex_commitment_boundary=True,
                 concrete_question=True,
                 precise_question="Can advice-body self-claims replace attestation?",
@@ -1352,6 +1830,141 @@ class CompositionContractTests(unittest.TestCase):
                     if key in trace:
                         self.assertEqual(trace[key], actual.get(key), key)
 
+        provenance = results["provenance_hardening"]
+        self.assertEqual(3, len(provenance["baseline"]))
+        self.assertEqual(3, len(provenance["with_skill"]))
+        self.assertTrue(
+            all(item["contract_violation"] for item in provenance["baseline"])
+        )
+        provenance_replays = {
+            "provenance-green-public": attested_combined(
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Does public metadata prove the route?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            "provenance-green-inspector": attested_combined(
+                public_runtime_observations={"role": "sol_advisor_advisor"},
+                advisor_thread_id="11111111-1111-7111-8111-111111111111",
+                **inspector_evidence(),
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can the inspector fill omitted fields?",
+                material_risk=True,
+                decision_value=True,
+            ),
+            "provenance-green-selfclaim": valid_combined(
+                advisor_invocation_succeeded=True,
+                observed_advisor_role="sol_advisor_advisor",
+                observed_advisor_model="gpt-5.6-sol",
+                observed_advisor_effort="high",
+                observed_advisor_sandbox="read-only",
+                observed_permission_profile="managed",
+                codex_commitment_boundary=True,
+                concrete_question=True,
+                precise_question="Can self-claims establish provenance?",
+                material_risk=True,
+                decision_value=True,
+            ),
+        }
+        for trace in provenance["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = POLICY.route(
+                    provenance_replays[trace["sample"]],
+                    trusted_catalog=trusted_catalog_context(),
+                )
+                for key in (
+                    "advice_admitted",
+                    "advice_discarded",
+                    "terminal",
+                    "runtime_attestation_source",
+                ):
+                    if key in trace:
+                        self.assertEqual(trace[key], actual.get(key), key)
+
+        implementation = results["implementation_preflight"]
+        self.assertEqual("deterministic-policy-replay", implementation["evaluation_mode"])
+        self.assertTrue(all(item["contract_violation"] for item in implementation["baseline"]))
+        implementation_replays = {
+            "luna-missing-capability": valid_combined(
+                implementation_request=True
+            ),
+            "luna-client-thread-only": valid_combined(
+                implementation_request=True,
+                luna_runtime_preflight={
+                    "source": "native-capability-preflight",
+                    "capabilities": [
+                        "list_projects",
+                        "create_thread",
+                        "list_threads",
+                        "wait_threads",
+                        "read_thread",
+                        "send_message_to_thread",
+                    ],
+                    "project_type": "git",
+                    "workspace_mode": "worktree",
+                    "model": "gpt-5.6-luna",
+                    "thinking": "max",
+                    "task_state": "ready",
+                },
+            ),
+            "terra-missing-role": valid_combined(
+                implementation_request=True, difficult_scope=True
+            ),
+        }
+        for trace in implementation["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = POLICY.route(implementation_replays[trace["sample"]])
+                self.assertFalse(trace["contract_violation"])
+                for key in ("terminal", "silent_downgrade"):
+                    if key in trace:
+                        self.assertEqual(trace[key], actual.get(key), key)
+
+        trust_boundary = results["worker_trust_boundary"]
+        self.assertEqual(5, len(trust_boundary["baseline"]))
+        self.assertEqual(5, len(trust_boundary["with_skill"]))
+        self.assertTrue(all(item["contract_violation"] for item in trust_boundary["baseline"]))
+        self.assertTrue(all(not item["contract_violation"] for item in trust_boundary["with_skill"]))
+
+        fresh_pressure = results["fresh_context_pressure_prompts"]
+        self.assertFalse(fresh_pressure["executed_here"])
+        self.assertEqual(5, len(fresh_pressure["prompts"]))
+        self.assertTrue(fresh_pressure["required_observations"])
+
+        economy = results["verification_economy"]
+        self.assertEqual("deterministic-policy-replay", economy["evaluation_mode"])
+        self.assertTrue(all(item["contract_violation"] for item in economy["baseline"]))
+        verification_replays = {
+            "same-command-new-tree": POLICY.verification_reuse_decision(
+                ROOT,
+                "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py",
+                {
+                    "outcome": "PASS",
+                    "command": "python evals/orchestrate-gpt-pro-sol-advisor/test_contract.py",
+                    "verification_input_fingerprint": "sha256:" + "b" * 64,
+                },
+            ),
+            "test-count-without-anchor": POLICY.test_witness_decision(
+                [{"primary_anchor": "AC-1", "also_proves": [], "case_count": 20}],
+                {"AC-1"},
+                set(),
+                set(),
+            ),
+            "unknown-anchor-id": POLICY.test_witness_decision(
+                [{"primary_anchor": "BANANA-123", "also_proves": [], "case_count": 1}],
+                {"AC-1"},
+                set(),
+                set(),
+            ),
+        }
+        for trace in economy["with_skill"]:
+            with self.subTest(sample=trace["sample"]):
+                actual = verification_replays[trace["sample"]]
+                self.assertFalse(trace["contract_violation"])
+                self.assertEqual(trace["action"], actual["action"])
+                self.assertEqual(trace["reason"], actual["reason"])
+
     def test_has_human_and_codex_metadata(self) -> None:
         self.assertTrue((SKILL_ROOT / "README.md").is_file())
         metadata = (SKILL_ROOT / "agents" / "openai.yaml").read_text(
@@ -1360,6 +1973,8 @@ class CompositionContractTests(unittest.TestCase):
         self.assertIn("$orchestrate-gpt-pro-sol-advisor", metadata)
         self.assertIn("単独", self.readme)
         self.assertIn("併用", self.readme)
+        self.assertIn("Luna", self.readme)
+        self.assertIn("Test Economy", self.readme)
 
 
 if __name__ == "__main__":

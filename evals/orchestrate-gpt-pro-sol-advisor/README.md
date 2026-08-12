@@ -12,15 +12,54 @@ attestation claims with no runtime evidence, and equivalent canonical workspace
 spellings. All five routed correctly. Invalid advice was discarded before
 downstream use; valid low-risk work skipped Sol without making it a gate.
 
+A provenance-hardening RED/GREEN set then exposed the remaining Boolean-trust
+gap. The repaired harness requires public native details to identify the role,
+binds every public-details result to the spawned thread, and uses the
+canonically skill-relative installed inspector only to fill omitted fields for
+that thread. Inspector success is derived from exit zero plus exact 10-field
+JSON rather than caller status/count. The inspector origin must equal the one
+orchestration Skill selected by the trusted catalog; stale cached versions,
+caller-supplied roots, and symlink escapes cannot substitute for it. That
+selection enters through a separate trusted host input, never scenario data.
+It rejects conflicting overlap and records per-field
+`public-native-details` or `local-runtime-inspector` provenance. Matching
+self-claims cannot be promoted by a caller-supplied trust flag.
+
 `policy.py` is a deterministic evaluation harness, not a runtime dependency.
 Its cases verify pre-GPC setup ordering, the single active preferences object,
 canonical workspace identity plus exact upstream raw-workspace `profileKey`
 serialization, the exact Codex advisor, trusted runtime identity/isolation
-attestation, opaque permission audit evidence, authority, bounded recurrence,
-and fail-closed dependency handling.
+attestation provenance, exact-thread host completion, inspector success, opaque permission
+audit evidence, authority, bounded recurrence, and fail-closed dependency
+handling.
+
+The routing cases also verify Luna / Max as the default implementation worker,
+one same-task correction (two total attempts) before Terra / High escalation for difficult or stuck work, fail-closed
+Luna/Terra capability preflight, Sol read-only escalation only after trusted
+Terra execution evidence reports one blocked high-impact decision, and the
+explicit Test Economy defaults. Worker routing evidence is supplied through
+separate trusted inputs, so scenario self-claims cannot establish availability.
+Cases bind real project/thread/host identities, allow absent Luna post-creation
+model metadata, reject mismatches when it is returned, and require exact
+shipped Terra role-template digests. Deterministic adversarial replays cover
+missing roles, wrong models, setup-only `clientThreadId`, route/outcome mixing,
+command-text-only verification skips, unbounded test growth, and invented test
+anchors. The `scripts/verification_fingerprint.py` helper automatically reads
+Git identity, changed files, command targets, lock/config inputs, and host
+identity; the policy computes it internally before a skip decision. Its
+regression suite covers NUL-delimited status parsing for spaces, non-ASCII names,
+and rename pairs, command-specific toolchain identity, and clean/dirty Gitlink
+handling. All tracked Gitlinks are checked even when status is clean, and
+deinitialized, dirty, or unavailable submodules fail closed to a fresh verification.
+The helper also has a direct CLI for recording evidence. The implementation references keep app-task identity,
+execution outcome, and compact verification rules separate from the main router.
+
+The repository records pressure prompts for a future fresh-context model run;
+this local suite labels its executable checks honestly as deterministic policy
+replays and does not claim that a fresh model pressure run occurred here.
 
 Run:
 
 ```powershell
-python -m unittest evals/orchestrate-gpt-pro-sol-advisor/test_contract.py
+python -m unittest discover -s evals/orchestrate-gpt-pro-sol-advisor -p "test_*.py"
 ```

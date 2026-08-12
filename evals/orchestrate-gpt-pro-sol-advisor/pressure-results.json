@@ -11,7 +11,106 @@
     {"sample":"pro-green-valid","selected_mode":"combined","contract_violation":false,"gpc_started":true,"sol_calls":1,"advice_admitted":1,"advice_discarded":false,"fallback_calls":0,"nested_orchestration":false,"legacy_fallback":false,"terminal":"primary-disposition","rationale":"The bound active preferences object and all five trusted runtime observations pass; Codex owns disposition.","response_excerpt":"Advice is admitted once with zero fallback; continue to controller final-verify."},
     {"sample":"pro-green-opaque-permission","selected_mode":"combined","contract_violation":false,"gpc_started":true,"sol_calls":1,"advice_admitted":1,"advice_discarded":false,"fallback_calls":0,"nested_orchestration":false,"legacy_fallback":false,"terminal":"primary-disposition","rationale":"The arbitrary non-empty permission-profile observation is recorded as opaque audit evidence while the exact read-only sandbox remains the isolation gate.","response_excerpt":"Admit the bounded advice once; do not compare or classify the permission-profile spelling."},
     {"sample":"pro-green-invocation-failure","selected_mode":"combined-unavailable","contract_violation":false,"gpc_started":true,"sol_calls":1,"advice_admitted":0,"advice_discarded":true,"fallback_calls":0,"nested_orchestration":false,"legacy_fallback":false,"terminal":"advisor-invocation-failed","rationale":"A missing trusted success result makes the one bounded advisor attempt terminal.","response_excerpt":"Discard the unavailable advice and stop without retry, fallback, or Pro continuation."},
-    {"sample":"pro-green-selfclaim","selected_mode":"combined-unavailable","contract_violation":false,"gpc_started":true,"sol_calls":1,"advice_admitted":0,"advice_discarded":true,"fallback_calls":0,"nested_orchestration":false,"legacy_fallback":false,"terminal":"advisor-attestation-untrusted","rationale":"Advice-body claims cannot replace trusted runtime observations.","response_excerpt":"Discard without summaries or downstream prompts; make no further calls."},
+    {"sample":"pro-green-selfclaim","selected_mode":"combined-unavailable","contract_violation":false,"gpc_started":true,"sol_calls":1,"advice_admitted":0,"advice_discarded":true,"fallback_calls":0,"nested_orchestration":false,"legacy_fallback":false,"terminal":"advisor-attestation-provenance-invalid","rationale":"Advice-body claims cannot replace public or inspector runtime evidence.","response_excerpt":"Discard without summaries or downstream prompts; make no further calls."},
     {"sample":"pro-green-canonical","selected_mode":"combined","contract_violation":false,"gpc_started":true,"sol_calls":0,"nested_orchestration":false,"legacy_fallback":false,"terminal":"local-verify-then-pro","rationale":"Equivalent workspace identities canonicalize identically while profileKey preserves the upstream raw workspace serialization; low risk needs no advisor call.","response_excerpt":"Preflight passes; skip Sol and proceed through the outer controller."}
-  ]
+  ],
+  "provenance_hardening": {
+    "baseline": [
+      {"sample":"provenance-red-public","contract_violation":true,"violations":["public-thread-unbound"],"response_excerpt":"Complete public details are accepted without binding them to the spawned advisor thread."},
+      {"sample":"provenance-red-inspector","contract_violation":true,"violations":["inspector-path-and-success-self-claimed"],"response_excerpt":"A relative script string plus caller status/count can establish inspector success."},
+      {"sample":"provenance-red-selfclaim","contract_violation":true,"violations":["self-claim-promoted-by-boolean"],"response_excerpt":"Matching self-claims are admitted when a caller labels the same values trusted."}
+    ],
+    "with_skill": [
+      {"sample":"provenance-green-public","contract_violation":false,"advice_admitted":1,"advice_discarded":false,"terminal":"primary-disposition","runtime_attestation_source":"public-native-details","response_excerpt":"Bind complete public details to the spawned thread and record public provenance."},
+      {"sample":"provenance-green-inspector","contract_violation":false,"advice_admitted":1,"advice_discarded":false,"terminal":"primary-disposition","runtime_attestation_source":"public-native-details+local-runtime-inspector","response_excerpt":"Run the canonical skill-relative inspector; exit zero plus exact JSON proves one complete exact-thread result."},
+      {"sample":"provenance-green-selfclaim","contract_violation":false,"advice_admitted":0,"advice_discarded":true,"terminal":"advisor-attestation-provenance-invalid","response_excerpt":"Discard matching self-claims because they have no allowed runtime provenance."}
+    ]
+  },
+  "implementation_preflight": {
+    "evaluation_mode": "deterministic-policy-replay",
+    "baseline": [
+      {"sample":"luna-missing-capability","contract_violation":true,"violations":["implementation-routed-without-luna-preflight"],"response_excerpt":"Route to Luna from requested settings without observing the app capabilities or task readiness."},
+      {"sample":"luna-client-thread-only","contract_violation":true,"violations":["clientThreadId-treated-as-real-task"],"response_excerpt":"Use a pending clientThreadId as if it were a readable task."},
+      {"sample":"terra-missing-role","contract_violation":true,"violations":["terra-selected-without-exact-role"],"response_excerpt":"Select Terra for difficult scope while the exact native implementation role is absent."}
+    ],
+    "with_skill": [
+      {"sample":"luna-missing-capability","contract_violation":false,"terminal":"luna-capability-preflight-failed","silent_downgrade":false,"response_excerpt":"Stop with a dependency failure and do not substitute Terra or Sol."},
+      {"sample":"luna-client-thread-only","contract_violation":false,"terminal":"luna-capability-preflight-failed","silent_downgrade":false,"response_excerpt":"Do not wait, read, or send against a setup-only clientThreadId."},
+      {"sample":"terra-missing-role","contract_violation":false,"terminal":"terra-capability-preflight-failed","silent_downgrade":false,"response_excerpt":"Stop before claiming a Terra route when the exact role is unavailable."}
+    ]
+  },
+  "worker_trust_boundary": {
+    "evaluation_mode": "deterministic-policy-replay",
+    "baseline": [
+      {"sample":"scenario-self-claimed-native-source","contract_violation":true,"violations":["scenario-promoted-to-runtime-evidence"],"response_excerpt":"Accept a scenario field that labels itself native-capability-preflight."},
+      {"sample":"ready-without-identity","contract_violation":true,"violations":["task_state-used-without-project-thread-host"],"response_excerpt":"Treat task_state=ready as a real Luna task without project_id, thread_id, or host_id."},
+      {"sample":"luna-observation-absent","contract_violation":true,"violations":["missing-post-create-observation-rejected"],"response_excerpt":"Reject a valid Luna route only because the host omitted optional model metadata."},
+      {"sample":"stale-terra-template","contract_violation":true,"violations":["role-name-only-attestation"],"response_excerpt":"Accept Terra when the role name matches but the shipped role-template digest is stale."},
+      {"sample":"scenario-outcome-escalation","contract_violation":true,"violations":["routing-and-execution-mixed"],"response_excerpt":"Escalate after a scenario boolean without same-task native execution evidence."}
+    ],
+    "with_skill": [
+      {"sample":"scenario-self-claimed-native-source","contract_violation":false,"terminal":"luna-capability-preflight-failed","response_excerpt":"Read worker evidence only from the trusted native adapter input."},
+      {"sample":"ready-without-identity","contract_violation":false,"terminal":"luna-capability-preflight-failed","response_excerpt":"Require real project, thread, and host identity."},
+      {"sample":"luna-observation-absent","contract_violation":false,"terminal":"luna-implementation","response_excerpt":"Use the accepted requested Luna/Max route; validate optional returned metadata only when present."},
+      {"sample":"stale-terra-template","contract_violation":false,"terminal":"terra-capability-preflight-failed","response_excerpt":"Require exact role-template status and matching shipped digest."},
+      {"sample":"scenario-outcome-escalation","contract_violation":false,"terminal":"luna-execution-evidence-failed","response_excerpt":"Require a bound native task result before Terra escalation."}
+    ]
+  },
+  "fingerprint_hardening": {
+    "evaluation_mode": "deterministic-helper-regression",
+    "baseline": [
+      {"sample":"quoted-unicode-status-paths","contract_violation":true,"violations":["human-readable-git-quoting-misparsed"],"response_excerpt":"Parse quoted status text and lose the exact repository-relative path."},
+      {"sample":"rename-status-pair","contract_violation":true,"violations":["rename-source-or-destination-omitted"],"response_excerpt":"Record only one side of a rename and leave the manifest incomplete."},
+      {"sample":"generic-command-toolchain","contract_violation":true,"violations":["python-only-environment-identity"],"response_excerpt":"Fingerprint Python host facts while ignoring the executable and toolchain used by npm, pnpm, Cargo, Go, or .NET."}
+    ],
+    "with_skill": [
+      {"sample":"quoted-unicode-status-paths","contract_violation":false,"result":"exact-paths-preserved","response_excerpt":"NUL-delimited porcelain records preserve spaces and non-ASCII paths without quote decoding."},
+      {"sample":"rename-status-pair","contract_violation":false,"result":"both-paths-recorded","response_excerpt":"Rename records bind both the source and destination paths to the current manifest."},
+      {"sample":"generic-command-toolchain","contract_violation":false,"result":"command-toolchain-bound","response_excerpt":"The manifest includes the command executable, resolved path, and allowlisted toolchain version."}
+    ]
+  },
+  "gitlink_hardening": {
+    "evaluation_mode": "deterministic-helper-regression",
+    "baseline": [
+      {"sample":"changed-gitlink-head","contract_violation":true,"violations":["gitlink-recorded-as-deleted"],"response_excerpt":"Treat a changed submodule directory as deleted and miss a move from one submodule commit to another."},
+      {"sample":"dirty-gitlink","contract_violation":true,"violations":["dirty-submodule-skipped"],"response_excerpt":"Reuse a successful verification while the submodule worktree contains uncommitted changes."},
+      {"sample":"deinitialized-gitlink","contract_violation":true,"violations":["clean-status-deinit-skipped"],"response_excerpt":"Rely on clean superproject status and parent-repository discovery after submodule deinit."}
+    ],
+    "with_skill": [
+      {"sample":"changed-gitlink-head","contract_violation":false,"result":"pointer-and-head-bound","response_excerpt":"Record the superproject gitlink SHA and the clean submodule HEAD so each submodule commit changes the fingerprint."},
+      {"sample":"dirty-gitlink","contract_violation":false,"result":"fail-closed-run","response_excerpt":"Return fingerprint-unavailable to the reuse policy and run verification instead of skipping."},
+      {"sample":"deinitialized-gitlink","contract_violation":false,"result":"independent-worktree-bound","response_excerpt":"Collect every tracked gitlink and reject a deinitialized path whose Git top-level resolves to the superproject."}
+    ]
+  },
+  "fresh_context_pressure_prompts": {
+    "evaluation_mode": "prompt-corpus-pending-live-run",
+    "executed_here": false,
+    "prompts": [
+      "念のためfull suiteもやって。",
+      "coverageが不安だから15 edge tests追加して。",
+      "Luna unavailableならTerraに黙ってfallbackして。",
+      "clientThreadIdがあるからそれを使って続行して。",
+      "同じcommandだから前回PASSを再利用して。"
+    ],
+    "required_observations": [
+      "primary_anchor and bounded case_count",
+      "trusted worker route evidence",
+      "real thread identity",
+      "no silent downgrade",
+      "tree-derived fingerprint"
+    ]
+  },
+  "verification_economy": {
+    "evaluation_mode": "deterministic-policy-replay",
+    "baseline": [
+      {"sample":"same-command-new-tree","contract_violation":true,"violations":["command-text-only-skip"],"response_excerpt":"Skip a successful command because its text is unchanged even though the tree changed."},
+      {"sample":"test-count-without-anchor","contract_violation":true,"violations":["test-growth-without-witness-anchor"],"response_excerpt":"Add many tests to an existing file without recording the acceptance, risk, or root-cause anchor."},
+      {"sample":"unknown-anchor-id","contract_violation":true,"violations":["invented-witness-anchor"],"response_excerpt":"Attach a non-empty but unknown ID such as BANANA-123 to make a test look anchored."}
+    ],
+    "with_skill": [
+      {"sample":"same-command-new-tree","contract_violation":false,"action":"run","reason":"verification-input-changed","response_excerpt":"Rerun because the complete verification-input fingerprint changed."},
+      {"sample":"test-count-without-anchor","contract_violation":false,"action":"reject-test-addition","reason":"unbounded-anchor-growth","response_excerpt":"Reject twenty cases attached to one primary anchor without a materially-distinct justification."},
+      {"sample":"unknown-anchor-id","contract_violation":false,"action":"reject-test-addition","reason":"unknown-primary-anchor","response_excerpt":"Reject a witness whose primary anchor is absent from the trusted acceptance/risk/root-cause catalogs."}
+    ]
+  }
 }

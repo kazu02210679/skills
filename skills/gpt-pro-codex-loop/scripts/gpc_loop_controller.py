@@ -868,6 +868,7 @@ def initial_state(
     approved_paths: Sequence[str],
     model_policy: str,
     requested_label: str | None,
+    review_policy: str = validate_packet.DEFAULT_REVIEW_POLICY,
     hotl_governance_context: Mapping[str, object] | None = None,
     hotl_governance_context_digest: str | None = None,
 ) -> dict[str, object]:
@@ -886,6 +887,7 @@ def initial_state(
         "conversation_binding_state": "CONVERSATION_UNBOUND",
         "bound_conversation_url": None,
         "model_policy": model_policy,
+        "review_policy": review_policy,
         "requested_model_label": requested_label,
         "visible_model_label": None,
         "visible_reasoning_label": None,
@@ -979,6 +981,19 @@ def _validate_model_policy(model_policy: str, requested_label: str | None) -> No
     )
 
 
+def _validate_review_policy(review_policy: str) -> None:
+    if review_policy in validate_packet.REVIEW_POLICIES:
+        return
+    raise ControllerError(
+        "INVALID_REVIEW_POLICY",
+        "Review policy must be FINAL_ONLY or ITERATIVE.",
+    )
+
+
+def _review_round_limit(state: Mapping[str, object]) -> int:
+    return validate_packet.review_round_limit(state)
+
+
 def _read_input(path: Path, name: str) -> str:
     try:
         return Path(path).read_text(encoding="utf-8")
@@ -1044,6 +1059,7 @@ def _init_argv(
     approved_existing_paths: Sequence[str] = (),
     approved_existing_path_manifest: Path | None = None,
     retry_incomplete: bool = False,
+    review_policy: str = validate_packet.DEFAULT_REVIEW_POLICY,
 ) -> list[str]:
     arguments = [
         "python",
@@ -1062,6 +1078,8 @@ def _init_argv(
     ]
     if retry_incomplete:
         arguments.append("--retry-incomplete")
+    if review_policy != validate_packet.DEFAULT_REVIEW_POLICY:
+        arguments.extend(["--review-policy", review_policy])
     if requested_model_label is not None:
         arguments.extend(["--requested-model-label", requested_model_label])
     if approved_existing_path_manifest is not None:
@@ -1084,6 +1102,7 @@ def _approval_guidance(
     repository_context_path: Path,
     model_policy: str,
     requested_model_label: str | None,
+    review_policy: str = validate_packet.DEFAULT_REVIEW_POLICY,
 ) -> list[str]:
     initial = list(preflight["initial_product_paths"])
     preview = initial[:MAX_PATH_PREVIEW]
@@ -1106,6 +1125,7 @@ def _approval_guidance(
         model_policy,
         requested_model_label,
         approved_existing_path_manifest=manifest_path,
+        review_policy=review_policy,
     )
     details = [
         f"initial_product_path_count:{len(initial)}",
@@ -1190,6 +1210,7 @@ def _load_manifest_approval(
     repository_context_path: Path,
     model_policy: str,
     requested_model_label: str | None,
+    review_policy: str = validate_packet.DEFAULT_REVIEW_POLICY,
 ) -> list[str]:
     try:
         manifest = load_json(Path(manifest_path))
@@ -1212,6 +1233,7 @@ def _load_manifest_approval(
                     repository_context_path,
                     model_policy,
                     requested_model_label,
+                    review_policy,
                 ),
             ],
         )
@@ -1542,10 +1564,12 @@ def initialize_run(
     approved_existing_path_manifest: Path | None = None,
     retry_incomplete: bool = False,
     governance_context_path: Path | None = None,
+    review_policy: str = validate_packet.DEFAULT_REVIEW_POLICY,
 ) -> dict[str, object]:
     """Create a fully validated, conversation-unbound controller run."""
     paths = resolve_run(repository, task_slug)
     _validate_model_policy(model_policy, requested_model_label)
+    _validate_review_policy(review_policy)
     request_text = _read_input(request_path, "request")
     context_text = _read_input(repository_context_path, "repository context")
     hotl_context: dict[str, object] | None = None
@@ -1609,6 +1633,7 @@ def initialize_run(
                     retry_paths,
                     retry_manifest,
                     retry_incomplete=True,
+                    review_policy=review_policy,
                 )
                 details.append(f"retry_init_argv:{_command_json(retry_argv)}")
                 raise ControllerError(
@@ -1657,6 +1682,7 @@ def initialize_run(
                         repository_context_path,
                         model_policy,
                         requested_model_label,
+                        review_policy,
                     )
                 preflight_errors = capture_snapshot.validate_preflight(
                     preflight, approved_existing_paths, paths.repository
@@ -1678,6 +1704,7 @@ def initialize_run(
                             repository_context_path,
                             model_policy,
                             requested_model_label,
+                            review_policy,
                         )
                     raise ControllerError(
                         code,
@@ -1686,8 +1713,13 @@ def initialize_run(
                     )
                 approved_paths = _normalize_approved_paths(approved_existing_paths)
                 previous = initial_state(
-                    preflight, approved_paths, model_policy, requested_model_label,
-                    hotl_context, hotl_context_digest,
+                    preflight,
+                    approved_paths,
+                    model_policy,
+                    requested_model_label,
+                    review_policy,
+                    hotl_context,
+                    hotl_context_digest,
                 )
                 candidate = dict(previous)
                 candidate["phase"] = "REQUIREMENTS_PENDING"
@@ -2230,7 +2262,16 @@ def _load_local_evidence(
                 _require_nonempty_string(command.get(key), f"test_commands.{index}.{key}", errors)
     for field in ("diff_evidence", "omissions", "unresolved_risks_or_blockers"):
         _validate_evidence_strings(evidence.get(field), field, errors)
-    _raise_validation("INVALID_LOCAL_EVIDENCE", "Local evidence is invalid.", sorted(set(errors)))
+    schema_shape_error = "local evidence: contains unknown or missing fields" in errors
+    _raise_validation(
+        "INVALID_LOCAL_EVIDENCE",
+        (
+            "Local evidence contains unknown or missing fields."
+            if schema_shape_error
+            else "Local evidence is invalid."
+        ),
+        sorted(set(errors)),
+    )
     validate_model_bound_report(evidence)
     return evidence
 
@@ -2371,7 +2412,7 @@ def build_report(
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
         state, loaded_state_digest = _load_mutator_state(paths)
-        if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
+        if state.get("review_round", 0) >= _review_round_limit(state):
             raise ControllerError(
                 "REVIEW_ROUND_LIMIT",
                 "The maximum number of semantic review rounds has been consumed.",
@@ -2589,7 +2630,7 @@ def prepare_review(
     with run_lock(paths.lock):
         _require_manual_recovery(paths)
         state, loaded_state_digest = _load_mutator_state(paths)
-        if state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS:
+        if state.get("review_round", 0) >= _review_round_limit(state):
             raise ControllerError(
                 "REVIEW_ROUND_LIMIT",
                 "The maximum number of semantic review rounds has been consumed.",
@@ -3708,7 +3749,10 @@ def accept_review(
             else (
                 "REVIEW_ROUND_LIMIT"
                 if decision == "CHANGES_REQUESTED"
-                and review_round + 1 == validate_packet.MAX_REVIEW_ROUNDS
+                and (
+                    validate_packet.review_policy(state) == "FINAL_ONLY"
+                    or review_round + 1 >= _review_round_limit(state)
+                )
                 else None
             )
         )
@@ -4526,7 +4570,8 @@ def next_commands(
 ) -> list[str]:
     """Return only commands valid for the current phase and pre-send attempt."""
     if (
-        state.get("review_round") == validate_packet.MAX_REVIEW_ROUNDS
+        isinstance(state.get("review_round"), int)
+        and state.get("review_round") >= _review_round_limit(state)
         and state.get("phase") not in {"FINAL_VERIFICATION", "COMPLETE"}
     ):
         return []
@@ -4654,11 +4699,15 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
                 "CONTEXT.md",
                 "--model-policy",
                 "PRO_CLASS",
+                "--review-policy",
+                validate_packet.DEFAULT_REVIEW_POLICY,
             ]
             return {
                 "phase": "INIT_INCOMPLETE",
                 "active_requirements_revision": None,
                 "review_round": 0,
+                "review_policy": validate_packet.DEFAULT_REVIEW_POLICY,
+                "review_round_limit": 1,
                 "conversation": {"binding_state": "CONVERSATION_UNBOUND", "url": None},
                 "model": {"policy": None, "requested_label": None, "visible_label": None},
                 "required_actions": [],
@@ -4688,6 +4737,8 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
             "phase": "LEGACY_STATE_RESTART_REQUIRED",
             "active_requirements_revision": raw_state.get("active_requirements_revision"),
             "review_round": raw_state.get("review_round"),
+            "review_policy": validate_packet.review_policy(raw_state),
+            "review_round_limit": validate_packet.review_round_limit(raw_state),
             "conversation": {
                 "binding_state": raw_state.get("conversation_binding_state"),
                 "url": raw_state.get("bound_conversation_url"),
@@ -4723,6 +4774,8 @@ def status_run(repository: Path, task_slug: str) -> dict[str, object]:
         "phase": state.get("phase"),
         "active_requirements_revision": state.get("active_requirements_revision"),
         "review_round": state.get("review_round"),
+        "review_policy": validate_packet.review_policy(state),
+        "review_round_limit": _review_round_limit(state),
         "conversation": {
             "binding_state": state.get("conversation_binding_state"),
             "url": state.get("bound_conversation_url"),
