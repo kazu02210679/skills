@@ -303,7 +303,10 @@ def resolve_run(repository: Path, execution_id: str) -> RunPaths:
     supplied = Path(repository).absolute()
     if not supplied.is_dir() or _is_link_or_reparse(supplied):
         raise StoreError("INVALID_REPOSITORY", "Repository path must be a plain directory.")
-    repository_root = supplied.resolve()
+    # Keep the caller's absolute spelling on Windows. ``Path.resolve()`` may
+    # silently rewrite a long component to its 8.3 alias on hosted runners,
+    # which breaks the same-path checks used to detect reparse-point swaps.
+    repository_root = supplied if os.name == "nt" else supplied.resolve()
     if not isinstance(execution_id, str) or EXECUTION_ID.fullmatch(execution_id) is None:
         raise StoreError("INVALID_EXECUTION_ID", "Invalid execution ID.")
     metadata = repository_root / ".hotl"

@@ -288,7 +288,8 @@ class RunPaths:
 
 
 def _repository_root(repository: Path) -> Path:
-    supplied = Path(repository).resolve()
+    lexical = Path(repository).absolute()
+    supplied = lexical.resolve()
     if not supplied.is_dir():
         raise ControllerError("INVALID_REPOSITORY", "Repository path is not a directory.")
     completed = subprocess.run(
@@ -300,12 +301,16 @@ def _repository_root(repository: Path) -> Path:
     if completed.returncode:
         raise ControllerError("INVALID_REPOSITORY", "Repository path is not a Git repository root.")
     try:
-        root = Path(completed.stdout.decode("utf-8", errors="strict").strip()).resolve()
+        reported = Path(completed.stdout.decode("utf-8", errors="strict").strip())
+        root = reported.resolve()
     except UnicodeDecodeError as exc:
         raise ControllerError("INVALID_REPOSITORY", "Git returned an invalid repository path.") from exc
     if root != supplied:
         raise ControllerError("INVALID_REPOSITORY", "Repository path must be the Git repository root.")
-    return root
+    # Windows may canonicalize a caller's long path to an equivalent 8.3 path.
+    # Preserve the original absolute spelling so read-stability hooks and
+    # transaction manifests address one lexical path consistently.
+    return lexical if os.name == "nt" else root
 
 
 def _is_contained(path: Path, parent: Path) -> bool:
