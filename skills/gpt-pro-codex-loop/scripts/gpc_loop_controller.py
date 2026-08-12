@@ -1344,7 +1344,11 @@ def _valid_initialization_marker(path: Path, paths: RunPaths) -> bool:
         set(marker) == INITIALIZATION_MARKER_FIELDS
         and marker.get("schema_version") == SCHEMA_VERSION
         and marker.get("kind") == "gpc-loop-initialization"
-        and marker.get("repository") == str(paths.repository)
+        and isinstance(marker.get("repository"), str)
+        and os.path.normcase(
+            str(Path(marker["repository"]).resolve(strict=False))
+        )
+        == os.path.normcase(str(paths.repository.resolve(strict=False)))
         and marker.get("task") == paths.task_slug
         and isinstance(marker.get("baseline_head"), str)
         and isinstance(marker.get("pid"), int)

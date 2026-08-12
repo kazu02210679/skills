@@ -188,9 +188,20 @@ def _windows_open_artifact(path: Path) -> tuple[int, int]:
 
 
 def _windows_same_lexical_path(expected: Path, opened: Path) -> bool:
-    return os.path.normcase(os.path.normpath(str(expected))) == os.path.normcase(
-        os.path.normpath(str(opened))
-    )
+    import ctypes
+    from ctypes import wintypes
+
+    get_long_path = ctypes.windll.kernel32.GetLongPathNameW
+    get_long_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_long_path.restype = wintypes.DWORD
+
+    def normalized(path: Path) -> str:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = get_long_path(str(path), buffer, len(buffer))
+        value = buffer.value if 0 < length < len(buffer) else str(path)
+        return os.path.normcase(os.path.normpath(value))
+
+    return normalized(expected) == normalized(opened)
 
 
 def _read_repository_artifact_windows(repository: Path, normalized: str) -> bytes:
@@ -203,18 +214,21 @@ def _read_repository_artifact_windows(repository: Path, normalized: str) -> byte
         candidate = candidate / part
         if _is_link_or_reparse(candidate):
             raise _artifact_error()
+    expected_opened_path = candidate.resolve(strict=True)
     fd, handle = _windows_open_artifact(candidate)
     try:
         reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
         if _windows_file_attributes(handle) & reparse:
             raise _artifact_error()
         opened = _windows_final_path(handle)
-        if not _windows_same_lexical_path(candidate, opened):
+        if not _windows_same_lexical_path(expected_opened_path, opened):
             raise _artifact_error()
         content = _read_open_file(fd)
         if _windows_file_attributes(handle) & reparse:
             raise _artifact_error()
-        if not _windows_same_lexical_path(candidate, _windows_final_path(handle)):
+        if not _windows_same_lexical_path(
+            expected_opened_path, _windows_final_path(handle)
+        ):
             raise _artifact_error()
         return content
     finally:
