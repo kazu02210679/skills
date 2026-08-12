@@ -746,6 +746,13 @@ def _normalize_model_attestation_state(
         "requested_model_label",
         *identity_fields,
     )
+    state_fields = frozenset(
+        (*validate_packet.REQUIRED_STATE_FIELDS, *validate_packet.OPTIONAL_STATE_FIELDS)
+    )
+    pre_v4_closed_state_shape = (
+        set(validate_packet.REQUIRED_STATE_FIELDS).issubset(state)
+        and set(state).issubset(state_fields)
+    )
     restart_message = (
         "Legacy or partial bound model attestation cannot be inferred safely; "
         "preserve this run and restart with a new task slug."
@@ -822,6 +829,7 @@ def _normalize_model_attestation_state(
         and version in {2, 3}
         and has_attestation_fields
         and unbound
+        and pre_v4_closed_state_shape
         and valid_policy_shape()
     )
     legacy_core_fields = (

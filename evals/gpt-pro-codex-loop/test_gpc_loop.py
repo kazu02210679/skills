@@ -1288,6 +1288,41 @@ class ControllerCase(unittest.TestCase):
         self.assertIsNone(upgraded["visible_reasoning_label"])
         self.assertIsNone(upgraded["visible_plan_label"])
 
+    def test_unknown_field_blocks_v2_and_v3_unbound_migration_read_only(self) -> None:
+        self._init_run()
+        run = self._run_dir()
+        baseline = self._state()
+
+        for version in (2, 3):
+            with self.subTest(version=version):
+                malformed = dict(
+                    baseline,
+                    model_attestation_schema_version=version,
+                    pre_v4_unknown_field="must-restart",
+                )
+                controller.write_json_atomic(run / "state.json", malformed)
+                before = file_tree(run)
+
+                for receipt_type in ("requirements", "review", "final"):
+                    with self.subTest(receipt_type=receipt_type):
+                        with self.assertRaises(controller.ControllerError) as caught:
+                            controller.export_governance_receipt(
+                                self.repository, "controller-test", receipt_type
+                            )
+                        self.assertEqual(
+                            "LEGACY_STATE_RESTART_REQUIRED", caught.exception.code
+                        )
+                        self.assertEqual(before, file_tree(run))
+
+                status = controller.status_run(self.repository, "controller-test")
+
+                self.assertEqual("LEGACY_STATE_RESTART_REQUIRED", status["phase"])
+                self.assertTrue(status["recovery_required"])
+                self.assertEqual([], status["next_commands"])
+                self.assertEqual(before, file_tree(run))
+
+                controller.write_json_atomic(run / "state.json", baseline)
+
     def test_partial_v2_unbound_state_requires_restart(self) -> None:
         self._init_run()
         state = self._state()
