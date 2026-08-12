@@ -211,10 +211,10 @@ def valid_state(
     bound_conversation_url: object = "https://chatgpt.com/c/test-conversation",
     model_policy: object = "PRO_CLASS",
     requested_model_label: object = None,
-    visible_model_label: object = "GPT-5.6 Pro",
+    visible_model_label: object = "GPT-5.6 Sol",
     visible_reasoning_label: object = "Pro",
     visible_plan_label: object = "Pro",
-    model_attestation_schema_version: object = 3,
+    model_attestation_schema_version: object = 4,
     active_requirements_revision: object = _UNSET_STATE_VALUE,
     active_requirements_digest: object = _UNSET_STATE_VALUE,
     approval_sequence: object = 0,
@@ -3384,7 +3384,7 @@ class TransitionTests(unittest.TestCase):
                 )
                 expected = {
                     "bound_conversation_url": f"{field}: must match the bound conversation state",
-                    "visible_model_label": "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Pro",
+                    "visible_model_label": "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Sol",
                     "visible_reasoning_label": "current.visible_reasoning_label: must equal the controlled Pro-class reasoning level Pro",
                     "visible_plan_label": "current.visible_plan_label: must identify a Pro-capable ChatGPT plan",
                 }[field]
@@ -3404,12 +3404,12 @@ class TransitionTests(unittest.TestCase):
         pro_previous = valid_state(
             "PREFLIGHT",
             0,
-            visible_model_label="GPT-5.6 Pro",
+            visible_model_label="GPT-5.6 Sol",
         )
         pro_current = valid_state(
             "REQUIREMENTS_PENDING",
             0,
-            visible_model_label="GPT-5.6 Pro",
+            visible_model_label="GPT-5.6 Sol",
         )
         pro_errors = validate_transition(pro_previous, pro_current)
         self.assertFalse(
@@ -3424,7 +3424,7 @@ class TransitionTests(unittest.TestCase):
             visible_model_label="Standard",
         )
         self.assertIn(
-            "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Pro",
+            "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Sol",
             validate_transition(previous, wrong_class),
         )
 
@@ -3454,7 +3454,7 @@ class TransitionTests(unittest.TestCase):
             model_attestation_schema_version=2,
         )
         self.assertIn(
-            "current.model_attestation_schema_version: must be integer 3",
+            "current.model_attestation_schema_version: must be integer 4",
             validate_transition(previous, wrong_attestation_version),
         )
 
@@ -3475,6 +3475,44 @@ class TransitionTests(unittest.TestCase):
         self.assertIn(
             "current.visible_model_label: must exactly match requested_model_label",
             validate_transition(exact_previous, wrong_exact),
+        )
+
+    def test_v4_pro_class_separates_sol_model_identity_from_reasoning_strength(self) -> None:
+        previous = valid_state(
+            "PREFLIGHT",
+            0,
+            visible_model_label="GPT-5.6 Sol",
+            visible_reasoning_label="Pro",
+            visible_plan_label="Business",
+            model_attestation_schema_version=4,
+        )
+        current = valid_state(
+            "REQUIREMENTS_PENDING",
+            0,
+            visible_model_label="GPT-5.6 Sol",
+            visible_reasoning_label="Pro",
+            visible_plan_label="Business",
+            model_attestation_schema_version=4,
+            active_requirements_revision=None,
+            active_requirements_digest=None,
+            pending_requirements_envelope_digest=None,
+        )
+        self.assertEqual(validate_transition(previous, current), [])
+
+        wrong_model = dict(current, visible_model_label="GPT-5.6 Pro")
+        self.assertIn(
+            "current.visible_model_label: must equal the controlled Pro-class model family GPT-5.6 Sol",
+            validate_transition(previous, wrong_model),
+        )
+        wrong_reasoning = dict(current, visible_reasoning_label="High")
+        self.assertIn(
+            "current.visible_reasoning_label: must equal the controlled Pro-class reasoning level Pro",
+            validate_transition(previous, wrong_reasoning),
+        )
+        wrong_version = dict(current, model_attestation_schema_version=3)
+        self.assertIn(
+            "current.model_attestation_schema_version: must be integer 4",
+            validate_transition(previous, wrong_version),
         )
 
     def test_transition_requires_complete_structured_state_packets(self) -> None:

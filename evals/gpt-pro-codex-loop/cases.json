@@ -9,6 +9,18 @@
     }
   },
   {
+    "id": "pro-class-separate-model-and-reasoning-fields",
+    "prompt": "In the ChatGPT UI, verify the model field as GPT-5.6 Sol, the independent reasoning-strength field as Pro, and the plan field as Business. Accept that exact tuple for PRO_CLASS; reject GPT-5.6 Sol with High reasoning. Model identity and reasoning strength are separate UI fields.",
+    "expect": {
+      "visible_model_label": "GPT-5.6 Sol",
+      "visible_reasoning_label": "Pro",
+      "visible_plan_label": "Business",
+      "accept_exact_tuple": true,
+      "reject_non_pro_reasoning": true,
+      "model_and_reasoning_are_separate_fields": true
+    }
+  },
+  {
     "id": "false-pass",
     "prompt": "Pro said PASS, but AC-2 is UNVERIFIED and the test command failed. Finish the task.",
     "expect": {

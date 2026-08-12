@@ -26,7 +26,7 @@ import gpc_loop_controller as controller  # noqa: E402
 import gpc_loop as cli  # noqa: E402
 
 
-PRO_MODEL_LABEL = "GPT-5.6 Pro"
+PRO_MODEL_LABEL = "GPT-5.6 Sol"
 PRO_REASONING_LABEL = "Pro"
 PRO_PLAN_LABEL = "Pro"
 
@@ -988,22 +988,22 @@ class ControllerCase(unittest.TestCase):
         self.assertTrue(initialized["ok"], initialized)
 
         cases = (
-            ("execution", {"execution_id": "EXEC-000000000BAD"}, "GPT_IDENTITY_MISMATCH"),
+            ("execution", {"execution_id": "EXEC-000000000BAD"}, "INVALID_RECEIPT_BINDING"),
             (
                 "authority",
                 {"authority_snapshot_digest": "sha256:" + "d" * 64},
-                "GPT_IDENTITY_MISMATCH",
+                "INVALID_RECEIPT_BINDING",
             ),
-            ("nonce", {"nonce": "d" * 32}, "GPT_IDENTITY_MISMATCH"),
+            ("nonce", {"nonce": "d" * 32}, "INVALID_RECEIPT_BINDING"),
             (
                 "requirements",
                 {"requirements_digest": "sha256:" + "d" * 64},
-                "GPT_RECEIPT_ID_MISMATCH",
+                "INVALID_RECEIPT_BINDING",
             ),
             (
                 "snapshot",
                 {"snapshot_digest": "sha256:" + "d" * 64},
-                "GPT_RECEIPT_ID_MISMATCH",
+                "INVALID_RECEIPT_BINDING",
             ),
             (
                 "binding",
@@ -1013,7 +1013,7 @@ class ControllerCase(unittest.TestCase):
                         conversation_url="https://chatgpt.com/c/other",
                     )
                 },
-                "GPT_IDENTITY_MISMATCH",
+                "INVALID_RECEIPT_BINDING",
             ),
             ("unknown", {"unknown": True}, "INVALID_FIELDS"),
         )
@@ -1043,7 +1043,7 @@ class ControllerCase(unittest.TestCase):
             str(receipt_path),
         )
         self.assertFalse(unbound["ok"], unbound)
-        self.assertEqual("HOTL_CONTEXT_MISMATCH", unbound["error"]["code"])
+        self.assertEqual("INVALID_RECEIPT_BINDING", unbound["error"]["code"])
 
     def _prepare_supplemental_review(self) -> dict[str, object]:
         self._accept_evidence_request()
@@ -1160,7 +1160,7 @@ class ControllerCase(unittest.TestCase):
         self.assertEqual(state["conversation_binding_state"], "CONVERSATION_UNBOUND")
         self.assertIsNone(state["bound_conversation_url"])
         self.assertIsNone(state["visible_model_label"])
-        self.assertEqual(state["model_attestation_schema_version"], 3)
+        self.assertEqual(state["model_attestation_schema_version"], 4)
         self.assertEqual(state["approved_existing_paths"], [])
 
     def test_init_binds_only_a_closed_hotl_governance_context_artifact(self) -> None:
@@ -1258,7 +1258,7 @@ class ControllerCase(unittest.TestCase):
 
         controller.prepare_requirements(self.repository, "controller-test")
         upgraded = self._state()
-        self.assertEqual(upgraded["model_attestation_schema_version"], 3)
+        self.assertEqual(upgraded["model_attestation_schema_version"], 4)
         self.assertIsNone(upgraded["visible_reasoning_label"])
         self.assertIsNone(upgraded["visible_plan_label"])
 
@@ -1283,7 +1283,7 @@ class ControllerCase(unittest.TestCase):
 
         controller.prepare_requirements(self.repository, "controller-test")
         upgraded = self._state()
-        self.assertEqual(upgraded["model_attestation_schema_version"], 3)
+        self.assertEqual(upgraded["model_attestation_schema_version"], 4)
         self.assertIsNone(upgraded["visible_model_label"])
         self.assertIsNone(upgraded["visible_reasoning_label"])
         self.assertIsNone(upgraded["visible_plan_label"])
@@ -1344,6 +1344,7 @@ class ControllerCase(unittest.TestCase):
     def test_v3_sol_bound_state_requires_restart_without_advertising_commands(self) -> None:
         self._freeze_initial_requirements()
         state = self._state()
+        state["model_attestation_schema_version"] = 3
         state["visible_model_label"] = "GPT-5.6 Sol"
         controller.write_json_atomic(self._run_dir() / "state.json", state)
         before = self._state_bytes()
@@ -1388,7 +1389,7 @@ class ControllerCase(unittest.TestCase):
         original_state = paths.state.read_bytes()
         replacement = dict(
             controller.load_json(paths.state),
-            visible_model_label="GPT-5.6 Sol",
+            visible_model_label="GPT-5.6 Pro",
         )
         replacement_bytes = controller._canonical_json_bytes(replacement)
         original_strict_json_loads = controller.validate_packet.strict_json_loads
@@ -1432,7 +1433,13 @@ class ControllerCase(unittest.TestCase):
             ),
             "wrong-v3-model": dict(
                 baseline,
+                model_attestation_schema_version=3,
                 visible_model_label="GPT-5.6 Sol",
+            ),
+            "wrong-v3-pro-model": dict(
+                baseline,
+                model_attestation_schema_version=3,
+                visible_model_label="GPT-5.6 Pro",
             ),
             "legacy-bound": dict(baseline),
         }
@@ -1465,7 +1472,7 @@ class ControllerCase(unittest.TestCase):
             controller.observed_browser_errors(
                 state,
                 observed_url,
-                "GPT-5.6 Pro",
+                "GPT-5.6 Sol",
                 allow_initial_binding=True,
                 observed_reasoning_label="Pro",
                 observed_plan_label="Pro",
@@ -1477,7 +1484,7 @@ class ControllerCase(unittest.TestCase):
             controller.observed_browser_errors(
                 state,
                 observed_url,
-                "GPT-5.6 Sol",
+                "GPT-5.6 Pro",
                 allow_initial_binding=True,
                 observed_reasoning_label="Pro",
                 observed_plan_label="Pro",
@@ -1488,7 +1495,7 @@ class ControllerCase(unittest.TestCase):
             controller.observed_browser_errors(
                 state,
                 observed_url,
-                "GPT-5.6 Pro",
+                "GPT-5.6 Sol",
                 allow_initial_binding=True,
                 observed_reasoning_label="Extra High",
                 observed_plan_label="Pro",
@@ -1505,6 +1512,115 @@ class ControllerCase(unittest.TestCase):
                 observed_plan_label="Pro",
             ),
         )
+
+    def test_pro_class_separates_sol_model_identity_from_pro_reasoning(self) -> None:
+        self._init_run()
+        state = self._state()
+        observed_url = "https://chatgpt.com/c/controller-test"
+
+        self.assertEqual(
+            controller.observed_browser_errors(
+                state,
+                observed_url,
+                "GPT-5.6 Sol",
+                allow_initial_binding=True,
+                observed_reasoning_label="Pro",
+                observed_plan_label="Pro",
+            ),
+            [],
+        )
+        self.assertIn(
+            "observed reasoning level does not satisfy the requested model policy",
+            controller.observed_browser_errors(
+                state,
+                observed_url,
+                "GPT-5.6 Sol",
+                allow_initial_binding=True,
+                observed_reasoning_label="High",
+                observed_plan_label="Pro",
+            ),
+        )
+
+    def test_pro_class_accepts_only_exact_sol_pro_and_allowed_plan_tuples(self) -> None:
+        self._init_run()
+        state = self._state()
+        observed_url = "https://chatgpt.com/c/controller-test"
+        cases = (
+            ("GPT-5.6 Sol", "Pro", "Pro", True),
+            ("GPT-5.6 Sol", "Pro", "Business", True),
+            ("GPT-5.6 Sol", "Pro", "Enterprise", True),
+            ("GPT-5.6 Pro", "Pro", "Pro", False),
+            ("GPT-5.6 Sol", "High", "Pro", False),
+            ("GPT-5.6 Sol", "Extra High", "Pro", False),
+            ("GPT-5.6 Sol", "Very High", "Pro", False),
+            ("GPT-5.6 Sol", "非常に高い", "Pro", False),
+            (" GPT-5.6 Sol", "Pro", "Pro", False),
+            ("GPT-5.6 Sol ", "Pro", "Pro", False),
+            ("gpt-5.6 sol", "Pro", "Pro", False),
+            ("GPT-5.6 Sol", "pro", "Pro", False),
+            ("GPT-5.6 Sol", "Pro", "Plus", False),
+            ("GPT-5.6 Sol", None, "Pro", False),
+        )
+        for model, reasoning, plan, accepted in cases:
+            with self.subTest(model=model, reasoning=reasoning, plan=plan):
+                errors = controller.observed_browser_errors(
+                    state,
+                    observed_url,
+                    model,
+                    allow_initial_binding=True,
+                    observed_reasoning_label=reasoning,
+                    observed_plan_label=plan,
+                )
+                if accepted:
+                    self.assertEqual(errors, [])
+                else:
+                    self.assertTrue(errors)
+
+    def test_bound_pre_v4_attestation_requires_read_only_restart_for_both_model_labels(self) -> None:
+        self._freeze_initial_requirements()
+        run = self._run_dir()
+        baseline = self._state()
+
+        for label in ("GPT-5.6 Pro", "GPT-5.6 Sol"):
+            with self.subTest(label=label):
+                variant = dict(
+                    baseline,
+                    model_attestation_schema_version=3,
+                    visible_model_label=label,
+                )
+                controller.write_json_atomic(run / "state.json", variant)
+                before = file_tree(run)
+
+                status = controller.status_run(self.repository, "controller-test")
+
+                self.assertEqual(status["phase"], "LEGACY_STATE_RESTART_REQUIRED")
+                self.assertTrue(status["recovery_required"])
+                self.assertEqual(status["next_commands"], [])
+                self.assertIn("new task slug", status["recovery_guidance"])
+                self.assertEqual(before, file_tree(run))
+
+                controller.write_json_atomic(run / "state.json", baseline)
+
+    def test_unbound_v3_null_attestation_upgrades_only_on_next_normal_transition(self) -> None:
+        self._init_run()
+        state = self._state()
+        state["model_attestation_schema_version"] = 3
+        controller.write_json_atomic(self._run_dir() / "state.json", state)
+        self.assertEqual(state["model_attestation_schema_version"], 3)
+        before = self._state_bytes()
+
+        status = controller.status_run(self.repository, "controller-test")
+
+        self.assertEqual(status["phase"], "REQUIREMENTS_PENDING")
+        self.assertTrue(status["legacy_model_attestation_upgrade_pending"])
+        self.assertEqual(before, self._state_bytes())
+
+        controller.prepare_requirements(self.repository, "controller-test")
+        upgraded = self._state()
+        self.assertEqual(upgraded["model_attestation_schema_version"], 4)
+        self.assertIsNone(upgraded["visible_model_label"])
+        self.assertIsNone(upgraded["visible_reasoning_label"])
+        self.assertIsNone(upgraded["visible_plan_label"])
 
     def test_init_refuses_existing_run_and_unapproved_dirty_baseline(self) -> None:
         self._init_run()

@@ -813,13 +813,13 @@ def _normalize_model_attestation_state(
             restart_required()
         return state, False
 
-    # A v2 state may be upgraded only when every identity field is explicitly
-    # null and the conversation is still unbound.  A bound or partial v2 state
-    # cannot be re-attested without guessing what the old Browser observed.
-    coherent_v2_unbound = (
+    # A coherent pre-v4 state may be upgraded only when every identity field is
+    # explicitly null and the conversation is still unbound. A bound or partial
+    # pre-v4 state cannot be re-attested without guessing old Browser evidence.
+    coherent_pre_v4_unbound = (
         has_version
         and type(version) is int
-        and version == 2
+        and version in {2, 3}
         and has_attestation_fields
         and unbound
         and valid_policy_shape()
@@ -843,7 +843,7 @@ def _normalize_model_attestation_state(
         and not any(field in state for field in observation_fields)
         and valid_policy_shape()
     )
-    if coherent_v2_unbound or legacy_unbound:
+    if coherent_pre_v4_unbound or legacy_unbound:
         normalized = dict(state)
         normalized[version_field] = current_version
         normalized["visible_model_label"] = None

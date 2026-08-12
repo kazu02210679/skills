@@ -26,11 +26,11 @@ For an explicit HOTL-bound run, initialize GPT with the exact deterministic HOTL
 deployments, requirements changes, or other external actions. Standalone use
 of the GPT Pro controller remains unchanged.
 
-## GPT-5.6 Pro の確認
+## GPT-5.6 Sol / Pro attestation
 
-`PRO_CLASS` はCodex内ブラウザのChatGPT画面で、契約プランが `Pro`・`Business`・`Enterprise` のいずれか、モデルが `GPT-5.6 Pro`、推論レベルが `Pro` であることを別々に確認します。`GPT-5.6 Sol` はCodex／Sol Advisor側のモデルであり、このGPT Pro経路では拒否します。`非常に高い`（`Extra High` / `Very High`）もPro推論ではないため拒否します。
+`PRO_CLASS` は、Codex内ブラウザのChatGPT画面で独立したUIフィールドを確認します。モデル欄は正確に `GPT-5.6 Sol`、推論の強さ欄は正確に `Pro`、プラン欄は `Pro`・`Business`・`Enterprise` のいずれかでなければなりません。モデルの identity と reasoning strength は別の次元です。旧契約の `GPT-5.6 Pro`、`Sol` + `High`、`Extra High`、`Very High`、`非常に高い`、空白・大文字小文字違い・ローカライズ表記・許可外プランは拒否します。
 
-旧controllerのrunは、会話未固定でURL・モデル・推論・プランがすべてnullなら、coherentなv2（または旧形式の未束縛state）を次の通常遷移でv3/nullへ更新します。すでに会話固定済み、v2の一部だけが残るstate、またはモデル証明が部分的な旧stateは推測移行せず、`LEGACY_STATE_RESTART_REQUIRED` で停止します。requirements/review/finalのreceipt exportも同じ読み取り専用分類を適用します。旧runを保持したまま、新しいtask slugで再開始してください。
+旧controllerのrunは、会話未固定でURL・モデル・推論・プランがすべてnullなら、coherentなv3またはv2（または旧形式の未束縛state）を次の通常遷移でv4/nullへ更新します。すでに会話固定済み、v3/v2の一部だけが残るstate、またはモデル証明が部分的・不正な旧stateは推測移行せず、`LEGACY_STATE_RESTART_REQUIRED` で停止します。requirements/review/finalのreceipt exportも同じ読み取り専用分類を適用します。旧runを保持したまま、新しいtask slugで再開始してください。
 In explicit composition mode, a Luna-Max sub-agent handles one bounded
 read-only routine review before the final Pro review. Sol is reserved for one
 bounded read-only high-impact consultation when escalation evidence warrants
