@@ -1554,6 +1554,10 @@ _GPT_BINDING_FIELDS = frozenset(
     }
 )
 _GPT_TASK_SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\Z")
+GPT_MODEL_ATTESTATION_SCHEMA_VERSION = 4
+GPT_PRO_CLASS_MODEL_LABEL = "GPT-5.6 Sol"
+GPT_PRO_CLASS_REASONING_LABEL = "Pro"
+GPT_PRO_CLASS_PLAN_LABELS = frozenset({"Pro", "Business", "Enterprise"})
 
 
 def gpt_governance_execution_id(task_slug: str) -> str:
@@ -1977,10 +1981,13 @@ def _validate_gpt_binding(
             "INVALID_RECEIPT_BINDING",
             "GPT Pro model, reasoning, and plan bindings must be nonempty.",
         )
+    # GPT attestation v4 keeps model identity, reasoning strength, and plan as
+    # separate receipt binding fields. The authoritative exporter below also
+    # rejects bound/pre-v4 source state before HOTL retains any audit bytes.
     if (
-        model != "GPT-5.6 Pro"
-        or reasoning != "Pro"
-        or plan not in {"Pro", "Business", "Enterprise"}
+        model != GPT_PRO_CLASS_MODEL_LABEL
+        or reasoning != GPT_PRO_CLASS_REASONING_LABEL
+        or plan not in GPT_PRO_CLASS_PLAN_LABELS
     ):
         raise ControllerError(
             "INVALID_RECEIPT_BINDING", "GPT Pro model attestation is not canonical."
@@ -2054,6 +2061,19 @@ def _validate_persisted_gpt_receipt(source: Mapping[str, object], raw: bytes, gp
         sys.modules[spec.name] = module
         try:
             spec.loader.exec_module(module)
+            state_path = (
+                Path(gpt_repository)
+                / ".ai-pro-loop"
+                / binding["task_slug"]
+                / "state.json"
+            )
+            state = module.load_json(state_path)
+            if (
+                type(state.get("model_attestation_schema_version")) is not int
+                or state["model_attestation_schema_version"]
+                != GPT_MODEL_ATTESTATION_SCHEMA_VERSION
+            ):
+                raise ValueError("GPT source model attestation schema is not v4.")
             exported = module.export_governance_receipt(gpt_repository, binding["task_slug"], export_kind)
             exported_bytes = module._canonical_json_bytes(exported)
         finally:

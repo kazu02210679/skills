@@ -115,6 +115,16 @@ the caller-held lock. Later lifecycle changes still make that admitted receipt
 non-current. Other issuers retain their existing closed schemas and binding
 rules.
 
+For `gpt-pro-codex-loop`, the authoritative source must use
+`model_attestation_schema_version=4`. Its receipt binding keeps model identity,
+reasoning strength, and plan separate: the exact accepted tuple is
+`model_label=GPT-5.6 Sol`, `reasoning_label=Pro`, and plan `Pro`, `Business`, or
+`Enterprise`. `GPT-5.6 Pro`, `Sol` with `High`/`Extra High`/`Very High` or
+localized approximations, missing fields, aliases, and unsupported plans fail
+closed before any receipt bytes are retained. A valid import is still an
+audit-only `receipt_imported` event and cannot satisfy G1 without an independent
+provider.
+
 The deterministic GPT governance identity algorithm is closed as v1. Canonical
 JSON means UTF-8, sorted keys, compact separators, and exactly one terminal LF.
 For task slug `T`, `run_id` is the literal `gpc-loop-` + `T`.

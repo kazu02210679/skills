@@ -16,6 +16,8 @@ Do not infer governance from files or ordinary requests. Standalone `gpt-pro-cod
 
 This controller validates closed-schema receipts and deterministic predicates. It does not interpret review prose, free text, operator assertions, or an LLM's conclusion as evidence.
 
+GPT Pro receipt imports require the authoritative source's model-attestation schema v4. The v4 GPT binding keeps model identity, reasoning strength, and plan as separate fields and accepts only `model_label=GPT-5.6 Sol`, `reasoning_label=Pro`, and plan `Pro`, `Business`, or `Enterprise`. Reject `GPT-5.6 Pro`, non-Pro reasoning labels, missing or approximate values, and unsupported pre-v4 bound source state. A valid import remains audit-only and cannot open G1 without an independent provider.
+
 ## Operating contract
 
 Use the following sequence. Before every state-changing operation, run `status`; execute only a listed successor command. Record or import evidence first, then run `evaluate` to create a state transition. `record` and `import-receipt` never advance state.

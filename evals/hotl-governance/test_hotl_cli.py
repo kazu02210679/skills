@@ -31,10 +31,10 @@ import governance_receipt as sol_receipts
 
 EXECUTION = "EXEC-C6EBD51734DE"
 SNAPSHOT = "sha256:" + "b" * 64
-NONCE = "7f32e6d296c9a0de1ea3970aa42a6828"
+NONCE = "d6869e970ce7ce7dec3b0ca23b9e282e"
 GPT_BINDING = {
     "conversation_url": "https://chatgpt.com/c/hotl-fixture",
-    "model_label": "GPT-5.6 Pro",
+    "model_label": "GPT-5.6 Sol",
     "plan_label": "Pro",
     "reasoning_label": "Pro",
     "run_id": "gpc-loop-hotl-fixture",
@@ -147,7 +147,7 @@ class HotlCliTests(unittest.TestCase):
             "verification_strategy": ["Run the focused unittest."],
         }
         binding = {
-            "conversation_url": "https://chatgpt.com/c/hotl-e2e", "model_label": "GPT-5.6 Pro",
+            "conversation_url": "https://chatgpt.com/c/hotl-e2e", "model_label": "GPT-5.6 Sol",
             "plan_label": "Pro", "reasoning_label": "Pro", "run_id": "gpc-loop-hotl-e2e", "task_slug": task_slug,
         }
         self.execution = controller.gpt_governance_execution_id(task_slug)
@@ -201,7 +201,7 @@ class HotlCliTests(unittest.TestCase):
             task_slug,
             response,
             "https://chatgpt.com/c/hotl-e2e",
-            "GPT-5.6 Pro",
+            "GPT-5.6 Sol",
             "Pro",
             "Pro",
         )
@@ -300,7 +300,7 @@ class HotlCliTests(unittest.TestCase):
             task_slug,
             review_response,
             str(state["bound_conversation_url"]),
-            "GPT-5.6 Pro",
+            "GPT-5.6 Sol",
             "Pro",
             "Pro",
         )
@@ -1334,32 +1334,54 @@ class HotlCliTests(unittest.TestCase):
             self._import(incomplete, "gpt-binding-incomplete.json")["error"]["code"],
         )
 
-        sol_binding = dict(receipt["binding"], model_label="GPT-5.6 Sol")
-        sol_receipt = dict(
-            receipt,
-            binding=sol_binding,
-            authority_snapshot_digest=controller.gpt_governance_authority_digest(
-                sol_binding
-            ),
-            nonce=controller.gpt_governance_nonce(sol_binding),
-            transaction_id="gpc-loop-hotl-fixture:requirements-01",
-        )
-        sol_identity = {
-            field: sol_receipt[field]
-            for field in (
-                "authority_snapshot_digest", "binding", "claims", "execution_id",
-                "input_digest", "issued_at_unix", "nonce", "output_digest",
-                "receipt_type", "requirements_digest", "snapshot_digest",
-                "transaction_id",
-            )
-        }
-        sol_receipt["receipt_id"] = "RCP-GPC-" + hashlib.sha256(
-            contract.canonical_json_bytes(sol_identity)
-        ).hexdigest()[:20].upper()
+        missing_field = dict(receipt)
+        missing_binding = dict(receipt["binding"])
+        del missing_binding["reasoning_label"]
+        missing_field["binding"] = missing_binding
         self.assertEqual(
-            "INVALID_RECEIPT_BINDING",
-            self._import(sol_receipt, "gpt-binding-sol.json")["error"]["code"],
+            "INVALID_FIELDS",
+            self._import(missing_field, "gpt-binding-missing-reasoning.json")["error"]["code"],
         )
+
+        invalid_binding_cases = (
+            ("legacy-model", {"model_label": "GPT-5.6 Pro"}),
+            ("high-reasoning", {"reasoning_label": "High"}),
+            ("extra-high-reasoning", {"reasoning_label": "Extra High"}),
+            ("very-high-reasoning", {"reasoning_label": "Very High"}),
+            ("localized-reasoning", {"reasoning_label": "非常に高い"}),
+            ("missing-reasoning-value", {"reasoning_label": None}),
+            ("whitespace-model", {"model_label": " GPT-5.6 Sol"}),
+            ("case-model", {"model_label": "gpt-5.6 sol"}),
+            ("wrong-plan", {"plan_label": "Plus"}),
+        )
+        for name, changes in invalid_binding_cases:
+            with self.subTest(name=name):
+                invalid_binding = dict(receipt["binding"], **changes)
+                invalid = dict(
+                    receipt,
+                    binding=invalid_binding,
+                    authority_snapshot_digest=controller.gpt_governance_authority_digest(
+                        invalid_binding
+                    ),
+                    nonce=controller.gpt_governance_nonce(invalid_binding),
+                )
+                self.assertEqual(
+                    "INVALID_RECEIPT_BINDING",
+                    self._import(invalid, f"gpt-binding-{name}.json")["error"]["code"],
+                )
+
+    def test_v4_sol_receipt_reaches_deep_receipt_identity_validation(self) -> None:
+        exported = self._export_frozen_gpt_requirements()
+        receipt, _artifact, _receipt_bytes = exported
+        self.assertEqual("GPT-5.6 Sol", receipt["binding"]["model_label"])
+        self.assertEqual("Pro", receipt["binding"]["reasoning_label"])
+        self.assertIn(receipt["binding"]["plan_label"], {"Pro", "Business", "Enterprise"})
+        self._init_from_gpt_requirements(exported, import_receipt=False)
+
+        mutated = dict(receipt, requirements_digest="sha256:" + "d" * 64)
+        result = self._import(mutated, "gpt-v4-deep-receipt-identity.json")
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("GPT_RECEIPT_ID_MISMATCH", result["error"]["code"])
 
     def test_gpt_identity_derivation_is_domain_separated_and_recomputed(self) -> None:
         self.assertEqual(
@@ -1367,10 +1389,13 @@ class HotlCliTests(unittest.TestCase):
             controller.gpt_governance_execution_id("hotl-fixture"),
         )
         self.assertEqual(
-            "7f32e6d296c9a0de1ea3970aa42a6828",
+            "d6869e970ce7ce7dec3b0ca23b9e282e",
             controller.gpt_governance_nonce(GPT_BINDING),
         )
-        self.assertEqual(AUTHORITY, controller.gpt_governance_authority_digest(GPT_BINDING))
+        self.assertEqual(
+            "sha256:a02cffe5ac49d1d4cb23791464391358f0863f4fb6f83604342e71e3777fd51e",
+            controller.gpt_governance_authority_digest(GPT_BINDING),
+        )
         changed = dict(
             GPT_BINDING,
             task_slug="hotl-fixture-2",
@@ -1381,7 +1406,7 @@ class HotlCliTests(unittest.TestCase):
             controller.gpt_governance_execution_id("hotl-fixture-2"),
         )
         self.assertEqual(
-            "01c7f536a64d8cf60c3ef0899b532704",
+            "58576b717cadf982dd1131f9604cfd14",
             controller.gpt_governance_nonce(changed),
         )
         self.assertNotEqual(
@@ -2313,7 +2338,7 @@ class HotlCliTests(unittest.TestCase):
         )
         successor_binding = {
             "conversation_url": "https://chatgpt.com/c/hotl-successor",
-            "model_label": "GPT-5.6 Pro",
+            "model_label": "GPT-5.6 Sol",
             "plan_label": "Pro",
             "reasoning_label": "Pro",
             "run_id": "gpc-loop-hotl-successor",

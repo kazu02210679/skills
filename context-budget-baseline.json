@@ -3,8 +3,8 @@
   "repository_totals": {
     "skill_count": 13,
     "metadata_utf8_bytes": 5209,
-    "utf8_bytes": 112980,
-    "approx_tokens": 28245
+    "utf8_bytes": 113478,
+    "approx_tokens": 28370
   },
   "skills": [
     {"name": "co-create-plan", "metadata_utf8_bytes": 464, "skill_md_utf8_bytes": 8656, "auxiliary_utf8_bytes": 0},
@@ -13,7 +13,7 @@
     {"name": "create-project-map", "metadata_utf8_bytes": 405, "skill_md_utf8_bytes": 3764, "auxiliary_utf8_bytes": 0},
     {"name": "gpt-pro-codex-loop", "metadata_utf8_bytes": 285, "skill_md_utf8_bytes": 15431, "auxiliary_utf8_bytes": 0},
     {"name": "handoff", "metadata_utf8_bytes": 661, "skill_md_utf8_bytes": 7052, "auxiliary_utf8_bytes": 0},
-    {"name": "hotl-governance", "metadata_utf8_bytes": 338, "skill_md_utf8_bytes": 4466, "auxiliary_utf8_bytes": 0},
+    {"name": "hotl-governance", "metadata_utf8_bytes": 338, "skill_md_utf8_bytes": 4964, "auxiliary_utf8_bytes": 0},
     {"name": "monitoring-subagents", "metadata_utf8_bytes": 277, "skill_md_utf8_bytes": 3205, "auxiliary_utf8_bytes": 0},
     {"name": "open-pull-request", "metadata_utf8_bytes": 465, "skill_md_utf8_bytes": 18018, "auxiliary_utf8_bytes": 0},
     {"name": "orchestrate-gpt-pro-sol-advisor", "metadata_utf8_bytes": 170, "skill_md_utf8_bytes": 8772, "auxiliary_utf8_bytes": 6775},

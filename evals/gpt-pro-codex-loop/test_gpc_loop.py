@@ -988,22 +988,22 @@ class ControllerCase(unittest.TestCase):
         self.assertTrue(initialized["ok"], initialized)
 
         cases = (
-            ("execution", {"execution_id": "EXEC-000000000BAD"}, "INVALID_RECEIPT_BINDING"),
+            ("execution", {"execution_id": "EXEC-000000000BAD"}, "GPT_IDENTITY_MISMATCH"),
             (
                 "authority",
                 {"authority_snapshot_digest": "sha256:" + "d" * 64},
-                "INVALID_RECEIPT_BINDING",
+                "GPT_IDENTITY_MISMATCH",
             ),
-            ("nonce", {"nonce": "d" * 32}, "INVALID_RECEIPT_BINDING"),
+            ("nonce", {"nonce": "d" * 32}, "GPT_IDENTITY_MISMATCH"),
             (
                 "requirements",
                 {"requirements_digest": "sha256:" + "d" * 64},
-                "INVALID_RECEIPT_BINDING",
+                "GPT_RECEIPT_ID_MISMATCH",
             ),
             (
                 "snapshot",
                 {"snapshot_digest": "sha256:" + "d" * 64},
-                "INVALID_RECEIPT_BINDING",
+                "GPT_RECEIPT_ID_MISMATCH",
             ),
             (
                 "binding",
@@ -1013,7 +1013,7 @@ class ControllerCase(unittest.TestCase):
                         conversation_url="https://chatgpt.com/c/other",
                     )
                 },
-                "INVALID_RECEIPT_BINDING",
+                "GPT_IDENTITY_MISMATCH",
             ),
             ("unknown", {"unknown": True}, "INVALID_FIELDS"),
         )
@@ -1043,7 +1043,7 @@ class ControllerCase(unittest.TestCase):
             str(receipt_path),
         )
         self.assertFalse(unbound["ok"], unbound)
-        self.assertEqual("INVALID_RECEIPT_BINDING", unbound["error"]["code"])
+        self.assertEqual("HOTL_CONTEXT_MISMATCH", unbound["error"]["code"])
 
     def _prepare_supplemental_review(self) -> dict[str, object]:
         self._accept_evidence_request()
