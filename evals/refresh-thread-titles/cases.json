@@ -90,5 +90,98 @@
       "renamed": false,
       "reason": "protected-user-version-title"
     }
+  },
+  {
+    "id": "state-prefix-required-for-unprotected-titles",
+    "prompt": "An eligible thread has an accurate task phrase but no state emoji, or has a stale state emoji.",
+    "expect": {
+      "state_emoji_required": true,
+      "stale_state_emoji_updated": true,
+      "accurate_task_phrase_preserved": true,
+      "inactivity_is_not_completion": true
+    }
+  },
+  {
+    "id": "title-length-is-bounded",
+    "prompt": "An eligible title is too long to scan quickly while retaining a meaningful task identity.",
+    "expect": {
+      "recommended_length": "12-18",
+      "target_length": 15,
+      "state_and_space_counted": true,
+      "meaning_and_protected_names_take_priority": true,
+      "unsafe_personal_data_excluded": true
+    }
+  },
+  {
+    "id": "bounded-discovery-retry-and-failure",
+    "prompt": "A scheduled pass sees list_threads become unresponsive or time out transiently.",
+    "expect": {
+      "initial_limit_is_bounded": true,
+      "finite_host_deadline": true,
+      "retry_at_most_once": true,
+      "retry_same_or_smaller_limit": true,
+      "second_timeout_is_discovery_failure": true,
+      "unknown_count_not_zero": true,
+      "no_updates_from_partial_or_stale_listing": true
+    }
+  },
+  {
+    "id": "host-schema-and-no-invented-pagination",
+    "prompt": "The Codex host exposes list_threads({limit}), read_thread(cursor...), and set_thread_title.",
+    "expect": {
+      "list_threads_uses_limit": true,
+      "list_threads_has_no_cursor": true,
+      "read_thread_may_follow_cursor": true,
+      "set_thread_title_is_used": true,
+      "skill_does_not_require_list_pagination": true
+    }
+  },
+  {
+    "id": "per-item-state-reporting",
+    "prompt": "A pass changes some titles, leaves some unchanged, protects versioned names, and cannot read one item.",
+    "expect": {
+      "every_item_reports_state_and_title": true,
+      "result_labels": ["changed", "unchanged", "protected", "skipped", "failed"],
+      "unknown_state_when_unreadable": true,
+      "lookback_separate_from_confirmed_changes": true,
+      "discovery_failure_separate": true,
+      "conversation_content_hidden": true
+    }
+  },
+  {
+    "id": "protected-title-state-is-read-only",
+    "prompt": "A protected _v title is eligible, its whole thread is readable, and its latest explicit evidence indicates it is waiting for user input.",
+    "expect": {
+      "protected_title_is_read_for_state": true,
+      "protected_raw_title_unchanged": true,
+      "protected_report_state": "⏸",
+      "protected_title_not_mutated": true,
+      "whole_thread_used": true
+    }
+  },
+  {
+    "id": "short-title-expands-from-durable-objective",
+    "prompt": "An active thread's accurate non-protected title is 'API仕様整理' and the whole thread establishes that it is organizing the public API migration plan.",
+    "expect": {
+      "synthetic_active_example": "🔄 API仕様整理 移行計画",
+      "recommended_length_range": "12-18",
+      "expands_short_title_from_whole_thread": true,
+      "preserves_task_phrase_meaning": true,
+      "does_not_pad_with_guesswork": true,
+      "protected_short_title_exception": "_v2"
+    }
+  },
+  {
+    "id": "discovery-failure-counts-are-unknown",
+    "prompt": "Both bounded list_threads attempts time out before any item can be evaluated.",
+    "expect": {
+      "target_count": "unknown",
+      "unchanged_count": "unknown",
+      "protected_count": "unknown",
+      "skipped_count": "unknown",
+      "failed_count": "unknown",
+      "confirmed_changes": 0,
+      "no_item_evaluation": true
+    }
   }
 ]

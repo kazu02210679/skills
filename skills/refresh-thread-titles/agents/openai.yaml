@@ -1,4 +1,4 @@
 interface:
   display_name: "Refresh Thread Titles"
-  short_description: "Refresh titles from full thread context"
-  default_prompt: "Use $refresh-thread-titles to refresh titles from each full thread while preserving user version titles ending in _v plus digits."
+  short_description: "Refresh evidence-backed titles safely"
+  default_prompt: "Use $refresh-thread-titles for one bounded pass: list_threads({limit}), read each whole available thread, require a state emoji on every non-protected title, preserve exact _v plus ASCII/full-width digit titles, and report each item plus discovery failures."
