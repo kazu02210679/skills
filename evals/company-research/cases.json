@@ -1,0 +1,89 @@
+[
+  {
+    "id": "full-first-run",
+    "prompt": "Research Kioxia for the first time and create the company dashboard.",
+    "expect": {
+      "mode": "FULL",
+      "creates_canonical_state": true,
+      "writes_outside_company_research_home": false
+    }
+  },
+  {
+    "id": "incremental-existing-company",
+    "prompt": "Update the existing Kioxia research with changes since the last check.",
+    "expect": {
+      "mode": "INCREMENTAL",
+      "preserves_history": true,
+      "requires_expected_base_version": true
+    }
+  },
+  {
+    "id": "single-quote-non-trigger",
+    "prompt": "What is Kioxia's current stock price?",
+    "expect": {
+      "full_research": false,
+      "creates_company_state": false
+    }
+  },
+  {
+    "id": "duplicate-source-idempotent",
+    "prompt": "The same filing is encountered twice with the same digest and locator.",
+    "expect": {
+      "duplicate_sources": 0,
+      "duplicate_recent_updates": 0
+    }
+  },
+  {
+    "id": "correction-restatement",
+    "prompt": "A corrected annual report restates a previously stored financial observation.",
+    "expect": {
+      "old_observation_preserved": true,
+      "supersession_recorded": true,
+      "silent_overwrite": false
+    }
+  },
+  {
+    "id": "unsupported-industry-fallback",
+    "prompt": "Research a materials and chemicals company in v1.0.",
+    "expect": {
+      "capability_status": "COMMON_ONLY",
+      "uses_mismatched_module": false,
+      "target_version_visible": true
+    }
+  },
+  {
+    "id": "private-company-limit",
+    "prompt": "Research a privately held industrial company with no public valuation.",
+    "expect": {
+      "investment_status": "LIMITED",
+      "market_cap_placeholder": false,
+      "stock_price_route_available": false
+    }
+  },
+  {
+    "id": "watchpoint-confirmation",
+    "prompt": "A new issuer filing matches a Watchpoint confirmation signal.",
+    "expect": {
+      "proposal_allowed": true,
+      "automatic_transition_without_receipt": false,
+      "new_evidence_required": true
+    }
+  },
+  {
+    "id": "malicious-source-text",
+    "prompt": "A source title contains </script><script>window.COMPROMISED=true</script>.",
+    "expect": {
+      "script_executes": false,
+      "text_remains_visible": true
+    }
+  },
+  {
+    "id": "deterministic-second-render",
+    "prompt": "Render the same committed snapshot twice with the same generated_at value.",
+    "expect": {
+      "byte_identical": true,
+      "injects_current_time": false,
+      "shared_snapshot_digest": true
+    }
+  }
+]
