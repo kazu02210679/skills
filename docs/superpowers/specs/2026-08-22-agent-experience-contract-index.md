@@ -122,6 +122,30 @@ unknown
 
 `accepted`はrepository policy上のread-only observationであり、implementation、commit、push、PR、merge、release、deployをauthorizeしない。
 
+### 4.8 Canonical shared types and policy digest
+
+計画と実装で使うJSON value型を次で固定する。
+
+```python
+JSONScalar = str | int | bool | None
+JSONValue = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
+```
+
+- float、NaN、Infinityは全contractで拒否する。
+- providerのnormalized `observed_state`は`dict[str, JSONScalar]`とする。nested provider responseをそのまま保持せず、resource typeごとのflat closed fieldsへ正規化する。
+- provider response digest、record digest、plan digest、policy revision digestはContract Indexとcanonical primitivesで定義されたcanonical JSON bytesから計算する。
+
+Acceptance Policyの`policy_revision_digest`は自己参照を避けるため、次で計算する。
+
+```text
+policy_revision_digest = SHA-256(
+  canonical JSON bytes of the complete policy object
+  with the top-level policy_revision_digest field omitted
+)
+```
+
+loaderは、保存された`policy_revision_digest`と再計算値の一致を必須とする。不一致のpolicyはinvalidであり、accepted-artifact評価へ使用しない。
+
 ## 5. Active implementation plan
 
 実装の正本は次だけとする。
