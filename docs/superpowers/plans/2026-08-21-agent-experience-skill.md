@@ -312,7 +312,6 @@ git commit -m "feat: define agent experience skill contract"
 ### Task 3: Implement canonical JSON, digest, path, and time primitives
 
 **Files:**
-- Create: `skills/agent-experience/scripts/agent_experience.py`
 - Create: `skills/agent-experience/scripts/agent_experience_lib/__init__.py`
 - Create: `skills/agent-experience/scripts/agent_experience_lib/canonical.py`
 - Create: `tests/test_agent_experience_canonical.py`
@@ -350,11 +349,7 @@ def digest_bytes(value: bytes) -> str:
 
 `load_json_strict` uses `object_pairs_hook`, `parse_float`, and `parse_constant` to reject duplicate keys and non-integer numbers. `canonical_json_bytes` uses sorted keys, compact separators, UTF-8, and `allow_nan=False`.
 
-- [ ] **Step 4: Add the executable entry point**
-
-`agent_experience.py` imports `main` from `agent_experience_lib.cli`; Task 4 introduces that module. Until then the canonical unit test imports only `agent_experience_lib.canonical` and does not execute the entry point.
-
-- [ ] **Step 5: Run and verify GREEN**
+- [ ] **Step 4: Run and verify GREEN**
 
 ```bash
 python -m unittest tests/test_agent_experience_canonical.py -v
@@ -362,10 +357,10 @@ python -m unittest tests/test_agent_experience_canonical.py -v
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add skills/agent-experience/scripts/agent_experience.py skills/agent-experience/scripts/agent_experience_lib/__init__.py skills/agent-experience/scripts/agent_experience_lib/canonical.py tests/test_agent_experience_canonical.py
+git add skills/agent-experience/scripts/agent_experience_lib/__init__.py skills/agent-experience/scripts/agent_experience_lib/canonical.py tests/test_agent_experience_canonical.py
 git commit -m "feat: add agent experience canonical primitives"
 ```
 
@@ -374,6 +369,7 @@ git commit -m "feat: add agent experience canonical primitives"
 ### Task 4: Implement closed configuration and stable CLI envelopes
 
 **Files:**
+- Create: `skills/agent-experience/scripts/agent_experience.py`
 - Create: `skills/agent-experience/scripts/agent_experience_lib/config.py`
 - Create: `skills/agent-experience/scripts/agent_experience_lib/cli.py`
 - Create: `skills/agent-experience/schemas/config.schema.json`
@@ -381,7 +377,7 @@ git commit -m "feat: add agent experience canonical primitives"
 
 **Interfaces:**
 - Consumes: `ContractError`, `canonical_json_bytes`, `normalize_relative_path` from Task 3.
-- Produces: `Config`, `load_config`, `success_envelope`, `error_envelope`, `main`.
+- Produces: `Config`, `load_config`, `success_envelope`, `error_envelope`, `main`, executable `agent_experience.py`.
 
 - [ ] **Step 1: Write failing configuration and CLI-envelope tests**
 
@@ -415,18 +411,32 @@ Failure shape:
 
 Unknown command exits `2`. stdout remains machine-readable JSON; stderr is reserved for bounded diagnostics.
 
-- [ ] **Step 5: Run and verify GREEN**
+- [ ] **Step 5: Add the executable entry point**
+
+```python
+#!/usr/bin/env python3
+from __future__ import annotations
+
+from agent_experience_lib.cli import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 6: Run and verify GREEN**
 
 ```bash
 python -m unittest tests/test_agent_experience_config.py -v
+python skills/agent-experience/scripts/agent_experience.py unsupported --json
 ```
 
-Expected: PASS.
+Expected: unit tests PASS; the second command exits `2` with the stable `unknown_command` JSON envelope.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add skills/agent-experience/scripts/agent_experience_lib/config.py skills/agent-experience/scripts/agent_experience_lib/cli.py skills/agent-experience/schemas/config.schema.json tests/test_agent_experience_config.py
+git add skills/agent-experience/scripts/agent_experience.py skills/agent-experience/scripts/agent_experience_lib/config.py skills/agent-experience/scripts/agent_experience_lib/cli.py skills/agent-experience/schemas/config.schema.json tests/test_agent_experience_config.py
 git commit -m "feat: add agent experience config and cli envelope"
 ```
 
@@ -1111,19 +1121,15 @@ Expected: FAIL because GC commands do not exist.
 
 `gc --dry-run` returns a canonical deletion plan and SHA-256 digest. `gc --apply` requires the exact digest and rechecks the candidate set inside a mutation transaction before deleting anything.
 
-- [ ] **Step 4: Assert Hooks cannot call GC**
-
-Expose no GC helper from `hooks.py`; later Hook tests import the handler module and verify no GC dispatch path exists.
-
-- [ ] **Step 5: Run the Memory Core gate**
+- [ ] **Step 4: Run the Memory Core gate**
 
 ```bash
 python -m unittest tests/test_agent_experience_records.py tests/test_agent_experience_security.py tests/test_agent_experience_reindex.py tests/test_agent_experience_projection.py tests/test_agent_experience_promotion.py tests/test_agent_experience_recall.py tests/test_agent_experience_feedback.py tests/test_agent_experience_gc.py -v
 ```
 
-Expected: PASS for forged status, digest mutation, stale guidance, harmful feedback, secrets, FTS injection, and budgets.
+Expected: PASS for forged status, digest mutation, stale guidance, harmful feedback, secrets, FTS injection, retention, and budgets.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add skills/agent-experience/scripts tests/test_agent_experience_gc.py
@@ -1146,7 +1152,7 @@ git commit -m "feat: add guarded agent experience retention"
 
 - [ ] **Step 1: Write failing context-boundary tests**
 
-Feed private prompt, transcript path, repository path, branch, injected record, checkpoint objective, and token fixtures. Assert none appear in stdout, stderr, or SQLite. Assert `SessionStart` emits only the fixed routing notice; `PreCompact`, `PostCompact`, and `SessionEnd` emit nothing; `UserPromptSubmit` is unsupported.
+Feed private prompt, transcript path, repository path, branch, injected record, checkpoint objective, and token fixtures. Assert none appear in stdout, stderr, or SQLite. Assert `SessionStart` emits only the fixed routing notice; `PreCompact`, `PostCompact`, and `SessionEnd` emit nothing; `UserPromptSubmit` is unsupported; no Hook dispatch path invokes `recall`, `reindex`, `seal`, `promote`, or `gc`.
 
 - [ ] **Step 2: Run and verify RED**
 
