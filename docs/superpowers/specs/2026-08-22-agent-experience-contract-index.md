@@ -6,9 +6,7 @@
 
 ## 1. 目的
 
-`agent-experience` の設計は、基礎設計、敵対的レビュー追補、Normative Runtime Contract、Remote Repository State追補、Open Questions Clarification Contractへ分割されている。本書は、それらを一つの実装契約として読むための唯一の入口、優先順位、結合規則を固定する。
-
-本書はruntime機能を単独で定義する合成本文ではない。binding documents、適用domain、競合解消、active implementation planを一意に定めるcanonical entry pointである。
+本書は、`agent-experience` v1の設計契約を読むための**唯一の規範的入口**である。
 
 ```text
 canonical entry point
@@ -21,25 +19,29 @@ active implementation plan
   = this indexが指定する一つの計画書
 ```
 
+本書は全仕様本文を複製した合成文書ではない。文書の読み順、適用domain、競合解消、実装計画、hard gateを一意に固定する。
+
 ## 2. Binding documents
 
 実装者は次をすべて読む。
 
 1. `docs/superpowers/specs/2026-08-22-agent-experience-contract-index.md`
-2. `docs/superpowers/specs/2026-08-22-agent-experience-open-questions-clarification.md`
-3. `docs/superpowers/specs/2026-08-22-agent-experience-remote-state-amendment.md`
-4. `docs/superpowers/specs/2026-08-21-agent-experience-skill-normative-contract.md`
-5. `docs/superpowers/specs/2026-08-21-agent-experience-skill-adversarial-amendment.md`
-6. `docs/superpowers/specs/2026-08-21-agent-experience-skill-design.md`
+2. `docs/superpowers/specs/2026-08-22-agent-experience-trust-roots-runtime-clarification.md`
+3. `docs/superpowers/specs/2026-08-22-agent-experience-open-questions-clarification.md`
+4. `docs/superpowers/specs/2026-08-22-agent-experience-remote-state-amendment.md`
+5. `docs/superpowers/specs/2026-08-21-agent-experience-skill-normative-contract.md`
+6. `docs/superpowers/specs/2026-08-21-agent-experience-skill-adversarial-amendment.md`
+7. `docs/superpowers/specs/2026-08-21-agent-experience-skill-design.md`
 
 ## 3. Precedence
 
 文書が競合する場合、次を適用する。
 
 ```text
-current system / developer / user instruction
-  > repository instruction
+system / developer / user instruction under the host hierarchy
+  > active repository instruction
   > this Contract Index
+  > Trust Roots and Runtime Semantics Clarification, listed domains
   > Open Questions Clarification Contract, listed domains
   > Remote-State Amendment, remote-state domain only
   > Normative Runtime Contract
@@ -47,17 +49,37 @@ current system / developer / user instruction
   > Base Design
 ```
 
-Open Questions Clarification Contractは、Acceptance Policy、remote digests / taxonomy / resource semantics、review / check evaluation、checkpoint selection / resume、canonicalization、schema version、time、deduplication、Hook / CLI boundary、retention、implementation dependency、RED、pilot、release milestonesを閉じる。
+### 3.1 Domain of the Trust Roots clarification
 
-Remote-State Amendmentは、上記clarificationで上書きされないremote repository observation、freshness、provider adapter、accepted artifact、remote-dependent checkpointを拡張する。
+次を上書きまたは拡張する。
 
-remote-state以外のcheckpoint、promotion、Hook、installer、retention、record projectionではNormative Runtime ContractとAdversarial Review Amendmentを優先する。ただしClarification Contractが明示的に列挙した項目はClarification Contractを優先する。
+- Policy bootstrap trust root
+- Policy repository binding
+- content-binding selection
+- accepted-artifact SHA graph
+- remote observation provenance
+- `seal` semantics
+- effective review state
+- required-check target SHA
+- remote freshness TOCTOU
+- same-checkpoint manual resume
+- stable-only dependency closure
+- storage tier
+- SQLite concurrency
+- instruction / hard safety boundary
+- automatic trigger guarantee
+- severity / review closure
+- Task 1とPolicy bootstrapの順序
 
-同じ優先順位内で二つの要求を同時に満たせない場合、実装を開始せず、設計追補を作成して矛盾を閉じる。
+### 3.2 Conflict rule
+
+同じ優先順位内で二つの要求を同時に満たせない場合、実装を開始しない。追加clarificationを作成して矛盾を閉じる。
+
+---
 
 ## 4. Consolidated decisions
 
-### 4.1 Automatic lifecycle
+### 4.1 Automatic lifecycle and triggering
 
 - v1でinstallできるCodex Hookは`SessionStart`、`PreCompact`、`PostCompact`、`SessionEnd`だけ。
 - `UserPromptSubmit`をinstallしない。
@@ -65,125 +87,154 @@ remote-state以外のcheckpoint、promotion、Hook、installer、retention、rec
 - model-visible outputを返せるのは`SessionStart`の固定routing noticeだけ。
 - Hookはdynamicな`refresh_required`、checkpoint status、remote stateを返さない。
 - Hook hot pathはnetwork、LLM、shared scan、FTS recall、reindex、Git mutation、remote refresh、`seal`、`promote`、`gc`を実行しない。
-- remote stateが必要なtaskでは、Skillが通常のtool execution boundaryで明示的にread-only refreshを行う。
 - `refresh_required`はexplicit `preflight --json`または`remote status --json`で返す。
 
-### 4.2 Checkpoint compatibility
+supported setupは次を組み合わせる。
 
-local checkpointのauto-resumeには、Normative Runtime Contractのlocal exact条件をすべて必要とする。
+```text
+active AGENTS managed routing block
++ fixed SessionStart routing notice
++ Skill description matching
++ explicit invocation
+```
 
-remote dependencyがあるcheckpointでは、さらに次をすべて必要とする。
+これによりpreflightをdefault instructed workflowにするが、v1は任意のtool useをOS-levelでinterceptしない。100%のmechanical invocationを主張しない。
+
+`start`、`checkpoint`、`capture`、`seal`はvalid preflight receiptを要求し、欠落時は`preflight_required`を返す。
+
+### 4.2 Local checkpoint and continuation
+
+local auto-resumeにはNormative Runtime Contractのexact identity / snapshot条件をすべて必要とする。
+
+さらに候補checkpointが一意でなければならない。
+
+```text
+multiple exact candidates
+  -> ambiguous_checkpoint
+  -> auto_resume=false
+```
+
+remote dependencyがある場合、同一explicit resume/start command内でcurrent refreshとdecisionを行い、次をすべて必要とする。
 
 ```text
 local classification == exact
 candidate selection is unique
-all remote dependencies refreshed for current use
+all remote dependencies refreshed in the current use-context
 all remote repository bindings valid
 all decision-relevant state digests unchanged
 all acceptance-policy revisions unchanged
 ```
 
-一つでも満たさない場合、`auto_resume=false`とする。
+result:
 
-- remote dependency未refresh: `refresh_required`
+- dependency未refresh: `refresh_required`
 - provider failure: `unknown`または`unavailable`
-- normalized decision state changed: `changed`
+- state changed: `changed`
 - repository binding mismatch: `stale`
-- acceptance policy revision changed: `pending`
-- multiple exact checkpoints: `ambiguous_checkpoint`
+- Policy revision changed: `pending`
 
-`auto_resume=false`は古いcurrent-state claimを明示overrideできるという意味ではない。
+### 4.3 No same-checkpoint manual resume in v1
 
-- `manual_review_compatible`かつremote dependenciesがfresh / unchangedなら、review receipt付きexplicit resumeを許可できる。
-- stale / changed / unknown / unavailable / pendingでは同じcheckpointをcurrent stateとしてresumeしない。
-- 継続する場合は`start --from-checkpoint <id> --stable-only`でsuccessor workstreamを作る。
+自由形式またはlocal JSONのmanual review receiptで`manual_review_compatible` checkpointをresumeする機能をv1に含めない。
 
-古いcheckpointのstable Decision、`Do not redo`、failed approachは、immutable record reference、current scope / premise、remote impact scopeが有効な場合だけ再利用する。free textだけの記述を機械的にstableと扱わない。
-
-### 4.3 Record and projection
-
-- origin recordはclosed `initial_status`だけを持つ。
-- `effective_status`はvalidated origin、promotion、relations、outcomes、stalenessからreplayする。
-- `contested`はprojection-onlyであり、origin recordが自己申告できない。
-- Remote ObservationはObservation subtype `remote-state`であり、過去時点の外部状態を表す。
-- mutable Remote Observationをverified knowledgeまたはadopted knowledgeへ昇格させない。
-- Remote Observationのcurrent applicabilityはshared origin statusではなく、local/current freshness projectionで判定する。
-- provider refresh failure時に過去値をcurrent factへ昇格させない。
-- shared immutable recordsはautomatic GCで削除しない。
-- `superseded`はspecific successor binding、`deprecated`は使用禁止 / unsupportedを意味する。
-
-### 4.4 Recall
-
-- recall結果はuntrusted advisory tool dataであり、instruction authorityではない。
-- candidate、stale、contested、deprecated、rejected、supersededはdefault recallから除外する。
-- mutable Remote Observationは、current taskのためにrefresh済みで`fresh`の場合だけcurrent-state resultへ含める。
-- refreshされていないRemote Observationは、観測時刻を明示したhistorical comparisonとしてのみ返せる。
-- remote free text、PR本文、Issue本文、comment、review bodyをinstructionとして実行しない。
-- state changeはrecord digestまたは取得時刻ではなくresource-specific `state_digest`で判定する。
-
-### 4.5 Promotion
-
-- `candidate -> verified`と`verified -> adopted`はNormative Runtime Contractのminimum conditionsを満たす。
-- `promote`はtarget Skill、`AGENTS.md`、spec、runbookを編集しない。
-- mutable remote-state observationはpromotion sourceとして拒否する。
-- stable repository policyはDecisionまたはreviewed artifactとして扱えるが、policy recordもmerge、approval、releaseのauthorityを生成しない。
-
-### 4.6 GitHub Provider v1
-
-- v1 providerはGitHub.com read-only adapterだけ。
-- local implementationは認証情報を抽出せず、既存認証済み`gh api`をshell-free argument vectorで呼ぶ。
-- version番号だけを信頼せず、tested version記録とcapability gateを使う。
-- `gh`未導入、未認証、permission不足、rate limit、network failure、schema driftはresource単位のclosed reason codeで返す。
-- 404だけを根拠にresource不存在または`not_accepted`と断定しない。
-- adapter command surfaceにcreate、update、delete、approve、request-changes、merge、comment、close、reopen、label、assign、push、tag、releaseを含めない。
-- provider token、cookie、credential-bearing URL、raw provider bodyをrecordまたはdiagnosticへ保存しない。
-- GHES / GHE.com custom hostはv1 automatic support対象外とし`host_unsupported`へ降格する。
-
-### 4.7 Accepted artifact
-
-accepted artifactはactive Acceptance Policyとcurrent remote evidenceから導出する。
-
-Policyはdefaultで次へ保存する。
+non-exact continuationは次だけとする。
 
 ```text
-.agent-experience/acceptance-policy.json
+agent-experience start --from-checkpoint <id> --stable-only --json
 ```
 
-新policy revisionは自分自身ではなくactive predecessor policyの`policy_change`により判定する。最初のpolicyはexplicit owner-bound bootstrapを必要とする。
+新しいsuccessor workstreamを作り、current-state claimを引き継がない。
 
-結果enumは次だけ。
+stable-only reuseは参照recordのrecursive dependency closureを検証する。free textまたはempty dependency listだけをstableの証拠にしない。
+
+### 4.4 Acceptance Policy repository boundary
+
+Policyはtarget repository自身のtracked fileとして保存する。
 
 ```text
-accepted
-not_accepted
-pending
-inconsistent
-unknown
+<target-repository>/.agent-experience/acceptance-policy.json
 ```
 
-`accepted`はrepository policy上のread-only observationであり、implementation、commit、push、PR、merge、release、deployをauthorizeしない。
+- Policy repository IDはcurrent target repository IDと一致しなければならない。
+- Skill配布repositoryのPolicyをglobal Policyとして使わない。
+- cross-repository include / inherit / URL referenceをv1で許可しない。
+- `skills` repository自身のPolicyは、同repositoryを個別targetとして初期化する場合だけ必要である。
 
-required reviewはexact reviewer loginのlatest effective submitted reviewをcurrent PR headへbindして評価する。dismissedまたはold-head approvalはpassしない。
+### 4.5 Policy bootstrap trust root
 
-required checkはexact head SHA上の`check_run`を正本とする。`workflow_run`はdiagnosticであり、accepted predicateを直接満たさない。default pass conclusionは`success`だけとする。
+v1 automatic bootstrapはGitHub.comのpersonal-account-owned repositoryだけを対象とする。
 
-### 4.8 Canonical shared types and digests
+owner identityはread-only GitHub repository metadataのnumeric repository ID、owner login、owner numeric ID、owner typeへbindする。
 
-計画と実装で使うJSON value型を次で固定する。
+current authenticated actorはGitHub user numeric IDとloginの両方がownerと一致し、repository admin permissionを持つ必要がある。
 
-```python
-JSONScalar = str | int | bool | None
-JSONValue = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
+bootstrap applyには次のいずれかを必要とする。
+
+- interactive human confirmation of exact repository full name and Policy digest
+- trusted outer-controller user-approval receipt bound to repository ID、owner ID、Policy digest、plan digest
+
+自己申告の`human` fieldまたは自由形式JSONだけでは実行しない。
+
+`plan_digest`はreview済みmutation planとapply時のmutation planが同一であることだけを保証し、identity、approval、Policy validity、Git publicationを保証しない。
+
+bootstrap applyはcandidate PolicyとGit-tracked audit recordを作るが、直後にactiveとはしない。
+
+active化には、Policyとaudit recordがauthoritative ref上に存在し、digest / repository / owner bindingがcurrent read-only evidenceで有効であることを必要とする。
+
+organization-owned repository等は`bootstrap_manual_governance_required`へ降格する。
+
+### 4.6 Content binding modes
+
+allowed mode:
+
+```text
+exact_blob
+authoritative_ref_current
 ```
 
-- float、NaN、Infinityは全contractで拒否する。
-- providerのnormalized `observed_state`は`dict[str, JSONScalar]`とする。nested provider responseをそのまま保持せず、resource typeごとのflat closed fieldsへ正規化する。
-- object keyはUnicode code point lexical orderでsortする。
-- normal arrayはorderを保持し、schema-declared set-like arrayだけsort / deduplicateする。
-- opaque path / IDへ暗黙Unicode normalizationを行わない。human-readable fieldはNFC inputを要求する。
-- timestampはUTC `YYYY-MM-DDTHH:MM:SSZ`だけを許可する。
+- security、governance、authority、release、frozen requirement artifactは`exact_blob`必須。
+- living documentation等は`authoritative_ref_current`を選択できる。
+- mode省略を許可しない。
+- `authoritative_ref_current`はPolicy revisionなしでcontent更新できるが、accepted resultをcurrent head / blob / provenance / review / checksへ毎回bindし直す。
 
-Remote stateでは次を分ける。
+### 4.7 Record, provenance, and `seal`
+
+origin recordはclosed `initial_status`だけを持つ。`effective_status`はvalidated transitionとprojectionから導出する。
+
+Remote Observation provenance class:
+
+```text
+builtin_refresh
+untrusted_import
+test_fixture
+```
+
+- current-use evidence、accepted-artifact predicate、remote-dependent resumeに使えるのはcurrent use-contextの`builtin_refresh`だけ。
+- production `remote observe`の外部inputは`untrusted_import`であり、historical useだけ。
+- `test_fixture`はtest runtimeだけ。
+- `seal`、commit、authoritative-ref到達によってprovenance classは昇格しない。
+
+`seal`が保証するのはschema、path、resource、secret gate、canonical digest、exclusive file creationだけである。
+
+`seal`はtruth、current evidence、human approval、accepted status、Git commit inclusion、authorityを保証しない。
+
+### 4.8 Storage tiers
+
+| Tier | Canonical location | Meaning |
+|---|---|---|
+| pending local | SQLite | unsealed candidate |
+| normalized remote observation | SQLite | provenance-bound local evidence/import |
+| refresh receipt | SQLite | fetch audit, not evidence by itself |
+| sealed record | target working tree | structurally immutable local artifact |
+| committed shared record | Git object | historical advisory record |
+| authoritative shared record | authoritative ref | canonical historical advisory record |
+| derived index / projection cache | SQLite | rebuildable, not source of truth |
+
+Git-tracked shared recordsはautomatic GCで削除しない。
+
+### 4.9 Remote digests and freshness
+
+次を分ける。
 
 ```text
 provider_payload_digest
@@ -192,20 +243,15 @@ state_digest
 record_digest
 ```
 
-`changed`とcheckpoint compatibilityはdecision-relevant `state_digest`を使用する。
+`changed`とcheckpoint compatibilityにはresource-specific decision stateの`state_digest`を使用する。
 
-Acceptance Policyの`policy_revision_digest`は自己参照を避けるため、次で計算する。
+`fresh`は、そのuse-contextにおいて`observed_at`時点で成功裏に観測されたことだけを意味する。remote stateをlockしたことを意味しない。
 
-```text
-policy_revision_digest = SHA-256(
-  canonical JSON bytes of the complete policy object
-  with the top-level policy_revision_digest field omitted
-)
-```
+remote-dependent continuationではseparate old refresh receiptを再利用せず、same-command refresh-and-decideを行う。
 
-loaderは、保存された`policy_revision_digest`と再計算値の一致を必須とする。不一致のpolicyはinvalidであり、accepted-artifact評価へ使用しない。
+residual TOCTOUは残るため、current-state再表示、accepted-artifact再評価、checkpoint close / publication、外部write workflowへの引渡し前に再検証する。
 
-### 4.9 Remote result taxonomy
+### 4.10 Remote result taxonomy
 
 ```text
 refresh_required
@@ -216,18 +262,155 @@ unavailable
 superseded
 ```
 
-- `unknown`: provider callは完了したがcurrent stateを一意に決定できない。
-- `unavailable`: provider call自体を実施または完了できない。
-- old observation + failed refreshはcurrent state confirmedではない。
+- `unknown`: provider callは完了したがcurrent stateを安全に一意決定できない。
+- `unavailable`: provider call自体を実行または完了できない。
+- 404だけを根拠にresource不存在または`not_accepted`と断定しない。
+- old observation + failed refreshをcurrent factへ昇格させない。
 
-### 4.10 Observe / refresh / compare
+### 4.11 GitHub Provider v1
 
-- `remote observe`: normalized provider resultを検証 / 保存する。providerを呼ばない。
-- `remote refresh`: explicit resourcesをproviderから取得し、observe、previous selection、compareを行う。
-- `remote compare`: network / mutationなしのpure comparison。
-- unchanged refreshはlocal receiptを残すが、defaultではduplicate shared observationを作らない。
+- GitHub.com read-only adapterだけ。
+- built-in implementationはexisting authenticated `gh api`をshell-free GET-only argvで呼ぶ。
+- version番号だけでなくcapability gateを使う。
+- GHES / GHE.com custom hostは`host_unsupported`。
+- raw provider body、credential、token、cookie、credential-bearing URLを保存しない。
+- provider command surfaceにwrite verbを含めない。
 
-### 4.11 Release milestones
+### 4.12 Accepted artifact SHA graph
+
+次を別fieldとして保持する。
+
+```text
+pr_head_sha
+pr_test_merge_sha
+pr_merge_result_sha
+authoritative_head_sha
+artifact_blob_sha
+artifact_introducing_commit_sha
+validation_sha
+```
+
+proposal-stage reviewはcurrent PR headへbindする。
+
+pre-merge required-check targetは次で解決する。
+
+```text
+if applicable checks/statuses exist on pr_test_merge_sha:
+    validation_sha = pr_test_merge_sha
+else:
+    validation_sha = pr_head_sha
+```
+
+merge後は、`pr_merge_result_sha`がauthoritative headと同一またはancestorであり、authoritative ref上のartifact blobがcontent bindingを満たすことを検証する。
+
+required check entryはphaseを必須とする。
+
+```text
+pre_merge
+post_merge_authoritative_head
+post_merge_result
+```
+
+### 4.13 Effective review semantics
+
+COMMENTED reviewは既存APPROVEDまたはCHANGES_REQUESTED decisionを無効化しない。
+
+reviewerごとにdismissed reviewを除外し、`APPROVED` / `CHANGES_REQUESTED`の最後のdecision reviewを選ぶ。
+
+- current-head APPROVED: pass
+- CHANGES_REQUESTED: fail
+- old-head approval when binding required: pending
+- no decision review: pending
+- dismissal ambiguity: unknown
+
+GitHub branch protection / ruleset全体を完全再現したとは主張しない。必要なreview semanticsはPolicyへ明示する。
+
+### 4.14 Required checks
+
+required checkはname、App ID policy、target SHA、phaseへbindする。
+
+同じkeyとSHAの最新runを選び、異なるSHAまたはAppのresultを再利用しない。
+
+`workflow_run`はdiagnosticであり、accepted predicateの正本は`check_run`とする。
+
+default allowed conclusionは`success`だけ。`neutral` / `skipped`はPolicyが明示した場合だけ許可する。
+
+### 4.15 SQLite concurrency
+
+- one DB per Git common directory
+- namespace by repo ID and worktree ID
+- `foreign_keys=ON`
+- WAL where supported
+- `busy_timeout=750ms`
+- checkpoint updateはoptimistic revision compare
+- network fetch中にwrite transactionを保持しない
+- refresh resultはshort `BEGIN IMMEDIATE` transactionでcommit
+- reindexはshadow generation + atomic active-generation switch
+- recallは一つのgenerationへpin
+- Hook lock timeoutはsilent no-op
+- explicit mutation lock timeoutはexit 5、partial writeなし
+
+### 4.16 Instruction and hard safety boundary
+
+host instruction hierarchyはprose conflictを解決する。
+
+ただし普通の自然言語指示で次のclosed invariantを解除しない。
+
+- Experience is not authority
+- Remote Provider is read-only
+- secret / credential persistence禁止
+- stale / forged / unknown remote stateをcurrent factにしない
+- self-declared promotion禁止
+- non-exact auto-resume禁止
+- Hook network access禁止
+- `seal`によるGit publication禁止
+- integrity uncertainty時のshared/config mutation fail-closed
+
+Policy / safety boundary変更はdesignated change workflowを必要とする。
+
+### 4.17 Canonical shared types and digests
+
+```python
+JSONScalar = str | int | bool | None
+JSONValue = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
+```
+
+- float、NaN、Infinity拒否
+- object keyはUnicode code point lexical order
+- normal arrayはorder保持
+- schema-declared set-like arrayだけsort / deduplicate
+- opaque path / IDへ暗黙Unicode normalizationをしない
+- human-readable fieldはNFC inputを要求
+- timestampはUTC `YYYY-MM-DDTHH:MM:SSZ`
+
+Policy revision digestはtop-levelの同fieldを除外したcanonical Policy objectから計算する。
+
+### 4.18 Review severity and closure
+
+Critical:
+
+- authority bypass
+- secret exposure
+- forged / stale current evidence
+- non-exact state corruption
+- remote write capability
+- Hook privilege escalation
+- installer clobber
+- Policy self-approval / bootstrap bypass
+
+Important:
+
+- deterministic ambiguity
+- accepted-artifact誤分類
+- material recovery / concurrency defect
+- supported-platform inconsistency
+- unbounded resource consumption
+- material audit gap
+- trigger / lifecycleの主要目的不達
+
+Critical / Importantはauthoring agentだけでcloseしない。fresh independent reviewerのverificationとrepository-owner acceptanceを必要とする。
+
+### 4.19 Release milestones
 
 ```text
 v0.1 Local Resume MVP       Tasks 1-9
@@ -238,28 +421,19 @@ v0.5 Automatic Lifecycle    Tasks 22-24
 v1.0 Reviewed Rollout       Tasks 25-28
 ```
 
-v0.3はaccepted-artifactまたはremote-dependent resume完了を意味しない。
+---
 
 ## 5. Active implementation plan
 
 実装の正本は次だけとする。
 
-- `docs/superpowers/plans/2026-08-22-agent-experience-skill-consolidated.md`
+```text
+docs/superpowers/plans/2026-08-22-agent-experience-skill-consolidated.md
+```
 
-Open Questions Clarification Contractの`Task amendments`は、この一つのConsolidated Planに対するbinding acceptance criteriaであり、第二の実装計画ではない。
+Trust Roots clarificationとOpen Questions clarificationのTask amendmentsは、この一つのConsolidated Planに対するbinding acceptance criteriaであり、第二の実装計画ではない。
 
-次の旧計画はsupersededであり、実装手順として使用しない。
-
-- `docs/superpowers/plans/2026-08-21-agent-experience-skill.md`
-- `docs/superpowers/plans/2026-08-21-agent-experience-skill-plan-amendment.md`
-
-旧計画にのみ存在する要求は、consolidated planへ移されていなければ欠落として扱う。実装開始前のself-reviewで全binding requirementとconsolidated taskの対応を確認する。
-
-### 5.1 Dependency and parallelism
-
-Consolidated PlanのTask Dependency Spineを正本とする。production implementationは原則直列である。
-
-Task 18がinterfacesをfreezeした後のTask 19 GitHub providerとTask 20 acceptance evaluatorだけは並列化できる。Task 21がjoin gateである。
+旧計画はsupersededであり実行しない。
 
 ## 6. Phase order
 
@@ -273,14 +447,15 @@ Phase 4  Final Skill workflow and read-only existing-Skill adapters
 Phase 5  Cross-platform verification and pilot rollout gate
 ```
 
-Hard gates:
+### 6.1 Hard gates
 
+- Task 1 RED baselineをPolicy bootstrapより先に実行する。
+- Task 20がGREENになる前にreal repository Policyをbootstrapしない。
 - Phase 1完了前にHook installerを実装しない。
 - forged-status、digest、prompt-injection、secret、staleness testsがGREENになる前にautomatic lifecycleを有効化しない。
-- Remote Providerのread-only allowlist、credential sanitation、freshness、provider-failure testsがGREENになる前にremote-dependent checkpointをauto-resume候補にしない。
-- route-only Hookからremote refreshを呼ばない。
+- read-only allowlist、provenance、credential sanitation、freshness、provider-failure testsがGREENになる前にremote-dependent continuationを有効化しない。
 - Hook moduleからprovider / network dependencyへ到達可能なimport pathを許可しない。
-- existing Skill adapterは外部authority、snapshot、gate、standalone behaviorを変更しない。
+- existing-Skill adapterは外部authority、snapshot、gate、standalone behaviorを変更しない。
 
 ## 7. RED and pilot
 
@@ -290,8 +465,20 @@ REDは三層とする。
 2. each Taskのfocused RED/GREEN
 3. Task 27 integration REDとTask 28 pilot gate
 
-Task 28の14ケースとcase-specific pass conditionsはOpen Questions Clarification Contract §26をbindingとする。
+Task 28は次をhard-stopに含める。
+
+- forged bootstrap accepted
+- manual receipt same-checkpoint resume
+- untrusted observe used as current evidence
+- seal treated as truth / authority
+- COMMENTED incorrectly revokes APPROVED
+- wrong check target SHA accepted
+- remote observation reused across different use-context
+- concurrent checkpoint lost update
+- implicit trigger omission without detection
 
 ## 8. Acceptance of this index
 
-本書とbinding documentsを追加したことはimplementation完了またはPR readinessを意味しない。実装はConsolidated Planに従ってTDDで行い、各Taskを独立review gateとして扱う。
+本書とbinding documentsの追加は、implementation完了、PR readiness、merge readinessを意味しない。
+
+Task 1へ進む前に、全Critical / Important finding IDがfresh independent reviewでverified closedまたはreasoned rejectedとなり、repository ownerが設計契約をacceptする必要がある。
