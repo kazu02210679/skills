@@ -1,9 +1,9 @@
 # Agent Experience Skill — Contract Index
 
-- **Document date:** 2026-08-22
+- **Document date:** 2026-08-23
 - **Target:** `agent-experience` v1
 - **Status:** Binding contract index
-- **Task 1 readiness:** blocked pending independent closure review
+- **Task 1 readiness:** blocked pending formal design closure and repository-owner acceptance
 
 ## 1. Canonical entry point
 
@@ -20,25 +20,39 @@ active implementation plan
   = the single plan named by this index
 ```
 
-This file does not duplicate every specification paragraph. It fixes document order, domain precedence, consolidated hard boundaries, the active plan, and implementation gates.
+This file does not duplicate every lower-level specification paragraph. It fixes document order, precedence, consolidated hard boundaries, the sole active plan, release ranges, and implementation gates.
 
 ## 2. Binding documents
 
 Executors and reviewers read every document in this order.
 
 1. `docs/superpowers/specs/2026-08-22-agent-experience-contract-index.md`
-2. `docs/superpowers/specs/2026-08-22-agent-experience-independent-review-remediation.md`
-3. `docs/superpowers/specs/2026-08-22-agent-experience-trust-roots-runtime-clarification.md`
-4. `docs/superpowers/specs/2026-08-22-agent-experience-open-questions-clarification.md`
-5. `docs/superpowers/specs/2026-08-22-agent-experience-remote-state-amendment.md`
-6. `docs/superpowers/specs/2026-08-21-agent-experience-skill-normative-contract.md`
-7. `docs/superpowers/specs/2026-08-21-agent-experience-skill-adversarial-amendment.md`
-8. `docs/superpowers/specs/2026-08-21-agent-experience-skill-design.md`
+2. `docs/superpowers/specs/2026-08-23-agent-experience-closure-reconciliation.md`
+3. `docs/superpowers/specs/2026-08-22-agent-experience-independent-review-remediation.md`
+4. `docs/superpowers/specs/2026-08-22-agent-experience-trust-roots-runtime-clarification.md`
+5. `docs/superpowers/specs/2026-08-22-agent-experience-open-questions-clarification.md`
+6. `docs/superpowers/specs/2026-08-22-agent-experience-remote-state-amendment.md`
+7. `docs/superpowers/specs/2026-08-21-agent-experience-skill-normative-contract.md`
+8. `docs/superpowers/specs/2026-08-21-agent-experience-skill-adversarial-amendment.md`
+9. `docs/superpowers/specs/2026-08-21-agent-experience-skill-design.md`
 
 Review provenance:
 
 - `docs/superpowers/reviews/2026-08-22-agent-experience-independent-review.md`
 - `docs/superpowers/reviews/2026-08-22-agent-experience-independent-review-remediation.json`
+- `docs/superpowers/reviews/2026-08-23-agent-experience-design-closure-preflight.md`
+
+Formal design closure path:
+
+```text
+docs/superpowers/reviews/2026-08-23-agent-experience-design-closure.md
+```
+
+Post-implementation closure path:
+
+```text
+docs/superpowers/reviews/2026-08-23-agent-experience-implementation-closure.md
+```
 
 ## 3. Precedence
 
@@ -48,6 +62,7 @@ When documents conflict, apply:
 system / developer / user instruction under the host hierarchy
   > active repository instruction
   > this Contract Index
+  > Closure Review Reconciliation, listed domains
   > Independent Review Remediation Contract, listed domains
   > Trust Roots and Runtime Semantics Clarification, listed domains
   > Open Questions Clarification Contract, listed domains
@@ -57,7 +72,16 @@ system / developer / user instruction under the host hierarchy
   > Base Design
 ```
 
-### 3.1 Remediation domain
+### 3.1 Reconciliation domain
+
+The Closure Review Reconciliation overrides or closes:
+
+- design-closure versus implementation-closure artifact separation;
+- release-range and Task-number alignment;
+- predecessor-governed Policy-change evaluation;
+- repository-owner design-acceptance evidence.
+
+### 3.2 Independent-review remediation domain
 
 The Independent Review Remediation Contract overrides or closes:
 
@@ -72,19 +96,28 @@ The Independent Review Remediation Contract overrides or closes:
 - unsupported last-push approval;
 - typed GitHub request construction and encoding.
 
-### 3.2 Conflict rule
+### 3.3 Conflict rule
 
-If two requirements at the same precedence cannot both be satisfied, do not implement. Add a reviewed clarification and update this index before proceeding.
+If two requirements at the same precedence cannot both be satisfied, do not implement. Add a reviewed clarification, update this index, and reconcile the active plan before proceeding.
 
 ---
 
-## 4. Consolidated decisions
+## 4. Consolidated hard contracts
 
-### 4.1 Independent review disposition
+### 4.1 Review disposition and independence
 
-The authoring-side disposition for findings `AEX-IR-C01`–`AEX-IR-C03` and `AEX-IR-I01`–`AEX-IR-I07` is `fixed` by the remediation contract and rewritten implementation plan.
+The authoring-side disposition for original findings `AEX-IR-C01`–`AEX-IR-C03` and `AEX-IR-I01`–`AEX-IR-I07` is `fixed`.
 
-This does not close the findings. Closure requires a fresh independent artifact-only review and repository-owner acceptance.
+The fresh artifact-only pre-closure pass also found and remediated:
+
+```text
+AEX-CR-I01 design/implementation closure conflation
+AEX-CR-I02 release-range mismatch
+AEX-CR-I03 predecessor Policy-change gate omitted
+AEX-CR-I04 owner-acceptance evidence undefined
+```
+
+Authoring-side remediation does not close any Critical or Important finding. Formal design closure requires a reviewer that did not author the remediation.
 
 ### 4.2 Automatic lifecycle and triggering
 
@@ -118,15 +151,17 @@ This makes preflight the default instructed workflow. V1 does not claim that arb
 
 ### 4.3 Preflight receipt
 
-`start`, `checkpoint`, `capture`, `seal`, provider setup apply, and Policy bootstrap-candidate apply require a valid local `PreflightReceiptV1`.
+`start`, `checkpoint`, `capture`, `seal`, provider setup apply, Policy candidate materialization, installer mutation, uninstall, migration, and guarded GC use a valid local operation-specific receipt where the applicable Task defines one.
 
-- The controller stores the receipt locally and returns only its ID.
-- Caller-supplied receipt JSON is never accepted.
-- The receipt binds repository, worktree, branch, HEAD, all canonical snapshot digests, config digest, active Policy binding, workstream, operation, operation scope, use context, CLI version, nonce, issue time, and expiry.
-- Mutation receipts are operation-specific, single-use, and valid for at most five minutes.
+`PreflightReceiptV1` is controller-created and local-only.
+
+- The CLI returns only its receipt ID.
+- Caller-supplied receipt JSON, stdin body, shared record, or repository file is never accepted.
+- It binds repository, worktree, branch, HEAD, canonical snapshot digests, config digest, active Policy binding, workstream, operation, scope, use context, CLI version, nonce, issue time, and expiry.
+- Mutation receipts are single-use and valid for at most five minutes.
 - Every gated command recomputes current bindings before atomic consumption.
 
-A missing or invalid receipt returns:
+Missing or invalid receipt:
 
 ```text
 preflight_required
@@ -147,7 +182,7 @@ Multiple exact candidates produce:
 ambiguous_checkpoint
 ```
 
-For remote-dependent continuation, the same explicit command performs current refresh and decision. It additionally requires:
+For remote-dependent continuation, one explicit command performs current refresh and decision. It additionally requires:
 
 ```text
 all dependencies observed in the current use-context
@@ -168,13 +203,13 @@ This creates a successor workstream and transfers only records whose recursive d
 
 ### 4.5 Policy repository boundary
 
-Policy is stored in the target repository, not the Skill distribution repository:
+Policy belongs to the target repository:
 
 ```text
 <target-repository>/.agent-experience/acceptance-policy.json
 ```
 
-Policy revision files are immutable:
+Immutable Policy revisions live at:
 
 ```text
 .agent-experience/policies/<lineage-id>/<revision>-<digest>.json
@@ -184,9 +219,17 @@ V1 rejects cross-repository include, inheritance, extension, and URL reference. 
 
 ### 4.6 Bootstrap approval trust root
 
-Built-in v1 can generate a candidate bootstrap Policy and mutation plan, but cannot activate it from TTY input, repository files, unsigned audit records, or self-declared human JSON.
+Built-in v1 can generate a candidate bootstrap Policy and deterministic mutation plan. It cannot activate the Policy from:
 
-Activation requires a trusted outer approval provider that the worker cannot mint or configure from target repository data. The provider verifies an opaque receipt bound to:
+```text
+TTY input
+repository bytes
+unsigned audit records
+self-declared human JSON
+agent-authored approval text
+```
+
+Activation requires a trusted outer approval provider that the worker cannot mint or configure from target-repository data. The verified receipt binds:
 
 ```text
 trusted issuer
@@ -208,14 +251,14 @@ bootstrap_manual_governance_required
 
 TTY re-entry is UX confirmation only.
 
-### 4.7 Policy lineage
+### 4.7 Policy lineage and successor changes
 
 Every Policy revision binds:
 
 ```text
 policy_lineage_id
 revision_number
-bootstrap_root_receipt_id / digest
+bootstrap root receipt ID / digest
 exact predecessor revision / digest / blob / path / authoritative head
 change_evidence_digest
 repository binding
@@ -224,14 +267,31 @@ repository binding
 Rules:
 
 - root revision requires verified trusted bootstrap approval;
-- later revision must reference the current active predecessor;
+- later revisions reference the exact current active predecessor;
 - revision is predecessor plus one;
-- rollback, second bootstrap, old-predecessor fork, stale base head, repeated revision, missing predecessor, and force-pushed lineage break are rejected or produce `policy_lineage_inconsistent`;
+- rollback, second bootstrap, old-predecessor fork, stale base head, repeated revision, missing predecessor, and force-pushed lineage break are rejected or `policy_lineage_inconsistent`;
 - lineage recovery and rebootstrap are future separate governance protocols.
 
-### 4.8 Content binding modes
+A successor cannot approve itself. Current Policy `P(n)` governs `P(n+1)` through its own `policy_change` block.
 
-Allowed modes:
+A successor is eligible only when:
+
+```text
+exact predecessor and base-head binding pass
+predecessor policy_change schema is valid
+required exact-login approvals pass
+required check-run predicates pass
+review/check collections are complete
+approvals/checks bind to the current candidate validation SHA
+no rollback/fork/reset/lineage break exists
+candidate revision and pointer reach the authoritative ref
+```
+
+Missing, partial, stale, old-head, ambiguous, wrong-App, wrong-SHA, or wrong-phase evidence never passes.
+
+### 4.8 Content-binding modes
+
+Allowed:
 
 ```text
 exact_blob
@@ -250,11 +310,9 @@ post_merge_result checks
 historical PR/reviewer predicates
 ```
 
-It may use current-path predicates and `post_merge_authoritative_head` check runs only. Artifacts requiring PR or reviewer provenance use `exact_blob`.
+It may use current-path predicates and `post_merge_authoritative_head` check runs only. Artifacts requiring PR/reviewer provenance use `exact_blob`.
 
 ### 4.9 Record provenance and `seal`
-
-Origin records use closed `initial_status`. Effective state is replayed from validated transitions and projection.
 
 Remote provenance classes:
 
@@ -283,13 +341,13 @@ It does not prove truth, current evidence, approval, accepted status, Git inclus
 
 ### 4.10 Trusted GitHub CLI identity
 
-Tracked configuration cannot specify an executable, wrapper, command, extension, environment override, or full endpoint URL.
+Tracked configuration cannot specify an executable, wrapper, command, extension, environment override, arbitrary arguments, or full endpoint URL.
 
-Provider setup resolves the literal GitHub CLI locally and stores a canonical absolute executable identity in the Git common-dir local state.
+Provider setup resolves the literal GitHub CLI locally and stores a canonical absolute executable identity in Git-common-dir local state.
 
 - relative or arbitrary executable paths are rejected;
 - worktree, Git-common-dir, temporary, symlink, and Windows reparse-point executables are rejected;
-- invocation uses the stored absolute path, `shell=False`, fixed argv, and controlled environment;
+- invocation uses stored absolute path, `shell=False`, fixed argv, and controlled environment;
 - file digest and local file identity are revalidated before each invocation;
 - drift returns `provider_executable_integrity_failure` before network access.
 
@@ -297,10 +355,11 @@ Provider setup resolves the literal GitHub CLI locally and stores a canonical ab
 
 V1 supports a GitHub.com read-only adapter only.
 
-The provider accepts typed operations, not caller-supplied URLs or methods. Every request is GET-only and constructed from validated decoded fields.
+The provider accepts typed operations, not caller-supplied URLs or methods.
 
-- branch/ref is encoded as a typed path segment;
-- file path is normalized, split, and each segment encoded separately;
+- every request is GET-only;
+- branch/ref is encoded from a decoded typed value;
+- file path is normalized, split, and encoded segment-by-segment;
 - query keys and values are encoded separately;
 - pre-encoded `%HH` input is rejected;
 - full URL, endpoint text, GraphQL, extension command, and arbitrary header input are rejected;
@@ -315,16 +374,14 @@ Latest/effective review and check-run decisions require a complete collection.
 Closed limits:
 
 ```text
-max 100 items requested per page
-max 20 pages per resource
-max 2000 items per resource
-max 16 MiB normalized bytes per resource
-max 30 seconds remote batch wall time
+100 requested items per page
+20 pages per resource
+2000 items per resource
+16 MiB normalized bytes per resource
+30 seconds remote batch wall time
 ```
 
 Only validated GitHub `Link rel="next"` relations for the same host, typed operation, repository, API version, and resource are followed.
-
-Normalized collection output includes `complete`, page count, item count, and normalized-items digest.
 
 Any incomplete pagination, rate limit, timeout, malformed link, cap exceedance, or partial response yields:
 
@@ -345,7 +402,7 @@ state_digest
 record_digest
 ```
 
-`changed` and checkpoint compatibility use resource-specific decision-state `state_digest`, not observation time or record digest.
+`changed` and checkpoint compatibility use resource-specific decision-state `state_digest`.
 
 `fresh` means observed successfully for this use-context at `observed_at`; it does not mean remote state is locked.
 
@@ -367,7 +424,7 @@ superseded
 - 404 alone does not prove absence or `not_accepted`.
 - an old observation plus failed refresh is never current fact.
 
-### 4.15 Accepted artifact SHA graph
+### 4.15 Accepted-artifact SHA graph
 
 Keep separate:
 
@@ -383,16 +440,7 @@ validation_sha
 
 Proposal review binds to current PR head.
 
-Pre-merge check-run target:
-
-```text
-if applicable check runs exist on pr_test_merge_sha:
-    validation_sha = pr_test_merge_sha
-else:
-    validation_sha = pr_head_sha
-```
-
-Post-merge evaluation verifies result commit reachability, authoritative-head state, and content binding. Required check-run entries state an explicit phase:
+Required check-run entries state an explicit phase:
 
 ```text
 pre_merge
@@ -400,9 +448,11 @@ post_merge_authoritative_head
 post_merge_result
 ```
 
+Cross-SHA, cross-App, cross-phase, incomplete, or stale result reuse is prohibited.
+
 ### 4.16 Check-run-only scope
 
-Agent Experience v1 evaluates only GitHub check runs. Policy check entries require:
+Agent Experience v1 evaluates GitHub check runs only. Policy check entries require:
 
 ```text
 source = "check_run"
@@ -410,7 +460,7 @@ source = "check_run"
 
 `commit_status`, `both`, source omission, and branch-protection parity requests are unsupported. Accepted-artifact results explicitly report that branch-protection parity was not evaluated.
 
-`require_last_push_approval=true` is unsupported in v1. The implementation does not approximate a last-push actor from author or committer fields.
+`require_last_push_approval=true` is unsupported. The implementation does not approximate a last-push actor from author or committer fields.
 
 ### 4.17 Effective review semantics
 
@@ -421,7 +471,7 @@ For each reviewer:
 1. remove malformed/pending entries;
 2. apply dismissals by exact review identity;
 3. select the final decision review from APPROVED and CHANGES_REQUESTED only;
-4. bind required approval to current PR head when Policy requires it.
+4. bind required approval to current candidate/PR head when Policy requires it.
 
 Result:
 
@@ -435,50 +485,11 @@ dismissal ambiguity -> unknown
 
 V1 does not claim complete GitHub ruleset or merge-readiness parity.
 
-### 4.18 Canonical JSON and time
+### 4.18 Canonical JSON, storage, and concurrency
 
-```python
-JSONScalar = str | int | bool | None
-JSONValue = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
-```
-
-- floats, NaN, and Infinity are rejected;
-- object keys sort by Unicode code point;
-- normal arrays preserve order;
-- only schema-declared set-like arrays are sorted and deduplicated;
-- opaque path and IDs are not silently Unicode-normalized;
-- human-readable fields require NFC input;
-- timestamps are UTC `YYYY-MM-DDTHH:MM:SSZ` only.
-
-Policy revision digest excludes the top-level digest field from its own canonical input.
-
-### 4.19 Storage and concurrency
+Canonical JSON rejects floats, NaN, Infinity, duplicate keys, unsafe paths, invalid UTF-8, and non-canonical timestamps. Timestamps are UTC `YYYY-MM-DDTHH:MM:SSZ`.
 
 One SQLite database exists per Git common directory and is namespaced by repository and worktree.
-
-Required local tables include:
-
-```text
-preflight_receipts
-provider_install
-policy_approval_cache
-policy_lineage_cache
-workstreams
-checkpoints
-pending_records
-shared_bindings
-record_index_generations
-record_relations
-recall_receipts
-feedback
-hook_events
-hook_owner
-remote_observations
-remote_dependencies
-remote_refresh_runs
-quarantine_events
-migration_state
-```
 
 - `foreign_keys=ON`;
 - WAL where supported;
@@ -491,7 +502,7 @@ migration_state
 - Hook lock timeout is silent exit 0;
 - explicit mutation lock timeout is exit 5 with no partial write.
 
-### 4.20 Safety invariants
+### 4.19 Safety invariants
 
 Ordinary prose instructions cannot disable:
 
@@ -509,72 +520,86 @@ Ordinary prose instructions cannot disable:
 
 Changing these invariants requires the designated specification/governance workflow.
 
-### 4.21 Severity and closure
-
-Critical includes authority bypass, secret exposure, forged/stale current evidence, state corruption, remote write capability, Hook privilege escalation, installer clobber, provider executable injection, bootstrap bypass, and Policy lineage reset.
-
-Important includes deterministic ambiguity, accepted-artifact misclassification, material recovery/concurrency defects, supported-platform inconsistency, unbounded resources, pagination incompleteness, material audit gaps, and trigger/lifecycle failure.
-
-Authoring agent does not independently close Critical or Important findings. Closure requires fresh independent verification and repository-owner acceptance.
-
 ---
 
-## 5. Active implementation plan
-
-The sole active plan is:
+## 5. Sole active implementation plan
 
 ```text
 docs/superpowers/plans/2026-08-22-agent-experience-skill-consolidated.md
 ```
 
-It is rewritten in place to contain every current requirement directly in its Tasks and tests.
+The plan is rewritten in place and contains 30 Tasks. Superseded plans remain historical pointers only.
 
-Superseded plans remain historical pointers only.
-
-## 6. Phase and release order
+## 6. Release order
 
 ```text
 v0.1 Local Resume MVP       Tasks 1-9
 v0.2 Memory Core            Tasks 10-17
 v0.3 Remote Observation MVP Tasks 18-19
-v0.4 Remote Governance      Tasks 20-21
-v0.5 Automatic Lifecycle    Tasks 22-24
-v1.0 Reviewed Rollout       Tasks 25-28
+v0.4 Remote Governance      Tasks 20-23
+v0.5 Automatic Lifecycle    Tasks 24-26
+v1.0 Reviewed Rollout       Tasks 27-30
 ```
 
-Task 19 GitHub Provider and Task 20 Policy/evaluator may be implemented in parallel only after Task 18 freezes shared interfaces. Task 21 is their join gate.
+Task 19 GitHub Provider and Task 20 bootstrap approval boundary may be implemented in parallel only after Task 18 freezes shared interfaces. Task 21 Policy lineage joins both. Tasks 22 and 23 complete Remote Governance.
 
 ## 7. Hard gates
 
 - Task 1 baseline precedes any real Policy bootstrap.
 - No real Policy activation occurs without a trusted approval provider.
-- Task 20 must be green before any real target repository Policy activation flow is exercised.
+- Formal design closure must be valid before Task 1.
+- Repository-owner acceptance of the exact closed design is required before Task 1.
+- Memory, provider, Policy, receipt, pagination, encoding, and remote-continuation tests are green before automatic lifecycle work.
 - Phase 1 completes before Hook installer implementation.
-- Forged-status, digest, prompt-injection, secret, staleness, and preflight-receipt tests are green before automatic lifecycle.
-- Provider executable, typed-request, pagination, provenance, credential sanitation, and provider-failure tests are green before remote-dependent continuation.
 - Hook module has no provider/network dependency path.
 - Existing-Skill adapters do not change external authority, snapshot, gate, or standalone behavior.
 
-## 8. RED and pilot
+## 8. Review artifacts and owner acceptance
 
-RED has three layers:
+### 8.1 Authoring-side preflight
 
-1. Task 1 behavioral pressure baseline;
-2. focused RED/GREEN for each Task;
-3. Task 27 disposable integration and Task 28 rollout pilot.
+```text
+docs/superpowers/reviews/2026-08-23-agent-experience-design-closure-preflight.md
+```
 
-Task 28 hard stops include every independent-review exploit and closure case.
+This file may identify and repair defects but cannot close findings.
 
-## 9. Independent closure gate
+### 8.2 Formal design closure
 
-The independent-review remediation is not closed by authoring edits alone.
+```text
+docs/superpowers/reviews/2026-08-23-agent-experience-design-closure.md
+```
 
-Before Task 1 begins, a fresh artifact-only reviewer must inspect:
+It binds the exact reviewed commit and blobs. Every original and reconciliation finding must be `verified_closed` or `reasoned_rejected`. Any `disputed` or open Critical/Important finding keeps Task 1 at `NO-GO`.
 
-- the original independent review;
-- the remediation contract;
-- this Contract Index;
-- the active rewritten plan;
-- the machine-readable remediation matrix.
+### 8.3 Repository-owner acceptance
 
-Every finding must be `verified_closed` or `reasoned_rejected`. Any `disputed` or open Critical/Important finding keeps Task 1, PR readiness, and merge readiness at `NO-GO`.
+The repository owner explicitly accepts the exact closed design in the active host interaction or through a trusted approval provider.
+
+An audit file may be recorded at:
+
+```text
+docs/superpowers/reviews/2026-08-23-agent-experience-design-owner-acceptance.json
+```
+
+Repository JSON alone is not proof of approval. Design changes invalidate prior acceptance.
+
+### 8.4 Implementation closure
+
+```text
+docs/superpowers/reviews/2026-08-23-agent-experience-implementation-closure.md
+```
+
+This is created only after implementation, tests, CI, and pilot evidence exist. It cannot substitute for the pre-Task-1 design closure.
+
+## 9. Current gate state
+
+```text
+Original ten findings: authoring-fixed, pending formal independent verification
+Reconciliation findings AEX-CR-I01..I04: authoring-fixed, pending formal independent verification
+Formal design closure: absent
+Repository-owner acceptance: absent
+Task 1 readiness: NO-GO
+PR readiness: NO-GO
+Merge readiness: NO-GO
+```
