@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "review_path": "docs/superpowers/reviews/2026-08-22-agent-experience-independent-review.md",
+  "remediation_contract_path": "docs/superpowers/specs/2026-08-22-agent-experience-independent-review-remediation.md",
+  "contract_index_path": "docs/superpowers/specs/2026-08-22-agent-experience-contract-index.md",
+  "active_plan_path": "docs/superpowers/plans/2026-08-22-agent-experience-skill-consolidated.md",
+  "authoring_status": "remediated_pending_independent_verification",
+  "findings": [
+    {
+      "finding_id": "AEX-IR-C01",
+      "severity": "critical",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [4, 7, 19, 27, 28],
+      "test_files": [
+        "tests/test_agent_experience_config.py",
+        "tests/test_agent_experience_store.py",
+        "tests/test_agent_experience_provider_runtime.py",
+        "tests/test_agent_experience_integration.py"
+      ],
+      "required_case_ids": [
+        "tracked_provider_executable_rejected",
+        "repository_path_shadow_rejected",
+        "windows_current_directory_shadow_rejected",
+        "provider_executable_drift_rejected",
+        "provider_symlink_reparse_rejected"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-C02",
+      "severity": "critical",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [20, 26, 27, 28],
+      "test_files": [
+        "tests/test_agent_experience_policy.py",
+        "tests/test_agent_experience_adapters.py",
+        "tests/test_agent_experience_integration.py"
+      ],
+      "required_case_ids": [
+        "pseudo_tty_not_authority",
+        "unsigned_bootstrap_not_active",
+        "self_declared_human_rejected",
+        "bootstrap_without_trusted_provider_blocked",
+        "approval_receipt_replay_rejected"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-C03",
+      "severity": "critical",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [20, 27, 28],
+      "test_files": [
+        "tests/test_agent_experience_policy.py",
+        "tests/test_agent_experience_integration.py"
+      ],
+      "required_case_ids": [
+        "second_bootstrap_rejected",
+        "policy_rollback_rejected",
+        "policy_old_predecessor_rejected",
+        "policy_fork_inconsistent",
+        "policy_lineage_force_push_inconsistent"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-I01",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [2, 27, 28],
+      "test_files": [
+        "evals/agent-experience/test_requirements_contract.py",
+        "tests/test_agent_experience_integration.py"
+      ],
+      "required_case_ids": [
+        "all_binding_requirements_have_tasks",
+        "all_binding_requirements_have_tests",
+        "obsolete_plan_interfaces_absent",
+        "fresh_plan_review_required"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-I02",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [21, 28],
+      "test_files": [
+        "tests/test_agent_experience_acceptance.py"
+      ],
+      "required_case_ids": [
+        "authoritative_current_required_pr_rejected",
+        "authoritative_current_review_policy_rejected",
+        "old_review_cannot_accept_new_blob",
+        "exact_blob_provenance_accepted"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-I03",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [18, 19, 21, 27, 28],
+      "test_files": [
+        "tests/test_agent_experience_remote_contract.py",
+        "tests/test_agent_experience_github_provider.py",
+        "tests/test_agent_experience_acceptance.py"
+      ],
+      "required_case_ids": [
+        "later_page_review_changes_result",
+        "later_page_check_changes_result",
+        "pagination_partial_unknown",
+        "pagination_cap_unknown",
+        "pagination_next_link_host_rejected"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-I04",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [7, 9, 27, 28],
+      "test_files": [
+        "tests/test_agent_experience_receipts.py",
+        "tests/test_agent_experience_cli.py"
+      ],
+      "required_case_ids": [
+        "caller_receipt_json_rejected",
+        "receipt_cross_repo_rejected",
+        "receipt_snapshot_change_rejected",
+        "receipt_config_policy_change_rejected",
+        "receipt_replay_rejected"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-I05",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [18, 21, 28],
+      "test_files": [
+        "tests/test_agent_experience_remote_contract.py",
+        "tests/test_agent_experience_acceptance.py"
+      ],
+      "required_case_ids": [
+        "check_source_required",
+        "commit_status_source_unsupported",
+        "both_check_sources_unsupported",
+        "branch_protection_parity_false"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-I06",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [21, 28],
+      "test_files": [
+        "tests/test_agent_experience_acceptance.py"
+      ],
+      "required_case_ids": [
+        "last_push_approval_true_unsupported",
+        "commit_author_not_used_as_pusher",
+        "last_push_parity_not_claimed"
+      ]
+    },
+    {
+      "finding_id": "AEX-IR-I07",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [18, 19, 27, 28],
+      "test_files": [
+        "tests/test_agent_experience_remote_contract.py",
+        "tests/test_agent_experience_github_provider.py",
+        "tests/test_agent_experience_integration.py"
+      ],
+      "required_case_ids": [
+        "typed_operation_only",
+        "reserved_path_chars_encoded",
+        "branch_slash_encoded_as_segment",
+        "preencoded_input_rejected",
+        "response_key_mismatch_rejected"
+      ]
+    }
+  ]
+}
