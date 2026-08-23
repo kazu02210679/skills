@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "review_id": "AEX-ER-2026-08-23",
+  "source_review": "docs/superpowers/reviews/2026-08-23-agent-experience-execution-readiness-review.md",
+  "binding_clarification": "docs/superpowers/specs/2026-08-23-agent-experience-execution-readiness-clarification.md",
+  "contract_index": "docs/superpowers/specs/2026-08-22-agent-experience-contract-index.md",
+  "active_plan": "docs/superpowers/plans/2026-08-22-agent-experience-skill-consolidated.md",
+  "progress_ledger": "docs/superpowers/status/agent-experience-implementation.json",
+  "authoring_status": "remediated_pending_formal_independent_verification",
+  "formal_reviewer_independence_satisfied": false,
+  "task_1_ready": false,
+  "findings": [
+    {
+      "finding_id": "AEX-ER-I01",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [2, 27, 29, 30],
+      "test_files": ["tests/test_agent_experience_contract.py", "evals/agent-experience/test_requirements_contract.py", "tests/test_agent_experience_integration.py"],
+      "required_case_ids": ["task1_gate_false_without_formal_closure", "task1_gate_false_without_owner_acceptance", "design_change_invalidates_closure_and_acceptance"]
+    },
+    {
+      "finding_id": "AEX-ER-I02",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [2, 29, 30],
+      "test_files": ["evals/agent-experience/test_requirements_contract.py", "tests/test_agent_experience_integration.py"],
+      "required_case_ids": ["uncommitted_file_does_not_complete_task", "task_progress_requires_commit_test_evidence", "task_ledger_unknown_file_not_completion"]
+    },
+    {
+      "finding_id": "AEX-ER-I03",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [20, 28, 29, 30],
+      "test_files": ["tests/test_agent_experience_bootstrap_approval.py", "tests/test_agent_experience_adapters.py", "tests/test_agent_experience_integration.py"],
+      "required_case_ids": ["no_builtin_bootstrap_issuer_is_supported_state", "bootstrap_without_trusted_provider_blocked", "repository_object_not_trusted_issuer"]
+    },
+    {
+      "finding_id": "AEX-ER-I04",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [18, 19, 21, 22, 29, 30],
+      "test_files": ["tests/test_agent_experience_remote_contract.py", "tests/test_agent_experience_github_provider.py", "tests/test_agent_experience_policy.py", "tests/test_agent_experience_policy_change.py", "tests/test_agent_experience_acceptance.py"],
+      "required_case_ids": ["policy_change_reads_authoritative_predecessor", "policy_rejected_candidate_resubmission_has_new_digest", "policy_competing_successors_inconsistent", "policy_command_never_performs_remote_write"]
+    },
+    {
+      "finding_id": "AEX-ER-I05",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [18, 19, 23, 29, 30],
+      "test_files": ["tests/test_agent_experience_remote_contract.py", "tests/test_agent_experience_github_provider.py", "tests/test_agent_experience_remote_checkpoint.py", "tests/test_agent_experience_integration.py"],
+      "required_case_ids": ["caller_use_context_id_rejected", "new_command_gets_new_use_context", "same_command_multiple_refresh_runs_share_context", "prior_use_context_cannot_make_old_refresh_current"]
+    },
+    {
+      "finding_id": "AEX-ER-I06",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [24, 25, 26, 29, 30],
+      "test_files": ["tests/test_agent_experience_hooks.py", "tests/test_agent_experience_installer.py", "tests/test_agent_experience_uninstall.py", "tests/test_agent_experience_integration.py"],
+      "required_case_ids": ["hooks_absent_before_task24_is_expected", "unsupported_hook_contract_keeps_manual_mode", "hook_host_contract_probe_required", "installer_waits_for_hook_task"]
+    },
+    {
+      "finding_id": "AEX-ER-I07",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [2, 27, 29, 30],
+      "test_files": ["tests/test_agent_experience_contract.py", "evals/agent-experience/test_requirements_contract.py", "tests/test_agent_experience_integration.py"],
+      "required_case_ids": ["implementation_closure_rejects_dirty_worktree", "binding_design_change_pauses_implementation", "binding_design_change_requires_new_owner_acceptance", "runtime_change_invalidates_implementation_closure"]
+    },
+    {
+      "finding_id": "AEX-ER-I08",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [4, 7, 8, 18, 19, 24, 29, 30],
+      "test_files": ["tests/test_agent_experience_cli.py", "tests/test_agent_experience_store.py", "tests/test_agent_experience_recovery.py", "tests/test_agent_experience_remote_contract.py", "tests/test_agent_experience_provider_runtime.py", "tests/test_agent_experience_hooks.py"],
+      "required_case_ids": ["error_envelope_contains_no_raw_exception_or_absolute_path", "hook_lock_timeout_is_silent_fail_open", "explicit_lock_timeout_is_exit5_fail_closed", "provider_missing_is_exit3_with_next_action", "preflight_expired_is_exit5"]
+    },
+    {
+      "finding_id": "AEX-ER-I09",
+      "severity": "important",
+      "authoring_disposition": "fixed",
+      "closure_state": "pending_independent_verification",
+      "task_ids": [1, 2, 29, 30],
+      "test_files": ["evals/agent-experience/test_requirements_contract.py", "tests/test_agent_experience_integration.py"],
+      "required_case_ids": ["prototype_requires_task_mapping", "prototype_unverified_not_task_done", "prototype_cannot_be_implementation_baseline", "unmapped_prototype_change_rejected"]
+    }
+  ]
+}
