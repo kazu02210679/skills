@@ -1498,7 +1498,7 @@
           $("#loading").classList.add("hidden");
         })
         .catch((error) => {
-          $("#loading").innerHTML = `<div><strong>Project map could not load</strong><span>${escapeHtml(error.message)}. Serve this directory over HTTP and confirm the JSON file and pinned Cytoscape.js dependency are reachable.</span></div>`;
+          $("#loading").innerHTML = `<div><strong>Project map could not load</strong><span>${escapeHtml(error.message)}. Serve this directory from a local HTTP server and confirm the JSON file and pinned Cytoscape.js dependency are reachable.</span></div>`;
         });
     })();
   </script>
