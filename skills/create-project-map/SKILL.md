@@ -5,80 +5,51 @@ description: Create or update a living interactive project architecture map as a
 
 # Create Project Map
 
-Build one living map for the repository. Update existing artifacts instead of creating a map per plan.
-
-## Required Inputs
-
-- An approved plan or specification.
-- The target repository root.
-- Repository evidence sufficient to distinguish planned and implemented components.
-
-Stop and request the plan when it cannot be found or identified. Do not infer an architecture from filenames alone.
+Build one living map for the repository. Update existing artifacts instead of
+creating a map per plan.
 
 ## Workflow
 
-1. Resolve the repository root and approved plan.
-2. Read relevant README, AGENTS.md, plan sections, source paths, tests, and build/runtime evidence. Do not inventory unrelated files.
-3. If `architecture-map.json` exists, run `scripts/validate_project_map.py` before editing it. Stop on invalid data and preserve the original file.
-4. Read [project-map-schema.md](references/project-map-schema.md).
-5. Merge the project model:
-   - match nodes and flows by stable ID;
-   - preserve positions for retained node IDs;
-   - add plan-only elements as `planned`;
-   - promote to `implemented` only with inspected code, test, build, or runtime evidence;
-   - mark removed plan elements `deprecated` before deleting them;
-   - record repository-relative evidence and explicit coverage gaps.
-6. Write `architecture-map.json` at the repository root.
-7. Copy `assets/project-map-template.html` only through the renderer:
+1. Locate the repository root and an approved plan or specification. Stop and
+   request the plan when it cannot be identified; filenames alone are not
+   architecture evidence.
+2. Read only relevant README, `AGENTS.md`, plan sections, source, tests,
+   build output, and runtime evidence. Read [project-map-schema.md](references/project-map-schema.md)
+   before writing the model.
+3. If `<repo>/architecture-map.json` exists, run the validator first. Stop on
+   any error and preserve the original; never overwrite malformed JSON.
+4. Merge by stable IDs. Preserve valid positions, directed relationships, and
+   replacement/deprecated records. Add plan-only records as `planned`; mark
+   `implemented` only with inspected code, tests, build, or runtime evidence.
+   Keep relative evidence paths and explicit coverage gaps.
+5. Write the seven v1 fields and optional v2 fields. Active comparison state
+   takes precedence over an element annotation; do not infer edges or rewrite
+   legacy input.
+6. Render and validate with the existing standard-library scripts:
 
    ```bash
    python <skill-dir>/scripts/build_project_map.py \
      --data <repo>/architecture-map.json \
      --template <skill-dir>/assets/project-map-template.html \
      --output <repo>/architecture-map.html
-   ```
 
-8. Validate both artifacts:
-
-   ```bash
    python <skill-dir>/scripts/validate_project_map.py \
      <repo>/architecture-map.json \
      --html <repo>/architecture-map.html
    ```
 
-9. Serve the repository over HTTP. Browser-check:
-   - initial all-relationships view;
-   - search;
-   - each Flow selection and automatic detail scroll;
-   - node selection and relationship navigation;
-   - fit, pan, and zoom;
-   - desktop and mobile layout;
-   - browser console errors.
-10. Report the artifact paths, validation result, evidence-backed status changes, and remaining coverage gaps.
+7. Serve the repository over a local HTTP server, then browser-check legacy,
+   flow, dependency, combined, snapshots/comparisons, search and lifecycle/
+   category/change filters, inventory and relationship navigation, keyboard
+   focus, responsive layout, reduced motion, large-flow behavior, pan/zoom,
+   explicit Fit, and missing-JSON/invalid-JSON/CDN console recovery.
+8. Report both artifact paths, validation, evidence-backed status changes,
+   comparison/coverage gaps, and any browser block.
 
-## Merge Rules
+## Runtime boundary
 
-- Use lower-case hyphenated stable IDs.
-- Keep manually adjusted coordinates unless the node is new.
-- Keep directed relationships explicit; do not invent an edge when the contract is unknown.
-- Prefer one Flow per meaningful user, system, training, evaluation, or delivery path.
-- Keep Flow descriptions short enough for navigation cards.
-- Treat generated file paths from a plan as planned evidence, not implementation evidence.
-- Never remove malformed existing JSON, product code, or unrelated user changes.
-
-## Output Boundary
-
-The skill may write only:
-
-- `<repo>/architecture-map.json`
-- `<repo>/architecture-map.html`
-
-Do not commit, push, deploy, or publish unless the user separately requests it. Warn that GitHub Pages publication makes the map publicly reachable.
-
-## Failure Handling
-
-- Missing plan: stop and request it.
-- Invalid existing JSON: report validator errors and do not overwrite.
-- Unresolved relationship: retain a coverage gap.
-- Missing Cytoscape.js or JSON at runtime: preserve the template's visible recovery message and provide local-server instructions.
-- Browser unavailable: report browser verification as blocked; do not claim the HTML was interactively verified.
+The Skill writes only repository-root `architecture-map.json` and
+`architecture-map.html`. It uses the pinned Cytoscape CDN and same-origin JSON
+fetch at runtime, requires the local HTTP server for interactive verification,
+and never commits, pushes, publishes, deploys, migrates, deletes, or persists
+browser state.
