@@ -16,8 +16,10 @@ creating a map per plan.
 2. Read only relevant README, `AGENTS.md`, plan sections, source, tests,
    build output, and runtime evidence. Read [project-map-schema.md](references/project-map-schema.md)
    before writing the model.
-3. If `<repo>/architecture-map.json` exists, run the validator first. Stop on
-   any error and preserve the original; never overwrite malformed JSON.
+3. If `<repo>/architecture-map.json` exists, run the Python validator first.
+   It is authoritative for writes: stop on any error and preserve the original;
+   never overwrite malformed JSON. Browser v2 checks are defensive recovery,
+   not full-invariant parity.
 4. Merge by stable IDs. Preserve valid positions, directed relationships, and
    replacement/deprecated records. Add plan-only records as `planned`; mark
    `implemented` only with inspected code, tests, build, or runtime evidence.
@@ -54,4 +56,4 @@ The Skill writes only repository-root `architecture-map.json` and
 fetch at runtime, requires the local HTTP server for interactive verification,
 and never commits, pushes, publishes, deploys, migrates, or deletes. URL
 hash/history may reflect the current mode or selection, but browser state is
-never persisted into artifacts/JSON or committed.
+never persisted into JSON/HTML artifacts or committed.
