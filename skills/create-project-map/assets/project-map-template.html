@@ -721,7 +721,7 @@
         if (!color || color.length > 64 || /[\u0000-\u001f\u007f"'\\;{}<>]/.test(color)) return "#626878";
         const named = /^[a-z]+$/i.test(color);
         const hex = /^#[0-9a-f]{3,8}$/i.test(color);
-        const functional = /^(?:rgb|rgba|hsl|hsla)\([0-9.,%+\- /]+\)$/i.test(color);
+        const functional = /^(?:rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch|color)\([a-z0-9.,%+\- /]+\)$/i.test(color);
         return (named || hex || functional) && browserSupportsColor(color) ? color : "#626878";
       }
 
@@ -729,6 +729,28 @@
         const color = typeof category?.color === "string" ? category.color : "";
         if (model?.isV2) return /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(color) ? color : "#626878";
         return safeLegacyColor(color);
+      }
+
+      const renderableCategoryColorCache = new Map();
+      function renderableCategoryColor(color) {
+        if (typeof color !== "string" || !/^(?:hwb|lab|lch|oklab|oklch|color)\(/i.test(color)) return color;
+        if (renderableCategoryColorCache.has(color)) return renderableCategoryColorCache.get(color);
+        let rendered = "#626878";
+        const canvas = document.createElement("canvas");
+        canvas.width = 1;
+        canvas.height = 1;
+        const context = canvas.getContext("2d");
+        if (context) {
+          context.clearRect(0, 0, 1, 1);
+          context.fillStyle = color;
+          context.fillRect(0, 0, 1, 1);
+          const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data;
+          rendered = alpha === 255
+            ? "rgb(" + red + ", " + green + ", " + blue + ")"
+            : "rgba(" + red + ", " + green + ", " + blue + ", " + (alpha / 255).toFixed(3) + ")";
+        }
+        renderableCategoryColorCache.set(color, rendered);
+        return rendered;
       }
 
       function activeComparisonChange(collection, id) {
@@ -748,12 +770,16 @@
             if ((active[`${change}${COMPARISON_SUFFIX[collection]}Ids`] || []).includes(id)) return change;
           }
         }
+        if (active) return "existing";
         const item = byId(model[collection], id);
         return item?.changeType || "existing";
       }
 
       function hasChangeAnnotation(collection, item) {
-        return Boolean(model?.isV2 && item && (hasOwn(item, "changeType") || activeComparisonChange(collection, item.id)));
+        if (!model?.isV2 || !item) return false;
+        const active = model.comparisons.find((comparison) => comparison.id === state.comparisonId);
+        if (active) return Boolean(activeComparisonChange(collection, item.id));
+        return hasOwn(item, "changeType");
       }
 
       function displayChange(collection, item) {
@@ -1190,7 +1216,7 @@
             label: state.showLabels ? style.displayLabel : "",
             "border-style": style.borderStyle,
             "border-width": style.borderWidth,
-            "border-color": selected ? "#f0bd45" : style.categoryColor,
+            "border-color": selected ? "#f0bd45" : renderableCategoryColor(style.categoryColor),
             "background-color": selected ? "#292313" : (element.hasClass("flow") ? "#1d1f27" : "#171922"),
             color: selected ? "#fff1c5" : "#e5e6eb",
             opacity: element.hasClass("dimmed") ? .07 : style.opacity,
