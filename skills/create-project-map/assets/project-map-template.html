@@ -85,6 +85,9 @@
     .inspector { min-width: 0; min-height: 0; overflow-y: auto; border-left: 1px solid var(--line); background: var(--surface); }
     .flow-nav { padding: 15px 16px; border-bottom: 1px solid var(--line); background: #0d0f15; }
     .section-label { margin: 0 0 9px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; }
+    .mode-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+    .mode-button { min-height: 32px; padding: 6px 10px; font-size: 10px; }
+    .mode-button[aria-pressed="true"] { border-color: rgba(240, 189, 69, .6); background: var(--focus-soft); color: #f5d477; }
     .flow-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
     .flow-button { min-height: 62px; padding: 10px 12px; display: grid; align-content: center; gap: 4px; text-align: left; }
     .flow-button strong { font-size: 12px; }
@@ -108,6 +111,8 @@
     .stage p { margin: 0; color: var(--soft); font-size: 10px; line-height: 1.55; }
     .relation { width: 100%; min-height: 38px; margin-bottom: 6px; padding: 8px 9px; display: flex; justify-content: space-between; gap: 10px; text-align: left; }
     .relation small { color: var(--muted); }
+    .large-flow-hint { position: absolute; right: 16px; bottom: 34px; z-index: 3; color: var(--focus); font-size: 10px; pointer-events: none; }
+    .large-flow-hint:empty { display: none; }
     @media (max-width: 900px) {
       html, body { height: auto; }
       .app { height: auto; overflow: visible; }
@@ -150,11 +155,15 @@
           <div class="legend" id="legend" aria-label="Node categories"></div>
         </div>
         <div id="cy" role="application" aria-label="Interactive project dependency map"></div>
+        <div class="large-flow-hint" id="largeFlowHint" aria-live="polite"></div>
         <div class="hint">Drag to pan · Scroll to zoom · Select a node</div>
         <div class="loading" id="loading"><div><strong>Loading project map</strong><span>Preparing architecture data…</span></div></div>
       </section>
       <aside class="inspector" id="inspector" aria-label="Project map details">
-        <nav class="flow-nav" id="flowNav" aria-label="Flow views"></nav>
+        <nav class="flow-nav" id="flowNav" aria-label="Flow views">
+          <div class="mode-controls" id="modeControls" role="group" aria-label="Graph mode"></div>
+          <div id="flowViews"></div>
+        </nav>
         <div class="content-anchor" id="contentAnchor" aria-hidden="true"></div>
         <header class="detail-header">
           <p class="detail-kicker" id="detailKicker">Project index</p>
@@ -175,12 +184,157 @@
         .replaceAll("'", "&#039;");
       let model;
       let cy;
-      let selectedFlow = "all";
-      let selectedNode = "";
+      let state = {
+        mode: "dependency",
+        flowId: "all",
+        selectedNode: "",
+        snapshotId: "current",
+        comparisonId: "current",
+        statusFilter: "all",
+        categoryFilter: "all",
+        changeFilter: "all",
+        showLabels: true,
+        showDeprecated: true,
+        showChangesOnly: false,
+      };
+      let layoutOptions = {name: "preset", fit: false, animate: false};
+      let fitCalls = 0;
+      let fitCallsAfterSelection = 0;
+      let rootMeanY;
+      let downstreamMeanY;
+      let lastScrollBehavior = "";
+      let activeLayout;
+      let layoutGeneration = 0;
       const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const testMode = new URLSearchParams(location.search).get("test") === "1";
       const byId = (items, id) => items.find((item) => item.id === id);
       const list = (title, values) => !values?.length ? "" :
         `<section class="detail-section"><h3>${escapeHtml(title)}</h3><ul>${values.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>`;
+
+      const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+      const assertShape = (condition, path, message) => {
+        if (!condition) throw new Error(`${path} ${message}`);
+      };
+
+      function validateModelShape(data) {
+        assertShape(isObject(data), "document", "must be an object");
+        const isV2 = data.schemaVersion === 2;
+        assertShape(isObject(data.project), "project", "must be an object");
+        ["sources", "categories", "nodes", "edges", "flows", "phases"].forEach((key) => {
+          assertShape(Array.isArray(data[key]), key, "must be an array");
+        });
+        if (!isV2) return;
+
+        if ("view" in data) {
+          assertShape(isObject(data.view), "view", "must be an object");
+          const view = data.view;
+          const modes = new Set(["flow", "dependency", "combined"]);
+          if ("defaultMode" in view) assertShape(typeof view.defaultMode === "string" && modes.has(view.defaultMode), "view.defaultMode", "must be a recognized mode");
+          if ("defaultFlowId" in view) {
+            assertShape(typeof view.defaultFlowId === "string" && view.defaultFlowId.length > 0, "view.defaultFlowId", "must be a non-empty flow ID");
+            assertShape(data.flows.some((flow) => isObject(flow) && flow.id === view.defaultFlowId), "view.defaultFlowId", "must reference a known flow");
+          }
+          if ("availableModes" in view) {
+            assertShape(Array.isArray(view.availableModes) && view.availableModes.length > 0, "view.availableModes", "must be a non-empty array");
+            view.availableModes.forEach((mode, index) => {
+              assertShape(typeof mode === "string" && modes.has(mode), `view.availableModes[${index}]`, "must be a recognized mode");
+            });
+            assertShape(new Set(view.availableModes).size === view.availableModes.length, "view.availableModes", "must not contain duplicates");
+          }
+          if ("layouts" in view) {
+            assertShape(isObject(view.layouts), "view.layouts", "must be an object");
+            ["flow", "dependency", "combined"].forEach((name) => {
+              if (!(name in view.layouts)) return;
+              const layout = view.layouts[name];
+              assertShape(isObject(layout), `view.layouts.${name}`, "must be an object");
+              if ("name" in layout) {
+                const expectedName = name === "flow" ? "breadthfirst" : "preset";
+                assertShape(layout.name === expectedName, `view.layouts.${name}.name`, `must be '${expectedName}'`);
+              }
+              if ("fit" in layout) assertShape(layout.fit === "bounded", `view.layouts.${name}.fit`, "must be 'bounded'");
+              if (name === "flow" && "direction" in layout) assertShape(layout.direction === "TB", "view.layouts.flow.direction", "must be 'TB'");
+            });
+          }
+        }
+        if ("snapshots" in data) {
+          assertShape(Array.isArray(data.snapshots), "snapshots", "must be an array");
+          data.snapshots.forEach((snapshot, index) => {
+            assertShape(isObject(snapshot), `snapshots[${index}]`, "must be an object");
+            assertShape(typeof snapshot.id === "string" && snapshot.id.length > 0, `snapshots[${index}].id`, "must be a non-empty string");
+            assertShape(typeof snapshot.label === "string" && snapshot.label.length > 0, `snapshots[${index}].label`, "must be a non-empty string");
+          });
+        }
+        if ("currentSnapshotId" in data) {
+          assertShape(typeof data.currentSnapshotId === "string" && data.currentSnapshotId.length > 0, "currentSnapshotId", "must be a non-empty snapshot ID");
+          assertShape((data.snapshots || []).some((snapshot) => isObject(snapshot) && snapshot.id === data.currentSnapshotId), "currentSnapshotId", "must reference a known snapshot");
+        }
+        if ("comparisons" in data) {
+          assertShape(Array.isArray(data.comparisons), "comparisons", "must be an array");
+          data.comparisons.forEach((comparison, index) => assertShape(isObject(comparison), `comparisons[${index}]`, "must be an object"));
+        }
+      }
+
+      function normalizeModel(data) {
+        validateModelShape(data);
+        const isV2 = data.schemaVersion === 2;
+        const view = isV2 ? (data.view || {}) : {};
+        const availableModes = isV2
+          ? (view.availableModes || ["flow", "dependency"])
+          : ["dependency"];
+        const normalized = {
+          ...data,
+          isV2,
+          schemaVersion: isV2 ? 2 : 1,
+          view: {
+            defaultMode: isV2 ? (view.defaultMode || "dependency") : "dependency",
+            defaultFlowId: view.defaultFlowId || "",
+            availableModes: [...availableModes],
+            layouts: {
+              flow: {name: "breadthfirst", direction: "TB", fit: "bounded", ...(view.layouts?.flow || {})},
+              dependency: {name: "preset", fit: "bounded", ...(view.layouts?.dependency || {})},
+              combined: {name: "preset", fit: "bounded", ...(view.layouts?.combined || {})},
+            },
+          },
+          snapshots: isV2 ? [...(data.snapshots || [])] : [],
+          comparisons: isV2 ? [...(data.comparisons || [])] : [],
+        };
+        if (isV2 && !normalized.view.availableModes.includes(normalized.view.defaultMode)) {
+          normalized.view.defaultMode = normalized.view.availableModes[0] || "dependency";
+        }
+        if (isV2 && normalized.view.defaultMode === "flow" && normalized.flows.length === 0) {
+          normalized.view.defaultMode = "dependency";
+        }
+        return normalized;
+      }
+
+      function initializeState() {
+        const params = new URLSearchParams(location.hash.slice(1));
+        const availableModes = model.view.availableModes;
+        let mode = model.isV2 ? model.view.defaultMode : "dependency";
+        if (model.isV2 && !availableModes.includes(mode)) mode = availableModes[0] || "dependency";
+        if (model.isV2 && mode === "flow" && model.flows.length === 0) mode = "dependency";
+        const requestedMode = params.get("mode");
+        if (model.isV2 && requestedMode && availableModes.includes(requestedMode) && !(requestedMode === "flow" && model.flows.length === 0)) {
+          mode = requestedMode;
+        }
+        let flowId = "all";
+        const requestedFlow = params.get("flow");
+        if (model.flows.length > 0 && requestedFlow === "all") {
+          flowId = "all";
+        } else if (model.flows.length > 0 && requestedFlow && byId(model.flows, requestedFlow)) {
+          flowId = requestedFlow;
+        } else if (model.isV2 && mode === "flow" && model.flows.length > 0 && model.view.defaultFlowId && byId(model.flows, model.view.defaultFlowId)) {
+          flowId = model.view.defaultFlowId;
+        }
+        state = {
+          ...state,
+          mode,
+          flowId,
+          selectedNode: "",
+          snapshotId: model.isV2 ? (model.currentSnapshotId || "current") : "current",
+          comparisonId: "current",
+        };
+      }
 
       function renderLegend() {
         $("#legend").innerHTML = model.categories.map((category) =>
@@ -188,13 +342,28 @@
         ).join("");
       }
 
+      function renderModeControls() {
+        const controls = $("#modeControls");
+        if (!model.isV2) {
+          controls.hidden = true;
+          controls.innerHTML = "";
+          return;
+        }
+        controls.hidden = false;
+        const labels = {flow: "Flow", dependency: "Dependency", combined: "Combined"};
+        controls.innerHTML = model.view.availableModes.map((mode) =>
+          `<button class="mode-button" type="button" data-mode="${escapeHtml(mode)}" aria-pressed="${mode === state.mode}">${escapeHtml(labels[mode] || mode)}</button>`
+        ).join("");
+      }
+
       function renderFlowNav() {
+        const allLabel = model.isV2 ? "All flows" : "All relationships";
         const views = [
-          { id: "all", label: "All relationships", description: `${model.nodes.length} modules and ${model.edges.length} relationships` },
+          { id: "all", label: allLabel, description: model.isV2 ? `${model.flows.length} flows across ${model.nodes.length} modules` : `${model.nodes.length} modules and ${model.edges.length} relationships` },
           ...model.flows
         ];
-        $("#flowNav").innerHTML = `<p class="section-label">Flow views</p><div class="flow-grid">${
-          views.map((flow) => `<button class="flow-button" type="button" data-flow-id="${escapeHtml(flow.id)}" aria-pressed="${flow.id === selectedFlow}"><strong>${escapeHtml(flow.label)}</strong><span>${escapeHtml(flow.description)}</span></button>`).join("")
+        $("#flowViews").innerHTML = `<p class="section-label">Flow views</p><div class="flow-grid">${
+          views.map((flow) => `<button class="flow-button" type="button" data-flow-id="${escapeHtml(flow.id)}" aria-pressed="${flow.id === state.flowId}"><strong>${escapeHtml(flow.label)}</strong><span>${escapeHtml(flow.description)}</span></button>`).join("")
         }</div>`;
       }
 
@@ -206,7 +375,7 @@
       }
 
       function renderOverview() {
-        setDetail("Project index", "All relationships",
+        setDetail("Project index", model.isV2 ? "All flows" : "All relationships",
           [`${model.flows.length} flows`, `${model.nodes.length} modules`],
           `<p class="description">${escapeHtml(model.project.summary)}</p>` +
           list("Sources", model.sources.map((source) => `${source.kind}: ${source.path}`)) +
@@ -246,59 +415,230 @@
         );
       }
 
-      function updateGraph() {
-        cy.batch(() => {
-          cy.elements().removeClass("dimmed flow");
-          if (selectedFlow !== "all") {
-            const flow = byId(model.flows, selectedFlow);
-            cy.elements().addClass("dimmed");
-            flow.nodeIds.forEach((id) => cy.getElementById(id).removeClass("dimmed").addClass("flow"));
-            flow.edgeIds.forEach((id) => cy.getElementById(id).removeClass("dimmed").addClass("flow"));
-          }
-        });
+      function renderCurrentDetail() {
+        if (state.flowId !== "all" && (state.mode !== "dependency" || !model.isV2)) {
+          renderFlow(byId(model.flows, state.flowId));
+        } else {
+          renderOverview();
+        }
       }
 
-      function focusCurrent() {
-        const target = selectedFlow === "all" ? cy.elements() : cy.nodes(".flow");
+      function idsForFlow(model, flowId) {
+        if (flowId === "all") {
+          return {
+            nodeIds: [...new Set(model.flows.flatMap((flow) => flow.nodeIds || []))],
+            edgeIds: [...new Set(model.flows.flatMap((flow) => flow.edgeIds || []))],
+          };
+        }
+        const flow = byId(model.flows, flowId);
+        return {nodeIds: [...(flow?.nodeIds || [])], edgeIds: [...(flow?.edgeIds || [])]};
+      }
+
+      function graphElementsForState(model, state) {
+        const all = {nodeIds: model.nodes.map((node) => node.id), edgeIds: model.edges.map((edge) => edge.id)};
+        const selected = state.mode === "flow" ? idsForFlow(model, state.flowId) : all;
+        const nodes = model.nodes.filter((node) => selected.nodeIds.includes(node.id));
+        const nodeSet = new Set(nodes.map((node) => node.id));
+        const edges = model.edges.filter((edge) => selected.edgeIds.includes(edge.id)
+          && nodeSet.has(edge.source) && nodeSet.has(edge.target));
+        return {nodes, edges};
+      }
+
+      function layoutForMode(model, state, elementCount) {
+        if (state.mode === "flow" && model.isV2) {
+          return {
+            name: "breadthfirst",
+            fit: false,
+            directed: true,
+            circle: false,
+            spacingFactor: 1.2,
+            avoidOverlap: true,
+            nodeDimensionsIncludeLabels: true,
+            animate: !reducedMotion,
+          };
+        }
+        return {name: "preset", fit: false, animate: false};
+      }
+
+      function orientFlowLayers(flowNodeIds, flowEdgeIds) {
+        const nodeSet = new Set(flowNodeIds);
+        const inDegree = new Map(flowNodeIds.map((id) => [id, 0]));
+        model.edges.filter((edge) => flowEdgeIds.includes(edge.id)
+          && nodeSet.has(edge.source) && nodeSet.has(edge.target)).forEach((edge) => {
+            inDegree.set(edge.target, (inDegree.get(edge.target) || 0) + 1);
+          });
+        const roots = flowNodeIds.filter((id) => inDegree.get(id) === 0);
+        const downstream = flowNodeIds.filter((id) => !roots.includes(id));
+        const meanY = (ids) => {
+          const values = ids.map((id) => cy.getElementById(id).position("y")).filter(Number.isFinite);
+          return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined;
+        };
+        let rootsY = meanY(roots);
+        let downstreamY = meanY(downstream);
+        if (Number.isFinite(rootsY) && Number.isFinite(downstreamY) && rootsY > downstreamY) {
+          const maxY = Math.max(...flowNodeIds.map((id) => cy.getElementById(id).position("y")));
+          flowNodeIds.forEach((id) => {
+            const element = cy.getElementById(id);
+            const position = element.position();
+            element.position({x: position.x, y: maxY - position.y});
+          });
+          rootsY = meanY(roots);
+          downstreamY = meanY(downstream);
+        }
+        rootMeanY = rootsY;
+        downstreamMeanY = downstreamY;
+        return {rootsY, downstreamY};
+      }
+
+      function selectedFlowIds() {
+        return idsForFlow(model, state.flowId);
+      }
+
+      function selectedFlowRecord() {
+        if (state.flowId !== "all") return byId(model.flows, state.flowId);
+        const ids = selectedFlowIds();
+        return {id: "all", label: model.isV2 ? "All flows" : "All relationships", nodeIds: ids.nodeIds, edgeIds: ids.edgeIds};
+      }
+
+      function updateTelemetry(elements, largeFlow) {
+        const nodeIds = elements.nodes.map((node) => node.id);
+        const edgeIds = elements.edges.map((edge) => edge.id);
+        $("#cy").dataset.visibleNodeIds = JSON.stringify(nodeIds);
+        $("#cy").dataset.visibleEdgeIds = JSON.stringify(edgeIds);
+        $("#cy").dataset.layoutMode = state.mode;
+        $("#cy").dataset.largeFlow = String(largeFlow);
+        $("#largeFlowHint").textContent = largeFlow ? "Large flow — pan or zoom to explore" : "";
+      }
+
+      function applyFlowClasses() {
+        cy.elements().removeClass("dimmed flow");
+        const selected = selectedFlowIds();
+        if (!model.isV2 && state.flowId !== "all") {
+          cy.elements().addClass("dimmed");
+        }
+        if (state.mode === "flow" && model.isV2) {
+          cy.nodes().addClass("flow");
+          cy.edges().addClass("flow");
+        } else if ((state.mode === "combined" && model.isV2) || (!model.isV2 && state.flowId !== "all")) {
+          selected.nodeIds.forEach((id) => cy.getElementById(id).removeClass("dimmed").addClass("flow"));
+          selected.edgeIds.forEach((id) => cy.getElementById(id).removeClass("dimmed").addClass("flow"));
+        }
+      }
+
+      function fitGraph(target, automatic = false) {
+        if (!cy) return;
+        fitCalls += 1;
+        if (!automatic) fitCallsAfterSelection += 1;
         cy.fit(target.nonempty() ? target : cy.elements(), innerWidth <= 900 ? 38 : 76);
       }
 
-      function chooseFlow(flowId, scroll = true) {
-        selectedFlow = flowId;
-        selectedNode = "";
-        cy.$(":selected").unselect();
-        updateGraph();
+      function focusCurrent(automatic = false) {
+        if (!cy) return;
+        const target = !model.isV2 && state.flowId !== "all" ? cy.nodes(".flow") : cy.elements();
+        fitGraph(target, automatic);
+      }
+
+      function refreshGraph() {
+        if (!cy) return;
+        activeLayout?.stop();
+        const generation = ++layoutGeneration;
+        const elements = graphElementsForState(model, state);
+        const cytoscapeElements = [
+          ...elements.nodes.map((node) => ({group: "nodes", data: {...node}, position: {...node.position}})),
+          ...elements.edges.map((edge) => ({group: "edges", data: {...edge}})),
+        ];
+        cy.elements().remove();
+        cy.add(cytoscapeElements);
+        applyFlowClasses();
+        const largeFlow = model.isV2 && state.mode === "flow" && elements.nodes.length > 40;
+        updateTelemetry(elements, largeFlow);
+        layoutOptions = layoutForMode(model, state, elements.nodes.length);
+        const layout = cy.layout({...layoutOptions});
+        activeLayout = layout;
+        let completed = false;
+        const afterLayout = () => {
+          if (completed || generation !== layoutGeneration) return;
+          completed = true;
+          if (state.mode === "flow" && model.isV2) {
+            const flowIds = selectedFlowIds();
+            orientFlowLayers(flowIds.nodeIds, flowIds.edgeIds);
+          } else {
+            rootMeanY = undefined;
+            downstreamMeanY = undefined;
+          }
+          updateTelemetry(elements, largeFlow);
+          if (largeFlow) {
+            cy.zoom(Math.max(cy.zoom(), 0.35));
+          } else if (model.isV2 && state.mode === "flow") {
+            focusCurrent(true);
+          } else if (!model.isV2) {
+            focusCurrent(true);
+          }
+        };
+        layout.one("layoutstop", afterLayout);
+        layout.run();
+      }
+
+      function chooseMode(mode) {
+        if (!model?.isV2 || !model.view.availableModes.includes(mode)) return;
+        if (mode === "flow" && model.flows.length === 0) mode = "dependency";
+        if (mode === "flow" && state.flowId === "all" && model.view.defaultFlowId && byId(model.flows, model.view.defaultFlowId)) {
+          state.flowId = model.view.defaultFlowId;
+        }
+        state.mode = mode;
+        state.selectedNode = "";
+        fitCallsAfterSelection = 0;
+        cy?.$(":selected").unselect();
+        renderModeControls();
         renderFlowNav();
-        if (flowId === "all") renderOverview(); else renderFlow(byId(model.flows, flowId));
-        focusCurrent();
-        history.replaceState(null, "", `#flow=${encodeURIComponent(flowId)}`);
-        if (scroll && flowId !== "all") $("#contentAnchor").scrollIntoView({behavior: reducedMotion ? "auto" : "smooth"});
+        renderCurrentDetail();
+        refreshGraph();
+        history.replaceState(null, "", `#mode=${encodeURIComponent(state.mode)}&flow=${encodeURIComponent(state.flowId)}`);
+      }
+
+      function chooseFlow(flowId, scroll = true) {
+        if (!model || (flowId !== "all" && !byId(model.flows, flowId))) return;
+        state.flowId = flowId;
+        state.selectedNode = "";
+        fitCallsAfterSelection = 0;
+        cy?.$(":selected").unselect();
+        renderFlowNav();
+        renderCurrentDetail();
+        refreshGraph();
+        history.replaceState(null, "", `#mode=${encodeURIComponent(state.mode)}&flow=${encodeURIComponent(flowId)}`);
+        if (scroll && flowId !== "all") {
+          const behavior = reducedMotion ? "auto" : "smooth";
+          lastScrollBehavior = behavior;
+          $("#contentAnchor").scrollIntoView({behavior});
+        }
       }
 
       function chooseNode(nodeId) {
         const node = byId(model.nodes, nodeId);
         if (!node) return;
-        selectedNode = nodeId;
+        state.selectedNode = nodeId;
         const element = cy.getElementById(nodeId);
+        if (!element.nonempty()) return;
         cy.$(":selected").unselect();
         element.select();
         renderNode(node);
-        history.replaceState(null, "", `#flow=${encodeURIComponent(selectedFlow)}&node=${encodeURIComponent(nodeId)}`);
-        $("#contentAnchor").scrollIntoView({behavior: reducedMotion ? "auto" : "smooth"});
+        history.replaceState(null, "", `#mode=${encodeURIComponent(state.mode)}&flow=${encodeURIComponent(state.flowId)}&node=${encodeURIComponent(nodeId)}`);
+        const behavior = reducedMotion ? "auto" : "smooth";
+        lastScrollBehavior = behavior;
+        $("#contentAnchor").scrollIntoView({behavior});
       }
 
       function initializeGraph() {
+        if (typeof cytoscape !== "function") throw new Error("Cytoscape.js is unavailable");
+        const colorFor = (category) => /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(category.color || "") ? category.color : "#626878";
         const categoryStyles = model.categories.map((category) => ({
           selector: `node[category = "${category.id}"]`,
-          style: {"border-color": category.color}
+          style: {"border-color": colorFor(category)}
         }));
         cy = cytoscape({
           container: $("#cy"),
-          elements: [
-            ...model.nodes.map((node) => ({data: node, position: node.position})),
-            ...model.edges.map((edge) => ({data: edge}))
-          ],
-          layout: {name: "preset", fit: true, padding: 90},
+          elements: [],
+          layout: {name: "preset", fit: false},
           minZoom: .12,
           maxZoom: 2.5,
           boxSelectionEnabled: false,
@@ -313,9 +653,13 @@
           ]
         });
         cy.on("tap", "node", (event) => chooseNode(event.target.id()));
-        chooseFlow(selectedFlow, false);
+        refreshGraph();
       }
 
+      $("#modeControls").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-mode]");
+        if (button) chooseMode(button.dataset.mode);
+      });
       $("#flowNav").addEventListener("click", (event) => {
         const button = event.target.closest("[data-flow-id]");
         if (button) chooseFlow(button.dataset.flowId);
@@ -324,8 +668,9 @@
         const button = event.target.closest("[data-node-id]");
         if (button) chooseNode(button.dataset.nodeId);
       });
-      $("#fitButton").addEventListener("click", focusCurrent);
+      $("#fitButton").addEventListener("click", () => focusCurrent(false));
       $("#nodeSearch").addEventListener("input", (event) => {
+        if (!cy) return;
         const query = event.target.value.trim().toLowerCase();
         cy.nodes().forEach((node) => {
           const data = node.data();
@@ -334,18 +679,83 @@
         });
       });
 
+      function testState() {
+        const flowIds = selectedFlowIds();
+        const selectedFlow = selectedFlowRecord();
+        const allNodeIds = model.nodes.map((node) => node.id);
+        const allEdgeIds = model.edges.map((edge) => edge.id);
+        const visibleNodeIds = cy ? cy.nodes().map((node) => node.id()) : [];
+        const visibleEdgeIds = cy ? cy.edges().map((edge) => edge.id()) : [];
+        const emphasizedEdgeIds = cy ? cy.edges(".flow").map((edge) => edge.id()) : [];
+        let reportedRootMeanY = rootMeanY;
+        let reportedDownstreamMeanY = downstreamMeanY;
+        if (cy && state.mode === "flow" && (!Number.isFinite(reportedRootMeanY) || !Number.isFinite(reportedDownstreamMeanY))) {
+          const nodeSet = new Set(flowIds.nodeIds);
+          const inDegree = new Map(flowIds.nodeIds.map((id) => [id, 0]));
+          model.edges.filter((edge) => flowIds.edgeIds.includes(edge.id)
+            && nodeSet.has(edge.source) && nodeSet.has(edge.target)).forEach((edge) => {
+              inDegree.set(edge.target, (inDegree.get(edge.target) || 0) + 1);
+            });
+          const roots = flowIds.nodeIds.filter((id) => inDegree.get(id) === 0);
+          const downstream = flowIds.nodeIds.filter((id) => !roots.includes(id));
+          const meanY = (ids) => {
+            const values = ids.map((id) => cy.getElementById(id).position("y")).filter(Number.isFinite);
+            return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : undefined;
+          };
+          reportedRootMeanY = meanY(roots);
+          reportedDownstreamMeanY = meanY(downstream);
+        }
+        return {
+          mode: state.mode,
+          flowId: state.flowId,
+          selectedFlow: selectedFlow ? {id: selectedFlow.id, nodeIds: [...(selectedFlow.nodeIds || [])], edgeIds: [...(selectedFlow.edgeIds || [])]} : {nodeIds: [], edgeIds: []},
+          allNodeIds,
+          allEdgeIds,
+          visibleNodeIds,
+          visibleEdgeIds,
+          flowNodeIds: [...flowIds.nodeIds],
+          flowEdgeIds: [...flowIds.edgeIds],
+          nonFlowEdgeIds: allEdgeIds.filter((id) => !flowIds.edgeIds.includes(id)),
+          emphasizedEdgeIds,
+          layoutOptions: {...layoutOptions},
+          largeFlow: $("#cy").dataset.largeFlow === "true",
+          zoom: cy ? cy.zoom() : 0,
+          fitCalls,
+          fitCallsAfterSelection,
+          rootMeanY: reportedRootMeanY,
+          downstreamMeanY: reportedDownstreamMeanY,
+          lastScrollBehavior,
+        };
+      }
+
+      function exposeTestHooks() {
+        if (!testMode) return;
+        window.__projectMapTestHooks = {
+          getState: testState,
+          normalizeModel,
+          graphElementsForState,
+          layoutForMode,
+          orientFlowLayers,
+          chooseMode,
+          chooseFlow,
+          focusCurrent,
+        };
+      }
+
       fetch(DATA_URL)
         .then((response) => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           return response.json();
         })
         .then((data) => {
-          model = data;
-          const requested = new URLSearchParams(location.hash.slice(1)).get("flow");
-          selectedFlow = requested === "all" || byId(model.flows, requested) ? requested : "all";
+          model = normalizeModel(data);
+          initializeState();
           renderLegend();
+          renderModeControls();
           renderFlowNav();
+          renderCurrentDetail();
           initializeGraph();
+          exposeTestHooks();
           $("#loading").classList.add("hidden");
         })
         .catch((error) => {
