@@ -94,9 +94,28 @@
     .flow-button span { color: var(--muted); font-size: 9px; line-height: 1.45; }
     .flow-button[aria-pressed="true"] { border-color: rgba(240, 189, 69, .6); background: var(--focus-soft); }
     .flow-button[aria-pressed="true"] strong { color: #f5d477; }
+    .filter-controls { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .filter-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .filter-field { min-width: 0; display: grid; gap: 5px; color: var(--muted); font-size: 9px; }
+    .filter-field select { width: 100%; min-width: 0; height: 31px; padding: 0 7px; font-size: 10px; }
+    .toggle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 9px; }
+    .toggle { min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--soft); font-size: 9px; line-height: 1.35; }
+    .toggle input { accent-color: var(--focus); }
+    .node-inventory { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+    .inventory-list { display: grid; gap: 6px; max-height: 230px; overflow: auto; }
+    .inventory-item { width: 100%; min-height: 43px; padding: 7px 9px; display: grid; gap: 3px; text-align: left; }
+    .inventory-item[aria-current="true"] { border-color: rgba(240, 189, 69, .7); background: var(--focus-soft); }
+    .inventory-item strong { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .inventory-item span { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+    .inventory-empty { margin: 0; color: var(--muted); font-size: 10px; }
+    .comparison-notice { margin: 0 0 14px; padding: 8px 9px; border: 1px solid rgba(240, 189, 69, .4); border-radius: 7px; color: #f5d477; font-size: 10px; line-height: 1.45; }
+    .legend-entry i { flex: 0 0 auto; width: 14px; height: 14px; display: inline-grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--surface-2); color: var(--text); font-style: normal; font-size: 9px; }
+    .legend-entry.category i { border: 0; background: var(--color); }
+    .legend-entry.pattern i { width: auto; min-width: 14px; padding: 0 3px; border-radius: 4px; }
+    .coverage-unknown { color: #f5d477; }
     .content-anchor { height: 1px; scroll-margin-top: 12px; }
     .detail-header { padding: 18px; border-bottom: 1px solid var(--line); }
-    .detail-kicker { margin: 0 0 9px; color: var(--muted); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+    .detail-kicker { margin: 0 0 9px; color: var(--muted); font-size: 10px; letter-spacing: .1em; }
     .detail-header h2 { margin: 0; font-size: 22px; line-height: 1.25; }
     .chips { margin-top: 11px; display: flex; flex-wrap: wrap; gap: 6px; }
     .chip { padding: 4px 7px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--soft); font-size: 9px; }
@@ -120,15 +139,22 @@
       .toolbar { width: 100%; margin-left: 0; }
       .toolbar input { flex: 1; width: auto; }
       .workspace { display: block; }
-      .map-panel { height: 68vh; min-height: 500px; }
+      .map-panel { height: 68vh; min-height: 450px; }
       .inspector { overflow: visible; border-left: 0; border-top: 1px solid var(--line); }
+      .filter-grid, .toggle-grid { grid-template-columns: repeat(2, minmax(145px, 1fr)); overflow-x: auto; }
     }
     @media (max-width: 560px) {
       .topbar { padding: 11px 12px; }
       .map-panel { min-height: 450px; }
       .summary { top: 14px; left: 14px; max-width: calc(100% - 28px); }
-      .legend span:nth-child(n+7) { display: none; }
       .hint { display: none; }
+      .toolbar { flex-wrap: wrap; }
+      .toolbar input { flex: 1 1 100%; }
+      .mode-controls, .filter-grid, .toggle-grid { overflow-x: auto; flex-wrap: nowrap; }
+      .mode-controls { padding-bottom: 3px; }
+      .filter-grid, .toggle-grid { display: flex; }
+      .filter-field { flex: 0 0 145px; }
+      .toggle { flex: 0 0 145px; }
     }
   </style>
 </head>
@@ -159,10 +185,49 @@
         <div class="hint">Drag to pan · Scroll to zoom · Select a node</div>
         <div class="loading" id="loading"><div><strong>Loading project map</strong><span>Preparing architecture data…</span></div></div>
       </section>
-      <aside class="inspector" id="inspector" aria-label="Project map details">
+      <aside class="inspector" id="inspector" aria-label="Project map details" aria-live="polite" aria-relevant="additions text">
         <nav class="flow-nav" id="flowNav" aria-label="Flow views">
           <div class="mode-controls" id="modeControls" role="group" aria-label="Graph mode"></div>
           <div id="flowViews"></div>
+          <section class="filter-controls" id="filterControls" aria-label="Map filters" hidden>
+            <p class="section-label">Filters and comparison</p>
+            <div class="filter-grid">
+              <label class="filter-field" for="statusFilter">Lifecycle status
+                <select id="statusFilter">
+                  <option value="all">All statuses</option>
+                  <option value="planned">Planned</option>
+                  <option value="implemented">Implemented</option>
+                  <option value="deprecated">Deprecated</option>
+                </select>
+              </label>
+              <label class="filter-field" for="categoryFilter">Category
+                <select id="categoryFilter"><option value="all">All categories</option></select>
+              </label>
+              <label class="filter-field" for="changeFilter">Change
+                <select id="changeFilter">
+                  <option value="all">All changes</option>
+                  <option value="existing">Existing</option>
+                  <option value="inherited">Inherited</option>
+                  <option value="changed">Changed</option>
+                  <option value="added">Added</option>
+                  <option value="replaced">Replaced</option>
+                  <option value="removed">Removed</option>
+                </select>
+              </label>
+              <label class="filter-field" for="snapshotSelect">Snapshot
+                <select id="snapshotSelect"></select>
+              </label>
+              <label class="filter-field" for="comparisonSelect">Comparison
+                <select id="comparisonSelect"></select>
+              </label>
+            </div>
+            <div class="toggle-grid">
+              <label class="toggle"><input id="showLabelsToggle" type="checkbox" checked> Show labels</label>
+              <label class="toggle"><input id="showDeprecatedToggle" type="checkbox" checked> Show deprecated</label>
+              <label class="toggle"><input id="showChangesOnlyToggle" type="checkbox"> Changes only</label>
+            </div>
+          </section>
+          <section class="node-inventory" id="nodeInventory" aria-label="Node inventory"></section>
         </nav>
         <div class="content-anchor" id="contentAnchor" aria-hidden="true"></div>
         <header class="detail-header">
@@ -193,9 +258,11 @@
         statusFilter: "all",
         categoryFilter: "all",
         changeFilter: "all",
+        searchQuery: "",
         showLabels: true,
         showDeprecated: true,
         showChangesOnly: false,
+        comparisonNotice: "",
       };
       let layoutOptions = {name: "preset", fit: false, animate: false};
       let fitCalls = 0;
@@ -211,6 +278,44 @@
       const byId = (items, id) => items.find((item) => item && item.id === id);
       const list = (title, values) => !values?.length ? "" :
         `<section class="detail-section"><h3>${escapeHtml(title)}</h3><ul>${values.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>`;
+
+      const NODE_KIND_SHAPES = Object.freeze({
+        service: "roundrectangle", ui: "rectangle", worker: "hexagon", data: "diamond",
+        external: "ellipse", contract: "tag", decision: "octagon", actor: "star",
+      });
+      const EDGE_KIND_STYLES = Object.freeze({
+        calls: {lineStyle: "solid", arrow: "vee", width: 1},
+        data: {lineStyle: "solid", arrow: "triangle", width: 1},
+        event: {lineStyle: "dashed", arrow: "triangle", width: 1},
+        contains: {lineStyle: "solid", arrow: "diamond", width: 1},
+        inherits: {lineStyle: "dotted", arrow: "tee", width: 1},
+        "depends-on": {lineStyle: "dashed", arrow: "vee", width: 1},
+        replaces: {lineStyle: "solid", arrow: "diamond", width: 3},
+        unknown: {lineStyle: "dotted", arrow: "circle", width: 1},
+      });
+      const CHANGE_STYLES = Object.freeze({
+        existing: {glyph: "=", borderStyle: "solid", borderWidth: 1},
+        inherited: {glyph: "↥", borderStyle: "dashed", borderWidth: 1},
+        changed: {glyph: "~", borderStyle: "solid", borderWidth: 3},
+        added: {glyph: "+", borderStyle: "solid", borderWidth: 2},
+        replaced: {glyph: "⇄", borderStyle: "solid", borderWidth: 3},
+        removed: {glyph: "−", borderStyle: "dotted", borderWidth: 1},
+      });
+      const CHANGE_EDGE_STYLES = Object.freeze({
+        existing: {lineStyle: "solid", width: 1},
+        inherited: {lineStyle: "dashed", width: 1},
+        changed: {lineStyle: "solid", width: 2},
+        added: {lineStyle: "solid", width: 1},
+        replaced: {lineStyle: "solid", width: 3},
+        removed: {lineStyle: "dotted", width: 1},
+      });
+      const STATUS_STYLES = Object.freeze({
+        planned: {borderStyle: "dashed", borderWidth: 2, opacity: 1},
+        implemented: {borderStyle: "solid", borderWidth: 1, opacity: 1},
+        deprecated: {borderStyle: "dotted", borderWidth: 2, opacity: .5},
+      });
+      const COMPARISON_SUFFIX = {nodes: "Node", edges: "Edge", flows: "Flow"};
+      const CHANGE_ORDER = ["existing", "inherited", "changed", "added", "replaced", "removed"];
 
       const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
       const assertShape = (condition, path, message) => {
@@ -480,6 +585,11 @@
           ...data,
           isV2,
           schemaVersion: isV2 ? 2 : 1,
+          nodes: data.nodes.map((node) => ({...node})),
+          edges: data.edges.map((edge) => ({...edge, ...(isV2 ? {kind: edge.kind || "unknown"} : {})})),
+          flows: data.flows.map((flow) => ({...flow})),
+          categories: data.categories.map((category) => ({...category})),
+          phases: data.phases.map((phase) => ({...phase})),
           view: {
             defaultMode: isV2 ? (view.defaultMode || "dependency") : "dependency",
             defaultFlowId: view.defaultFlowId || "",
@@ -490,8 +600,8 @@
               combined: {name: "preset", fit: "bounded", ...(view.layouts?.combined || {})},
             },
           },
-          snapshots: isV2 ? [...(data.snapshots || [])] : [],
-          comparisons: isV2 ? [...(data.comparisons || [])] : [],
+          snapshots: isV2 ? (data.snapshots || []).map((snapshot) => ({...snapshot})) : [],
+          comparisons: isV2 ? (data.comparisons || []).map((comparison) => ({...comparison})) : [],
         };
         if (isV2 && !normalized.view.availableModes.includes(normalized.view.defaultMode)) {
           normalized.view.defaultMode = normalized.view.availableModes[0] || "dependency";
@@ -528,8 +638,10 @@
           mode,
           flowId,
           selectedNode: "",
-          snapshotId: model.isV2 ? (model.currentSnapshotId || "current") : "current",
+          snapshotId: "current",
           comparisonId: "current",
+          searchQuery: "",
+          comparisonNotice: "",
         };
       }
 
@@ -538,10 +650,147 @@
         return /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(color) ? color : "#626878";
       }
 
+      function activeComparisonChange(collection, id) {
+        const active = model?.comparisons.find((item) => item.id === state.comparisonId);
+        if (!active) return "";
+        const suffix = COMPARISON_SUFFIX[collection];
+        for (const change of CHANGE_ORDER) {
+          if ((active[`${change}${suffix}Ids`] || []).includes(id)) return change;
+        }
+        return "";
+      }
+
+      function comparisonState(model, collection, id) {
+        const active = model.comparisons.find((item) => item.id === state.comparisonId);
+        if (active) {
+          for (const change of ["existing", "inherited", "changed", "added", "replaced", "removed"]) {
+            if ((active[`${change}${COMPARISON_SUFFIX[collection]}Ids`] || []).includes(id)) return change;
+          }
+        }
+        const item = byId(model[collection], id);
+        return item?.changeType || "existing";
+      }
+
+      function hasChangeAnnotation(collection, item) {
+        return Boolean(model?.isV2 && item && (hasOwn(item, "changeType") || activeComparisonChange(collection, item.id)));
+      }
+
+      function displayChange(collection, item) {
+        return hasChangeAnnotation(collection, item) ? comparisonState(model, collection, item.id) : "";
+      }
+
+      function displayLabel(collection, item) {
+        const change = displayChange(collection, item);
+        if (!change) return item.label;
+        const style = CHANGE_STYLES[change] || CHANGE_STYLES.existing;
+        return `${style.glyph} ${item.label} [${change}]`;
+      }
+
+      function nodeStyleState(node) {
+        const category = byId(model.categories, node.category);
+        const status = STATUS_STYLES[node.status] || STATUS_STYLES.implemented;
+        const change = comparisonState(model, "nodes", node.id);
+        const annotated = hasChangeAnnotation("nodes", node);
+        const changeStyle = CHANGE_STYLES[change] || CHANGE_STYLES.existing;
+        let borderStyle = status.borderStyle;
+        if (annotated && node.status === "implemented") borderStyle = changeStyle.borderStyle;
+        return {
+          shape: NODE_KIND_SHAPES[node.kind] || NODE_KIND_SHAPES.service,
+          borderStyle,
+          borderWidth: Math.max(status.borderWidth, annotated ? changeStyle.borderWidth : 0),
+          status: node.status || "implemented",
+          changeType: change,
+          changeBadge: annotated,
+          glyph: annotated ? changeStyle.glyph : "",
+          displayLabel: displayLabel("nodes", node),
+          ariaLabel: `${node.label}, status ${node.status || "implemented"}, kind ${node.kind || "service"}${annotated ? `, change ${change}` : ""}`,
+          categoryColor: safeCategoryColor(category),
+          borderColor: state.selectedNode === node.id ? "#f0bd45" : safeCategoryColor(category),
+          selected: state.selectedNode === node.id,
+          opacity: status.opacity,
+        };
+      }
+
+      function edgeStyleState(edge) {
+        const kind = model.isV2 ? (edge.kind || "unknown") : edge.kind;
+        const kindStyle = EDGE_KIND_STYLES[kind] || {lineStyle: "solid", arrow: "triangle", width: 1};
+        const change = comparisonState(model, "edges", edge.id);
+        const annotated = hasChangeAnnotation("edges", edge);
+        const changeStyle = CHANGE_EDGE_STYLES[change] || CHANGE_EDGE_STYLES.existing;
+        return {
+          lineStyle: kindStyle.lineStyle,
+          changeLineStyle: annotated ? changeStyle.lineStyle : "",
+          arrow: kindStyle.arrow,
+          width: Math.max(kindStyle.width, annotated ? changeStyle.width : 0),
+          kind: kind || "unknown",
+          changeType: change,
+          changeBadge: annotated,
+          glyph: annotated ? (CHANGE_STYLES[change] || CHANGE_STYLES.existing).glyph : "",
+          displayLabel: displayLabel("edges", edge),
+          ariaLabel: `${edge.label}, ${edge.source} to ${edge.target}${annotated ? `, change ${change}` : ""}`,
+        };
+      }
+
+      function searchableNode(node) {
+        return JSON.stringify({
+          label: node.label,
+          description: node.description,
+          responsibilities: node.responsibilities,
+          inputs: node.inputs,
+          outputs: node.outputs,
+          sourcePaths: node.sourcePaths,
+          evidence: node.evidence,
+          coverageGap: node.coverageGap,
+        }).toLowerCase();
+      }
+
+      function snapshotMatches(item) {
+        if (!model.isV2 || state.snapshotId === "current" || !item || !hasOwn(item, "snapshotIds")) return true;
+        return item.snapshotIds.includes(state.snapshotId);
+      }
+
+      function changeMatches(collection, item) {
+        return state.changeFilter === "all" || comparisonState(model, collection, item.id) === state.changeFilter;
+      }
+
+      function changesOnlyMatches(collection, item) {
+        return !state.showChangesOnly || hasChangeAnnotation(collection, item);
+      }
+
+      function applyFilters(model, state) {
+        const query = state.searchQuery.trim().toLowerCase();
+        const nodes = model.nodes.filter((node) => {
+          if (state.statusFilter !== "all" && node.status !== state.statusFilter) return false;
+          if (state.categoryFilter !== "all" && node.category !== state.categoryFilter && node.kind !== state.categoryFilter) return false;
+          if (!changeMatches("nodes", node) || !changesOnlyMatches("nodes", node)) return false;
+          if (!state.showDeprecated && node.status === "deprecated") return false;
+          if (!snapshotMatches(node)) return false;
+          return !query || searchableNode(node).includes(query);
+        });
+        const nodeSet = new Set(nodes.map((node) => node.id));
+        const edges = model.edges.filter((edge) => nodeSet.has(edge.source) && nodeSet.has(edge.target)
+          && snapshotMatches(edge) && changeMatches("edges", edge) && changesOnlyMatches("edges", edge));
+        const flows = model.flows.filter((flow) => snapshotMatches(flow)
+          && changeMatches("flows", flow) && changesOnlyMatches("flows", flow));
+        return {nodes, edges, flows};
+      }
+
       function renderLegend() {
-        $("#legend").innerHTML = model.categories.map((category) =>
-          `<span><i style="--color:${safeCategoryColor(category)}"></i>${escapeHtml(category.label)}</span>`
-        ).join("");
+        const categories = model.categories.map((category) =>
+          `<span class="legend-entry category"><i style="--color:${safeCategoryColor(category)}" aria-hidden="true"></i>${escapeHtml(category.label)} category</span>`
+        );
+        const lifecycle = [
+          ["planned", "dashed 2px border"],
+          ["implemented", "solid 1px border"],
+          ["deprecated", "dotted 2px border; dimmed"],
+        ].map(([status, explanation]) =>
+          `<span class="legend-entry pattern"><i aria-hidden="true">${status === "planned" ? "··" : status === "implemented" ? "—" : "⋯"}</i>${status}: ${explanation}</span>`
+        );
+        const changes = model.isV2 ? CHANGE_ORDER.map((change) => {
+          const style = CHANGE_STYLES[change];
+          return `<span class="legend-entry pattern"><i aria-hidden="true">${escapeHtml(style.glyph)}</i>${escapeHtml(change)}: ${escapeHtml(style.borderStyle)} ${style.borderWidth}px / ${escapeHtml(CHANGE_EDGE_STYLES[change].lineStyle)} edge</span>`;
+        }) : [];
+        $("#legend").innerHTML = [...categories, ...lifecycle, ...changes].join("");
       }
 
       function renderModeControls() {
@@ -558,11 +807,65 @@
         ).join("");
       }
 
+      function renderFilterControls() {
+        const controls = $("#filterControls");
+        const categorySelect = $("#categoryFilter");
+        if (!model.isV2) {
+          controls.hidden = true;
+          categorySelect.innerHTML = "<option value=\"all\">All categories</option>";
+          return;
+        }
+        controls.hidden = false;
+        const categoryOptions = [...new Map([
+          ...model.categories.map((category) => [category.id, category.label]),
+          ...model.nodes.filter((node) => node.kind).map((node) => [node.kind, node.kind]),
+        ]).entries()];
+        categorySelect.innerHTML = `<option value="all">All categories</option>${categoryOptions.map(([id, label]) =>
+          `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`
+        ).join("")}`;
+        const currentId = model.currentSnapshotId || "current";
+        const currentLabel = model.currentSnapshotId ? `Current (${model.currentSnapshotId})` : "Current";
+        $("#snapshotSelect").innerHTML = `<option value="${escapeHtml(currentId)}">${escapeHtml(currentLabel)}</option>${model.snapshots
+          .filter((snapshot) => snapshot.id !== model.currentSnapshotId)
+          .map((snapshot) => `<option value="${escapeHtml(snapshot.id)}">${escapeHtml(snapshot.label)}</option>`).join("")}`;
+        $("#comparisonSelect").innerHTML = `<option value="current">Current</option>${model.comparisons.map((comparison) => {
+          const from = byId(model.snapshots, comparison.fromSnapshotId);
+          const to = byId(model.snapshots, comparison.toSnapshotId);
+          return `<option value="${escapeHtml(comparison.id)}">${escapeHtml(comparison.label || `${from?.label || comparison.fromSnapshotId} → ${to?.label || comparison.toSnapshotId}`)}</option>`;
+        }).join("")}`;
+        $("#statusFilter").value = state.statusFilter;
+        categorySelect.value = state.categoryFilter;
+        $("#changeFilter").value = state.changeFilter;
+        $("#showLabelsToggle").checked = state.showLabels;
+        $("#showDeprecatedToggle").checked = state.showDeprecated;
+        $("#showChangesOnlyToggle").checked = state.showChangesOnly;
+        $("#snapshotSelect").value = state.snapshotId === "current" ? currentId : state.snapshotId;
+        $("#comparisonSelect").value = state.comparisonId;
+      }
+
+      function renderNodeInventory() {
+        if (!model) return;
+        const inventory = $("#nodeInventory");
+        const nodes = applyFilters(model, state).nodes;
+        const entries = nodes.map((node) => {
+          const change = displayChange("nodes", node);
+          const kind = node.kind || "service";
+          const coverage = model.isV2 && state.snapshotId !== "current" && !hasOwn(node, "snapshotIds")
+            ? " · snapshot coverage unknown" : "";
+          const label = displayLabel("nodes", node);
+          const changeText = change || "unannotated";
+          const accessible = `${node.label}, status ${node.status || "implemented"}, kind ${kind}, change ${changeText}${coverage}`;
+          return `<button class="inventory-item" type="button" data-node-id="${escapeHtml(node.id)}" data-change-type="${escapeHtml(change || "existing")}" aria-current="${state.selectedNode === node.id}" aria-label="${escapeHtml(accessible)}"><strong>${escapeHtml(label)}</strong><span>Status: ${escapeHtml(node.status || "implemented")} · Kind: ${escapeHtml(kind)} · Change: ${escapeHtml(changeText)}${coverage ? `<span class="coverage-unknown">${escapeHtml(coverage)}</span>` : ""}</span></button>`;
+        }).join("");
+        inventory.innerHTML = `<p class="section-label">Node inventory</p><div class="inventory-list">${entries || "<p class=\"inventory-empty\">No nodes match the current filters.</p>"}</div>`;
+      }
+
       function renderFlowNav() {
         const allLabel = model.isV2 ? "All flows" : "All relationships";
+        const visibleFlows = model.isV2 ? applyFilters(model, state).flows : model.flows;
         const views = [
           { id: "all", label: allLabel, description: model.isV2 ? `${model.flows.length} flows across ${model.nodes.length} modules` : `${model.nodes.length} modules and ${model.edges.length} relationships` },
-          ...model.flows
+          ...visibleFlows
         ];
         $("#flowViews").innerHTML = `<p class="section-label">Flow views</p><div class="flow-grid">${
           views.map((flow) => `<button class="flow-button" type="button" data-flow-id="${escapeHtml(flow.id)}" aria-pressed="${flow.id === state.flowId}"><strong>${escapeHtml(flow.label)}</strong><span>${escapeHtml(flow.description)}</span></button>`).join("")
@@ -576,22 +879,28 @@
         $("#detailBody").innerHTML = body;
       }
 
+      function detailNotice() {
+        return state.comparisonNotice ? `<p class="comparison-notice">${escapeHtml(state.comparisonNotice)}</p>` : "";
+      }
+
       function renderOverview() {
         setDetail("Project index", model.isV2 ? "All flows" : "All relationships",
           [`${model.flows.length} flows`, `${model.nodes.length} modules`],
-          `<p class="description">${escapeHtml(model.project.summary)}</p>` +
+          detailNotice() + `<p class="description">${escapeHtml(model.project.summary)}</p>` +
           list("Sources", model.sources.map((source) => `${source.kind}: ${source.path}`)) +
           list("How to explore", ["Select a Flow above to focus a delivery path.", "Select a graph node to inspect its responsibilities and evidence."])
         );
       }
 
       function renderFlow(flow) {
+        if (!flow) return renderOverview();
         const stages = (flow.stages || []).map((stage, index) =>
           `<article class="stage"><strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(stage.label)}</strong><p>${escapeHtml(stage.description)}</p><p><b>Backstage:</b> ${escapeHtml(stage.backstage)}</p><p><b>Produces:</b> ${escapeHtml((stage.produces || []).join(", "))}</p></article>`
         ).join("");
+        const change = displayChange("flows", flow);
         setDetail("Flow / service blueprint", flow.label,
-          [`${flow.stages?.length || 0} stages`, `${flow.nodeIds?.length || 0} modules`],
-          `<p class="description">${escapeHtml(flow.description)}</p>` +
+          [`${flow.stages?.length || 0} stages`, `${flow.nodeIds?.length || 0} modules`, ...(change ? [`change: ${change}`] : [])],
+          detailNotice() + `<p class="description">${escapeHtml(flow.description)}</p>` +
           list("Contract", [`Actor: ${flow.actor}`, `Trigger: ${flow.trigger}`, `Outcome: ${flow.outcome}`]) +
           `<section class="detail-section"><h3>Journey stages</h3>${stages}</section>` +
           list("Outputs", flow.outputs) + list("Safety & recovery", flow.safety) +
@@ -599,17 +908,43 @@
         );
       }
 
+      function renderComparison(comparison) {
+        const from = byId(model.snapshots, comparison.fromSnapshotId);
+        const to = byId(model.snapshots, comparison.toSnapshotId);
+        const counts = [];
+        for (const change of CHANGE_ORDER) {
+          const nodeCount = (comparison[`${change}NodeIds`] || []).length;
+          const edgeCount = (comparison[`${change}EdgeIds`] || []).length;
+          const flowCount = (comparison[`${change}FlowIds`] || []).length;
+          counts.push(`${change}: ${nodeCount} nodes · ${edgeCount} edges · ${flowCount} flows`);
+        }
+        const replacements = [
+          ...model.nodes.map((item) => ({collection: "node", item})),
+          ...model.edges.map((item) => ({collection: "edge", item})),
+          ...model.flows.map((item) => ({collection: "flow", item})),
+        ].filter(({item}) => item.replacesId)
+          .map(({item}) => `${item.id} replaces ${item.replacesId}`);
+        setDetail("Snapshot comparison", `${from?.label || comparison.fromSnapshotId} → ${to?.label || comparison.toSnapshotId}`,
+          [`${from?.label || comparison.fromSnapshotId} → ${to?.label || comparison.toSnapshotId}`, `${model.nodes.length} nodes`, `${model.edges.length} edges`],
+          `<p class="comparison-notice">From ${escapeHtml(from?.label || comparison.fromSnapshotId)} → ${escapeHtml(to?.label || comparison.toSnapshotId)}</p>` +
+          list("Change counts", counts) + list("Replacement links", replacements) +
+          list("Summary", comparison.summary ? [comparison.summary] : [])
+        );
+      }
+
       function renderNode(node) {
         const category = byId(model.categories, node.category);
-        const relations = model.edges.filter((edge) => edge.source === node.id || edge.target === node.id)
+        const visibleEdges = applyFilters(model, state).edges;
+        const relations = visibleEdges.filter((edge) => edge.source === node.id || edge.target === node.id)
           .map((edge) => {
             const otherId = edge.source === node.id ? edge.target : edge.source;
             const other = byId(model.nodes, otherId);
-            return `<button class="relation" type="button" data-node-id="${escapeHtml(otherId)}"><span>${escapeHtml(other?.label || otherId)}</span><small>${escapeHtml(edge.label)}</small></button>`;
+            return `<button class="relation" type="button" data-node-id="${escapeHtml(otherId)}" aria-label="Inspect ${escapeHtml(other?.label || otherId)} via ${escapeHtml(edge.label)}"><span>${escapeHtml(other?.label || otherId)}</span><small>${escapeHtml(edge.label)}</small></button>`;
           }).join("");
-        setDetail("Node inspector", node.label,
-          [category?.label || node.category, node.status, node.phase],
-          `<p class="description">${escapeHtml(node.description)}</p>` +
+        const change = displayChange("nodes", node);
+        setDetail("Node inspector", displayLabel("nodes", node),
+          [category?.label || node.category, `status: ${node.status}`, `kind: ${node.kind || "service"}`, node.phase, ...(change ? [`change: ${change}`] : [])],
+          detailNotice() + `<p class="description">${escapeHtml(node.description)}</p>` +
           list("Responsibilities", node.responsibilities) + list("Inputs", node.inputs) +
           list("Outputs", node.outputs) + list("Source paths", node.sourcePaths) +
           list("Evidence", node.evidence) + list("Coverage gap", node.coverageGap ? [node.coverageGap] : []) +
@@ -618,7 +953,11 @@
       }
 
       function renderCurrentDetail() {
-        if (state.flowId !== "all" && (state.mode !== "dependency" || !model.isV2)) {
+        if (state.selectedNode && byId(model.nodes, state.selectedNode)) {
+          renderNode(byId(model.nodes, state.selectedNode));
+        } else if (state.comparisonId !== "current") {
+          renderComparison(byId(model.comparisons, state.comparisonId));
+        } else if (state.flowId !== "all" && (state.mode !== "dependency" || !model.isV2)) {
           renderFlow(byId(model.flows, state.flowId));
         } else {
           renderOverview();
@@ -639,9 +978,10 @@
       function graphElementsForState(model, state) {
         const all = {nodeIds: model.nodes.map((node) => node.id), edgeIds: model.edges.map((edge) => edge.id)};
         const selected = state.mode === "flow" ? idsForFlow(model, state.flowId) : all;
-        const nodes = model.nodes.filter((node) => selected.nodeIds.includes(node.id));
+        const filtered = applyFilters(model, state);
+        const nodes = filtered.nodes.filter((node) => selected.nodeIds.includes(node.id));
         const nodeSet = new Set(nodes.map((node) => node.id));
-        const edges = model.edges.filter((edge) => selected.edgeIds.includes(edge.id)
+        const edges = filtered.edges.filter((edge) => selected.edgeIds.includes(edge.id)
           && nodeSet.has(edge.source) && nodeSet.has(edge.target));
         return {nodes, edges};
       }
@@ -709,6 +1049,7 @@
         $("#cy").dataset.visibleEdgeIds = JSON.stringify(edgeIds);
         $("#cy").dataset.layoutMode = state.mode;
         $("#cy").dataset.largeFlow = String(largeFlow);
+        $("#cy").dataset.labels = state.showLabels ? "visible" : "hidden";
         $("#largeFlowHint").textContent = largeFlow ? "Large flow — pan or zoom to explore" : "";
       }
 
@@ -727,6 +1068,60 @@
         }
       }
 
+      function applyElementStyles() {
+        if (!cy) return;
+        cy.nodes().forEach((element) => {
+          const node = byId(model.nodes, element.id());
+          if (!node) return;
+          const style = nodeStyleState(node);
+          const selected = element.selected();
+          element.data({
+            label: style.displayLabel,
+            displayLabel: style.displayLabel,
+            ariaLabel: style.ariaLabel,
+            changeType: style.changeType,
+          });
+          element.style({
+            shape: style.shape,
+            label: state.showLabels ? style.displayLabel : "",
+            "border-style": style.borderStyle,
+            "border-width": style.borderWidth,
+            "border-color": selected ? "#f0bd45" : style.categoryColor,
+            "background-color": selected ? "#292313" : (element.hasClass("flow") ? "#1d1f27" : "#171922"),
+            color: selected ? "#fff1c5" : "#e5e6eb",
+            opacity: element.hasClass("dimmed") ? .07 : style.opacity,
+          });
+        });
+        cy.edges().forEach((element) => {
+          const edge = byId(model.edges, element.id());
+          if (!edge) return;
+          const style = edgeStyleState(edge);
+          element.data({
+            label: style.displayLabel,
+            displayLabel: style.displayLabel,
+            ariaLabel: style.ariaLabel,
+            changeType: style.changeType,
+          });
+          element.style({
+            "line-style": style.lineStyle,
+            width: style.width + (element.hasClass("flow") && !style.changeBadge ? 1 : 0),
+            "target-arrow-shape": style.arrow,
+            "line-color": element.hasClass("flow") ? "#d6aa3f" : "#3b3f4b",
+            "target-arrow-color": element.hasClass("flow") ? "#f0bd45" : "#585e6e",
+            label: state.showLabels ? style.displayLabel : "",
+            color: element.hasClass("flow") ? "#d6aa3f" : "#747987",
+            opacity: element.hasClass("dimmed") ? .07 : 1,
+          });
+        });
+      }
+
+      function styleTelemetry() {
+        return {
+          nodes: Object.fromEntries(model.nodes.map((node) => [node.id, {...nodeStyleState(node)}])),
+          edges: Object.fromEntries(model.edges.map((edge) => [edge.id, {...edgeStyleState(edge)}])),
+        };
+      }
+
       function fitGraph(target, automatic = false) {
         if (!cy) return;
         fitCalls += 1;
@@ -741,22 +1136,38 @@
         fitGraph(target, automatic);
       }
 
+      function refreshFilteredView() {
+        const filtered = applyFilters(model, state);
+        if (state.selectedNode && !filtered.nodes.some((node) => node.id === state.selectedNode)) {
+          state.selectedNode = "";
+          cy?.$(':selected').unselect();
+        }
+        renderFlowNav();
+        refreshGraph();
+        renderNodeInventory();
+        renderCurrentDetail();
+      }
+
       function refreshGraph() {
         if (!cy) return;
         const generation = ++layoutGeneration;
         activeLayout?.stop();
         const elements = graphElementsForState(model, state);
         const cytoscapeElements = [
-          ...elements.nodes.map((node) => ({group: "nodes", data: {...node}, position: {...node.position}})),
-          ...elements.edges.map((edge) => ({group: "edges", data: {...edge}})),
+          ...elements.nodes.map((node) => ({group: "nodes", data: {...node, label: displayLabel("nodes", node)}, position: {...node.position}})),
+          ...elements.edges.map((edge) => ({group: "edges", data: {...edge, label: displayLabel("edges", edge)}})),
         ];
         cy.elements().remove();
         cy.add(cytoscapeElements);
-        cy.nodes().forEach((node) => {
-          const category = byId(model.categories, node.data("category"));
-          node.style("border-color", safeCategoryColor(category));
-        });
+        const visibleNodeIds = new Set(elements.nodes.map((node) => node.id));
+        if (state.selectedNode && !visibleNodeIds.has(state.selectedNode)) {
+          state.selectedNode = "";
+          cy.$(":selected").unselect();
+        }
         applyFlowClasses();
+        if (state.selectedNode && cy.getElementById(state.selectedNode).nonempty()) cy.getElementById(state.selectedNode).select();
+        applyElementStyles();
+        renderNodeInventory();
         const largeFlow = model.isV2 && state.mode === "flow" && elements.nodes.length > 40;
         updateTelemetry(elements, largeFlow);
         layoutOptions = layoutForMode(model, state, elements.nodes.length);
@@ -773,6 +1184,7 @@
             rootMeanY = undefined;
             downstreamMeanY = undefined;
           }
+          applyElementStyles();
           updateTelemetry(elements, largeFlow);
           if (largeFlow) {
             cy.zoom(Math.max(cy.zoom(), 0.35));
@@ -796,9 +1208,11 @@
         }
         state.mode = mode;
         state.selectedNode = "";
+        state.comparisonNotice = "";
         fitCallsAfterSelection = 0;
         cy?.$(":selected").unselect();
         renderModeControls();
+        renderFilterControls();
         renderFlowNav();
         renderCurrentDetail();
         refreshGraph();
@@ -809,6 +1223,7 @@
         if (!model || (flowId !== "all" && !byId(model.flows, flowId))) return;
         state.flowId = flowId;
         state.selectedNode = "";
+        state.comparisonNotice = "";
         fitCallsAfterSelection = 0;
         cy?.$(":selected").unselect();
         renderFlowNav();
@@ -826,15 +1241,49 @@
         const node = byId(model.nodes, nodeId);
         if (!node) return;
         state.selectedNode = nodeId;
-        const element = cy.getElementById(nodeId);
-        if (!element.nonempty()) return;
-        cy.$(":selected").unselect();
-        element.select();
+        const element = cy?.getElementById(nodeId);
+        if (element?.nonempty()) {
+          cy.$(":selected").unselect();
+          element.select();
+        }
         renderNode(node);
+        renderNodeInventory();
         history.replaceState(null, "", `#mode=${encodeURIComponent(state.mode)}&flow=${encodeURIComponent(state.flowId)}&node=${encodeURIComponent(nodeId)}`);
         const behavior = reducedMotion ? "auto" : "smooth";
         lastScrollBehavior = behavior;
         $("#contentAnchor").scrollIntoView({behavior});
+      }
+
+      function chooseSnapshot(snapshotId) {
+        if (!model?.isV2) return;
+        const currentId = model.currentSnapshotId || "current";
+        const known = snapshotId === "current" || snapshotId === currentId || Boolean(byId(model.snapshots, snapshotId));
+        if (!known) {
+          state.snapshotId = "current";
+          state.comparisonNotice = `Snapshot ${snapshotId} is unavailable; showing Current.`;
+        } else {
+          state.snapshotId = snapshotId === currentId ? "current" : snapshotId;
+          state.comparisonNotice = "";
+        }
+        $("#snapshotSelect").value = state.snapshotId === "current" ? currentId : state.snapshotId;
+        refreshFilteredView();
+      }
+
+      function chooseComparison(comparisonId) {
+        if (!model?.isV2) return;
+        const known = comparisonId === "current" || Boolean(byId(model.comparisons, comparisonId));
+        if (!known) {
+          state.comparisonId = "current";
+          state.comparisonNotice = `Comparison ${comparisonId} is unavailable; showing Current.`;
+        } else {
+          state.comparisonId = comparisonId;
+          state.comparisonNotice = "";
+        }
+        state.selectedNode = "";
+        cy?.$(':selected').unselect();
+        $("#comparisonSelect").value = state.comparisonId;
+        renderFilterControls();
+        refreshFilteredView();
       }
 
       function initializeGraph() {
@@ -847,15 +1296,16 @@
           maxZoom: 2.5,
           boxSelectionEnabled: false,
           style: [
-            {selector: "node", style: {shape:"roundrectangle", width:120, height:34, padding:"10px", "background-color":"#171922", "border-width":1.5, label:"data(label)", color:"#e5e6eb", "font-size":11, "text-wrap":"wrap", "text-max-width":150, "text-valign":"center", "text-halign":"center"}},
+            {selector: "node", style: {shape:"roundrectangle", width:120, height:34, padding:"10px", "background-color":"#171922", "border-width":1, "border-style":"solid", label:"data(label)", color:"#e5e6eb", "font-size":11, "text-wrap":"wrap", "text-max-width":150, "text-valign":"center", "text-halign":"center"}},
             {selector: "edge", style: {"curve-style":"bezier", width:1, "line-color":"#3b3f4b", "target-arrow-color":"#585e6e", "target-arrow-shape":"triangle", "arrow-scale":.72, label:"data(label)", color:"#747987", "font-size":8, "text-background-color":"#090a0f", "text-background-opacity":.82, "text-background-padding":3, "text-rotation":"autorotate"}},
             {selector: ".dimmed", style: {opacity:.07}},
             {selector: "node.flow", style: {opacity:1, "background-color":"#1d1f27"}},
-            {selector: "edge.flow", style: {opacity:1, width:2, "line-color":"#d6aa3f", "target-arrow-color":"#f0bd45", color:"#d6aa3f"}},
+            {selector: "edge.flow", style: {opacity:1}},
             {selector: "node:selected", style: {"border-width":3, "border-color":"#f0bd45", "background-color":"#292313", color:"#fff1c5"}}
           ]
         });
         cy.on("tap", "node", (event) => chooseNode(event.target.id()));
+        cy.on("select unselect", "node", () => applyElementStyles());
         refreshGraph();
       }
 
@@ -871,15 +1321,34 @@
         const button = event.target.closest("[data-node-id]");
         if (button) chooseNode(button.dataset.nodeId);
       });
+      $("#filterControls").addEventListener("change", (event) => {
+        const control = event.target;
+        if (!model || !control) return;
+        if (control.id === "snapshotSelect") return chooseSnapshot(control.value);
+        if (control.id === "comparisonSelect") return chooseComparison(control.value);
+        if (control.id === "statusFilter") state.statusFilter = control.value;
+        if (control.id === "categoryFilter") state.categoryFilter = control.value;
+        if (control.id === "changeFilter") state.changeFilter = control.value;
+        if (control.id === "showLabelsToggle") {
+          state.showLabels = control.checked;
+          if (cy) {
+            applyElementStyles();
+            $("#cy").dataset.labels = state.showLabels ? "visible" : "hidden";
+          }
+          return;
+        }
+        if (control.id === "showDeprecatedToggle") state.showDeprecated = control.checked;
+        if (control.id === "showChangesOnlyToggle") state.showChangesOnly = control.checked;
+        refreshFilteredView();
+      });
+      $("#nodeInventory").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-node-id]");
+        if (button) chooseNode(button.dataset.nodeId);
+      });
       $("#fitButton").addEventListener("click", () => focusCurrent(false));
       $("#nodeSearch").addEventListener("input", (event) => {
-        if (!cy) return;
-        const query = event.target.value.trim().toLowerCase();
-        cy.nodes().forEach((node) => {
-          const data = node.data();
-          const haystack = JSON.stringify(data).toLowerCase();
-          node.style("opacity", !query || haystack.includes(query) ? 1 : .08);
-        });
+        state.searchQuery = event.target.value || "";
+        if (model) refreshFilteredView();
       });
 
       function testState() {
@@ -920,6 +1389,18 @@
           flowEdgeIds: [...flowIds.edgeIds],
           nonFlowEdgeIds: allEdgeIds.filter((id) => !flowIds.edgeIds.includes(id)),
           emphasizedEdgeIds,
+          selectedNode: state.selectedNode,
+          snapshotId: state.snapshotId,
+          comparisonId: state.comparisonId,
+          statusFilter: state.statusFilter,
+          categoryFilter: state.categoryFilter,
+          changeFilter: state.changeFilter,
+          showLabels: state.showLabels,
+          showDeprecated: state.showDeprecated,
+          showChangesOnly: state.showChangesOnly,
+          styles: styleTelemetry(),
+          categoryColors: Object.fromEntries(model.categories.map((category) => [category.id, safeCategoryColor(category)])),
+          fillColor: "#171922",
           layoutOptions: {...layoutOptions},
           largeFlow: $("#cy").dataset.largeFlow === "true",
           zoom: cy ? cy.zoom() : 0,
@@ -949,8 +1430,10 @@
           initializeState();
           renderLegend();
           renderModeControls();
+          renderFilterControls();
           renderFlowNav();
           renderCurrentDetail();
+          renderNodeInventory();
           initializeGraph();
           exposeTestHooks();
           $("#loading").classList.add("hidden");
