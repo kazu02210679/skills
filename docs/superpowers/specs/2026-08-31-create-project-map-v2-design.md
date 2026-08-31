@@ -154,7 +154,7 @@ Acceptance requires the current validator/evals to pass, all new v2 tests to pas
 
 - Replacing the seven-field v1 contract, stable IDs, directed edges, or Cytoscape with a new graph engine.
 - Reconstructing architecture from filenames, inventing relationships, or promoting plan-only evidence to implemented status.
-- Persisting user filters, coordinates, comments, or browser state back into the JSON artifact.
+- Browser navigation state may update the URL hash/history but is not persisted into the JSON/HTML artifacts or committed browser state; user filters, coordinates, and comments remain transient.
 - Supporting arbitrary user-authored CSS/HTML, remote data services, or a hosted map.
 - Adding a dependency/layout plugin, framework, backend, database, or build pipeline.
 - Automatically committing, publishing, deploying, migrating, or deleting an existing map; malformed existing JSON remains untouched.
