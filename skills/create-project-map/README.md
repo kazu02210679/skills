@@ -1,25 +1,19 @@
 # Create Project Map
 
-承認済み計画とリポジトリの証拠から、更新可能なarchitecture mapをHTMLとJSONで生成するSkillです。計画済み・実装済み・非推奨を区別し、後続Agentが再利用できる構造を残します。
+承認済みの計画とリポジトリの証拠を、更新可能な architecture map として
+`architecture-map.json` と `architecture-map.html` にまとめる Skill です。
+ファイル名だけから構成を推測せず、計画済み・実装済み・非推奨を区別します。
 
-## 使う場面
+## v2 の追加要素
 
-- project map、architecture map、dependency mapが必要
-- 実装計画と現行コードの対応を可視化したい
-- 一度きりの図ではなく、更新可能な設計資産を持ちたい
-
-## 入力と出力
-
-- 入力: 承認済みplan、repository root、コード・テスト・buildの証拠
-- 出力: `architecture-map.json` と `architecture-map.html`
-
-## 制約
-
-ファイル名だけからarchitectureを推測しません。既存JSONが壊れている場合は原本を保ったまま停止します。
+v2 は既存の7フィールドに対する加法的な拡張です。`flow`、`dependency`、
+`combined` の表示モード、スナップショットと比較、ライフサイクル／変更
+フィルター、キーボード操作に対応したノード inventory を追加します。v1 の
+JSON と初期表示は互換性を保ち、壊れた既存 JSON は保存したまま停止します。
 
 ## 実装資材
 
-- `references/project-map-schema.md`: データ契約
-- `scripts/validate_project_map.py`: JSON検証
-- `scripts/build_project_map.py`: HTML生成
-- `assets/project-map-template.html`: 表示template
+- `scripts/build_project_map.py`: 相対 JSON リンク付き HTML を生成
+- `scripts/validate_project_map.py`: v1/v2 JSON と HTML の検証
+- `assets/project-map-template.html`: Cytoscape 表示と操作の template
+- 詳細な契約は `references/project-map-schema.md` にあります。

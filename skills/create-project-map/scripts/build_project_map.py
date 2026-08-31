@@ -9,15 +9,21 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import sys
 from typing import Any
+from urllib.parse import quote
 
 
 TOKENS = {
     "title": "{{PROJECT_TITLE}}",
     "summary": "{{PROJECT_SUMMARY}}",
     "data": "{{DATA_FILENAME}}",
+    "data_text": "{{DATA_FILENAME_TEXT}}",
+    "data_url": "{{DATA_FILENAME_URL}}",
+    "data_js": "{{DATA_FILENAME_JS}}",
 }
+TOKEN_PATTERN = re.compile("|".join(re.escape(token) for token in TOKENS.values()))
 
 
 def render_html(
@@ -27,15 +33,38 @@ def render_html(
 ) -> str:
     """Render escaped project metadata and a relative JSON path into the template."""
     project = document.get("project", {})
+    data_text = html.escape(data_filename)
+    data_url = html.escape(quote(data_filename, safe="/"), quote=True)
+    data_js = _javascript_string_literal(quote(data_filename, safe="/"))
     replacements = {
         TOKENS["title"]: html.escape(str(project.get("title", "Project Map"))),
         TOKENS["summary"]: html.escape(str(project.get("summary", ""))),
-        TOKENS["data"]: html.escape(data_filename, quote=True),
+        TOKENS["data"]: data_text,
+        TOKENS["data_text"]: data_text,
+        TOKENS["data_url"]: data_url,
+        TOKENS["data_js"]: data_js,
     }
-    rendered = template
-    for token, value in replacements.items():
-        rendered = rendered.replace(token, value)
-    return rendered
+    return TOKEN_PATTERN.sub(lambda match: replacements[match.group(0)], template)
+
+
+def _javascript_string_literal(value: str) -> str:
+    literal = json.dumps(value, ensure_ascii=False)
+    for character, replacement in (
+        ("<", r"\u003C"),
+        (">", r"\u003E"),
+        ("&", r"\u0026"),
+        ("\u2028", r"\u2028"),
+        ("\u2029", r"\u2029"),
+    ):
+        literal = literal.replace(character, replacement)
+    return literal
+
+
+def relative_data_filename(data_path: pathlib.Path, output_path: pathlib.Path) -> str:
+    relative = pathlib.Path(
+        os.path.relpath(data_path.resolve(), output_path.parent.resolve())
+    )
+    return relative.as_posix()
 
 
 def _load_validator(script_path: pathlib.Path):
@@ -65,9 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             for error in errors:
                 print(f"- {error}", file=sys.stderr)
             return 1
-        data_filename = pathlib.PurePosixPath(
-            pathlib.Path(os.path.relpath(args.data.resolve(), args.output.parent.resolve()))
-        ).as_posix()
+        data_filename = relative_data_filename(args.data, args.output)
         rendered = render_html(document, template, data_filename)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
