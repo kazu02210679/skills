@@ -371,6 +371,17 @@
           assertShape(snapshot.parentId === null || (typeof snapshot.parentId === "string" && snapshotIds.has(snapshot.parentId)),
             `${path}.parentId`, "must be null or a known snapshot id");
         });
+        const visitState = new Map();
+        const visit = (snapshotId) => {
+          const current = visitState.get(snapshotId) || 0;
+          assertShape(current !== 1, "snapshots", `parent cycle detected at '${snapshotId}'`);
+          if (current === 2) return;
+          visitState.set(snapshotId, 1);
+          const parentId = data.snapshots.find((snapshot) => snapshot.id === snapshotId)?.parentId;
+          if (typeof parentId === "string" && snapshotIds.has(parentId)) visit(parentId);
+          visitState.set(snapshotId, 2);
+        };
+        snapshotIds.forEach(visit);
         return snapshotIds;
       }
 
@@ -395,6 +406,18 @@
             assertShape(hasOwn(item, "replacesId"), `${itemPath}.replacesId`, "is required when changeType is 'replaced'");
           }
           if (hasOwn(item, "replacesId")) assertShape(allIds.has(item.replacesId), `${itemPath}.replacesId`, "must reference a known id");
+          if (path === "nodes" && item.changeType === "removed") {
+            assertShape(item.status === "deprecated", `${itemPath}.status`, "must be 'deprecated' for a removed node");
+          }
+        });
+        items.forEach((item, index) => {
+          if (item.changeType !== "replaced" || !hasOwn(item, "replacesId")) return;
+          const target = byId(items, item.replacesId);
+          const itemPath = `${path}[${index}]`;
+          assertShape(target?.changeType === "removed", `${itemPath}.replacesId`, `target '${item.replacesId}' must have changeType 'removed'`);
+          if (path === "nodes") {
+            assertShape(target?.status === "deprecated", `${itemPath}.replacesId`, `target '${item.replacesId}' must be deprecated`);
+          }
         });
       }
 
@@ -420,13 +443,28 @@
             ["flows", "Flow"],
           ].forEach(([collection, suffix]) => {
             const seen = new Set();
+            const values = {};
             states.forEach((changeState) => {
               const field = `${changeState}${suffix}Ids`;
               requireReferences(comparison[field], `${path}.${field}`, collectionIds[collection]);
+              values[changeState] = comparison[field];
               comparison[field].forEach((id, idIndex) => {
                 assertShape(!seen.has(id), `${path}.${field}[${idIndex}]`, `id '${id}' appears in more than one comparison state`);
                 seen.add(id);
               });
+            });
+            const records = data[collection];
+            values.replaced.forEach((itemId, itemIndex) => {
+              const replacement = byId(records, itemId);
+              assertShape(replacement?.changeType === "replaced", `${path}.replaced${suffix}Ids[${itemIndex}]`, `id '${itemId}' is in the wrong replacement state`);
+              const oldId = replacement?.replacesId;
+              if (typeof oldId === "string" && collectionIds[collection].has(oldId)) {
+                assertShape(values.removed.includes(oldId), path, `replacement '${itemId}' requires '${oldId}' in removed${suffix}Ids`);
+              }
+            });
+            values.removed.forEach((itemId, itemIndex) => {
+              const removed = byId(records, itemId);
+              assertShape(removed?.changeType === "removed", `${path}.removed${suffix}Ids[${itemIndex}]`, `id '${itemId}' is in the wrong replacement state`);
             });
           });
         });
@@ -645,9 +683,27 @@
         };
       }
 
+      function browserSupportsColor(color) {
+        if (typeof CSS !== "undefined" && typeof CSS.supports === "function") return CSS.supports("color", color);
+        const probe = document.createElement("span");
+        probe.style.color = "";
+        probe.style.color = color;
+        return probe.style.color !== "";
+      }
+
+      function safeLegacyColor(value) {
+        const color = typeof value === "string" ? value.trim() : "";
+        if (!color || color.length > 64 || /[\u0000-\u001f\u007f"'\\;{}<>]/.test(color)) return "#626878";
+        const named = /^[a-z]+$/i.test(color);
+        const hex = /^#[0-9a-f]{3,8}$/i.test(color);
+        const functional = /^(?:rgb|rgba|hsl|hsla)\([0-9.,%+\- /]+\)$/i.test(color);
+        return (named || hex || functional) && browserSupportsColor(color) ? color : "#626878";
+      }
+
       function safeCategoryColor(category) {
         const color = typeof category?.color === "string" ? category.color : "";
-        return /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(color) ? color : "#626878";
+        if (model?.isV2) return /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(color) ? color : "#626878";
+        return safeLegacyColor(color);
       }
 
       function activeComparisonChange(collection, id) {
@@ -684,15 +740,15 @@
       }
 
       function snapshotCoverageSuffix(collection, item) {
-        return collection !== "nodes" && snapshotCoverageUnknown(item) ? " [snapshot coverage unknown]" : "";
+        return snapshotCoverageUnknown(item) ? " [snapshot coverage unknown]" : "";
       }
 
-      function displayLabel(collection, item) {
+      function displayLabel(collection, item, includeCoverage = true) {
         const change = displayChange(collection, item);
         const label = change
           ? `${(CHANGE_STYLES[change] || CHANGE_STYLES.existing).glyph} ${item.label} [${change}]`
           : item.label;
-        return `${label}${snapshotCoverageSuffix(collection, item)}`;
+        return `${label}${includeCoverage ? snapshotCoverageSuffix(collection, item) : ""}`;
       }
 
       function nodeStyleState(node) {
@@ -716,7 +772,7 @@
           changeBadge: annotated,
           glyph: annotated ? changeStyle.glyph : "",
           displayLabel: displayLabel("nodes", node),
-          ariaLabel: `${node.label}, status ${node.status || "implemented"}, kind ${node.kind || "service"}${annotated ? `, change ${change}` : ""}`,
+          ariaLabel: `${node.label}, status ${node.status || "implemented"}, kind ${node.kind || "service"}${annotated ? `, change ${change}` : ""}${snapshotCoverageUnknown(node) ? ", snapshot coverage unknown" : ""}`,
           categoryColor: safeCategoryColor(category),
           borderColor: state.selectedNode === node.id ? "#f0bd45" : safeCategoryColor(category),
           selected: state.selectedNode === node.id,
@@ -866,9 +922,9 @@
         const entries = nodes.map((node) => {
           const change = displayChange("nodes", node);
           const kind = node.kind || "service";
-          const coverage = model.isV2 && state.snapshotId !== "current" && !hasOwn(node, "snapshotIds")
+          const coverage = snapshotCoverageUnknown(node)
             ? " · snapshot coverage unknown" : "";
-          const label = displayLabel("nodes", node);
+          const label = displayLabel("nodes", node, false);
           const changeText = change || "unannotated";
           const accessible = `${node.label}, status ${node.status || "implemented"}, kind ${kind}, change ${changeText}${coverage}`;
           return `<button class="inventory-item" type="button" data-node-id="${escapeHtml(node.id)}" data-change-type="${escapeHtml(change || "existing")}" aria-current="${state.selectedNode === node.id}" aria-label="${escapeHtml(accessible)}"><strong>${escapeHtml(label)}</strong><span>Status: ${escapeHtml(node.status || "implemented")} · Kind: ${escapeHtml(kind)} · Change: ${escapeHtml(changeText)}${coverage ? `<span class="coverage-unknown">${escapeHtml(coverage)}</span>` : ""}</span></button>`;
@@ -964,9 +1020,10 @@
             return `<button class="relation" type="button" data-node-id="${escapeHtml(otherId)}" aria-label="Inspect ${escapeHtml(other?.label || otherId)} via ${escapeHtml(edgeLabel)}"><span>${escapeHtml(other?.label || otherId)}</span><small>${escapeHtml(edgeLabel)}</small></button>`;
           }).join("");
         const change = displayChange("nodes", node);
+        const coverage = snapshotCoverageUnknown(node);
         setDetail("Node inspector", displayLabel("nodes", node),
           [category?.label || node.category, `status: ${node.status}`, `kind: ${node.kind || "service"}`, node.phase, ...(change ? [`change: ${change}`] : [])],
-          detailNotice() + `<p class="description">${escapeHtml(node.description)}</p>` +
+          detailNotice() + (coverage ? `<p class="coverage-unknown">snapshot coverage unknown</p>` : "") + `<p class="description">${escapeHtml(node.description)}</p>` +
           list("Responsibilities", node.responsibilities) + list("Inputs", node.inputs) +
           list("Outputs", node.outputs) + list("Source paths", node.sourcePaths) +
           list("Evidence", node.evidence) + list("Coverage gap", node.coverageGap ? [node.coverageGap] : []) +
