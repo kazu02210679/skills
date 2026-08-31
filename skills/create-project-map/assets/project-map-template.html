@@ -342,6 +342,15 @@
         value.forEach((entry, index) => assertShape(allowed.has(entry), `${path}[${index}]`, `references unknown id '${entry}'`));
       }
 
+      function requireUniqueReferences(value, path, allowed) {
+        requireReferences(value, path, allowed);
+        const seen = new Set();
+        value.forEach((entry) => {
+          assertShape(!seen.has(entry), path, "contains duplicate snapshot '" + entry + "'");
+          seen.add(entry);
+        });
+      }
+
       function requireObjectArray(value, path) {
         assertShape(Array.isArray(value), path, "must be an array");
         value.forEach((entry, index) => assertShape(isObject(entry), `${path}[${index}]`, "must be an object"));
@@ -396,7 +405,7 @@
             requireString(item.changeType, `${itemPath}.changeType`, true);
             assertShape(V2_CHANGE_TYPES.has(item.changeType), `${itemPath}.changeType`, "must be a recognized change type");
           }
-          if (hasOwn(item, "snapshotIds")) requireReferences(item.snapshotIds, `${itemPath}.snapshotIds`, snapshotIds);
+          if (hasOwn(item, "snapshotIds")) requireUniqueReferences(item.snapshotIds, `${itemPath}.snapshotIds`, snapshotIds);
           if (hasOwn(item, "replacesId")) {
             requireString(item.replacesId, `${itemPath}.replacesId`, true);
             assertShape(allowedIds.has(item.replacesId), `${itemPath}.replacesId`, "must reference the same collection");
@@ -470,6 +479,12 @@
         });
       }
 
+      function validateEvidence(item, path) {
+        const hasEvidence = Array.isArray(item.evidence) && item.evidence.length > 0;
+        const hasCoverageGap = typeof item.coverageGap === "string" && item.coverageGap.trim().length > 0;
+        assertShape(hasEvidence || hasCoverageGap, path, "needs evidence or an explicit coverageGap");
+      }
+
       function validateModelShape(data) {
         assertShape(isObject(data), "document", "must be an object");
         const hasSchemaVersion = hasOwn(data, "schemaVersion");
@@ -517,8 +532,10 @@
           requireString(node.status, `${path}.status`, true);
           assertShape(new Set(["planned", "implemented", "deprecated"]).has(node.status), `${path}.status`, "must be a recognized status");
           requireString(node.description, `${path}.description`);
-          ["responsibilities", "inputs", "outputs", "sourcePaths", "evidence"].forEach((key) => requireStringArray(node[key], `${path}.${key}`));
-          requireString(node.coverageGap, `${path}.coverageGap`);
+          ["responsibilities", "inputs", "outputs", "sourcePaths"].forEach((key) => requireStringArray(node[key], `${path}.${key}`));
+          if (hasOwn(node, "evidence")) requireStringArray(node.evidence, `${path}.evidence`);
+          if (hasOwn(node, "coverageGap")) requireString(node.coverageGap, `${path}.coverageGap`);
+          validateEvidence(node, path);
           assertShape(isObject(node.position), `${path}.position`, "must be an object");
           ["x", "y"].forEach((axis) => assertShape(typeof node.position[axis] === "number" && Number.isFinite(node.position[axis]), `${path}.position.${axis}`, "must be finite"));
         });
@@ -545,8 +562,10 @@
           requireReferences(flow.nodeIds, `${path}.nodeIds`, nodeIds);
           requireReferences(flow.edgeIds, `${path}.edgeIds`, edgeIds);
           requireObjectArray(flow.stages, `${path}.stages`);
-          ["outputs", "safety", "evidence"].forEach((key) => requireStringArray(flow[key], `${path}.${key}`));
-          requireString(flow.coverageGap, `${path}.coverageGap`);
+          ["outputs", "safety"].forEach((key) => requireStringArray(flow[key], `${path}.${key}`));
+          if (hasOwn(flow, "evidence")) requireStringArray(flow.evidence, `${path}.evidence`);
+          if (hasOwn(flow, "coverageGap")) requireString(flow.coverageGap, `${path}.coverageGap`);
+          validateEvidence(flow, path);
           flow.stages.forEach((stage, stageIndex) => {
             const stagePath = `${path}.stages[${stageIndex}]`;
             requireString(stage.id, `${stagePath}.id`, true);
@@ -616,9 +635,13 @@
         validateModelShape(data);
         const isV2 = data.schemaVersion === 2;
         const view = isV2 ? (data.view || {}) : {};
-        const availableModes = isV2
+        const declaredModes = isV2
           ? (view.availableModes || ["flow", "dependency"])
           : ["dependency"];
+        const needsDependencyMode = isV2 && (!hasOwn(view, "defaultMode") || view.defaultMode === "dependency" || data.flows.length === 0);
+        const availableModes = isV2 && needsDependencyMode && !declaredModes.includes("dependency")
+          ? [...declaredModes, "dependency"]
+          : [...declaredModes];
         const normalized = {
           ...data,
           isV2,
@@ -644,7 +667,7 @@
         if (isV2 && !normalized.view.availableModes.includes(normalized.view.defaultMode)) {
           normalized.view.defaultMode = normalized.view.availableModes[0] || "dependency";
         }
-        if (isV2 && normalized.view.defaultMode === "flow" && normalized.flows.length === 0) {
+        if (isV2 && normalized.flows.length === 0) {
           normalized.view.defaultMode = "dependency";
         }
         return normalized;
@@ -655,7 +678,7 @@
         const availableModes = model.view.availableModes;
         let mode = model.isV2 ? model.view.defaultMode : "dependency";
         if (model.isV2 && !availableModes.includes(mode)) mode = availableModes[0] || "dependency";
-        if (model.isV2 && mode === "flow" && model.flows.length === 0) mode = "dependency";
+        if (model.isV2 && model.flows.length === 0) mode = "dependency";
         const requestedMode = params.get("mode");
         if (model.isV2 && requestedMode && availableModes.includes(requestedMode) && !(requestedMode === "flow" && model.flows.length === 0)) {
           mode = requestedMode;
@@ -693,6 +716,8 @@
 
       function safeLegacyColor(value) {
         const color = typeof value === "string" ? value.trim() : "";
+        const nonConcrete = new Set(["inherit", "initial", "unset", "revert", "revert-layer", "currentcolor"]);
+        if (nonConcrete.has(color.toLowerCase())) return "#626878";
         if (!color || color.length > 64 || /[\u0000-\u001f\u007f"'\\;{}<>]/.test(color)) return "#626878";
         const named = /^[a-z]+$/i.test(color);
         const hex = /^#[0-9a-f]{3,8}$/i.test(color);
