@@ -236,6 +236,38 @@ class ProjectMapValidationTests(unittest.TestCase):
                 mutate(document)
                 self.assert_error(document, fragment)
 
+    def test_v2_object_array_diagnostics_preserve_original_indices(self):
+        cases = (
+            (
+                "source",
+                lambda d: (
+                    d["sources"].insert(0, []),
+                    d["sources"].append({"path": 1, "kind": "plan"}),
+                ),
+                "sources[2].path",
+                "sources[1].path",
+            ),
+            (
+                "flow stage",
+                lambda d: (
+                    d["flows"][0]["stages"].insert(0, []),
+                    d["flows"][0]["stages"][2].update(backstage=1),
+                ),
+                "flows[0].stages[2].backstage",
+                "flows[0].stages[1].backstage",
+            ),
+        )
+        for name, mutate, expected, compressed in cases:
+            with self.subTest(name=name):
+                document = self.v2()
+                mutate(document)
+                errors = MODULE.validate_document(document)
+                self.assertTrue(
+                    any(expected in error for error in errors),
+                    f"Expected {expected!r} in {errors!r}",
+                )
+                self.assertFalse(any(compressed in error for error in errors))
+
     def test_rejects_future_schema_without_legacy_downgrade(self):
         document = self.v2()
         document["schemaVersion"] = 3

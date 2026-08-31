@@ -549,16 +549,16 @@ def _require_v2_string_array(
 
 def _require_v2_object_array(
     value: Any, location: str, errors: list[str]
-) -> list[dict[str, Any]]:
+) -> list[tuple[int, dict[str, Any]]]:
     if not isinstance(value, list):
         errors.append(f"{location} must be an array")
         return []
-    objects: list[dict[str, Any]] = []
+    objects: list[tuple[int, dict[str, Any]]] = []
     for index, entry in enumerate(value):
         if not isinstance(entry, dict):
             errors.append(f"{location}[{index}] must be an object")
         else:
-            objects.append(entry)
+            objects.append((index, entry))
     return objects
 
 
@@ -584,7 +584,7 @@ def _validate_v2_base_fields(
     errors: list[str],
 ) -> None:
     sources = _require_v2_object_array(document.get("sources"), "sources", errors)
-    for index, source in enumerate(sources):
+    for index, source in sources:
         location = f"sources[{index}]"
         _require_v2_string(source.get("path"), f"{location}.path", errors, True)
         _require_v2_string(source.get("kind"), f"{location}.kind", errors, True)
@@ -688,7 +688,7 @@ def _validate_v2_base_fields(
             parent_node_ids = set(
                 node_id for node_id in _list(flow.get("nodeIds")) if isinstance(node_id, str)
             )
-            for stage_index, stage in enumerate(stages):
+            for stage_index, stage in stages:
                 stage_location = f"{location}.stages[{stage_index}]"
                 _require_v2_string(stage.get("id"), f"{stage_location}.id", errors, True)
                 _require_v2_string(
