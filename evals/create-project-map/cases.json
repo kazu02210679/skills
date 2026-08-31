@@ -44,5 +44,51 @@
       "validator_exit": 1,
       "overwrite_existing_map": false
     }
+  },
+  {
+    "id": "v2-snapshot-comparison",
+    "prompt": "Render the v15 to v15-4 to v16 project map and inspect its comparison states.",
+    "fixture": "fixtures/v2-map.json",
+    "expect": {
+      "schema_version": 2,
+      "current_snapshot": "v16",
+      "comparison_ids": ["v15-to-v15-4", "v15-4-to-v16"],
+      "change_states": ["existing", "inherited", "changed", "added", "replaced", "removed"]
+    }
+  },
+  {
+    "id": "v2-mode-and-edge-authority",
+    "prompt": "Verify flow, dependency, and combined views without inferring relationships.",
+    "fixture": "fixtures/v2-map.json",
+    "expect": {
+      "default_mode": "flow",
+      "default_flow": "request-flow",
+      "flow_edge_ids_are_authoritative": true,
+      "dependency_contains_all_edges": true,
+      "combined_is_explicit": true
+    }
+  },
+  {
+    "id": "legacy-v1-compatibility",
+    "prompt": "Open a v1 map with a legacy unsafe category color and preserve its initial experience.",
+    "fixture": "fixtures/legacy-unsafe-color-map.json",
+    "expect": {
+      "mode_controls_hidden": true,
+      "initial_detail": "All relationships",
+      "unsafe_color_fallback": "#626878/#171922",
+      "input_not_rewritten": true
+    }
+  },
+  {
+    "id": "large-flow-bounded-layout",
+    "prompt": "Open a 100-node flow and inspect its top-to-bottom layers without automatic shrinking.",
+    "fixture": "in-memory large_flow_document()",
+    "expect": {
+      "node_count": 100,
+      "large_flow_hint": "Large flow — pan or zoom to explore",
+      "minimum_initial_zoom": 0.35,
+      "breadthfirst_direction_option": "absent",
+      "implicit_fit_on_flow_selection": false
+    }
   }
 ]

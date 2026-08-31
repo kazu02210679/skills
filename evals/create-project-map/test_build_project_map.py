@@ -16,6 +16,20 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ProjectMapBuildTests(unittest.TestCase):
+    def test_cases_include_v2_browser_and_large_flow_cases(self):
+        cases = json.loads(
+            (ROOT / "evals" / "create-project-map" / "cases.json").read_text(encoding="utf-8")
+        )
+        by_id = {case["id"]: case for case in cases}
+        expected = {
+            "v2-snapshot-comparison",
+            "v2-mode-and-edge-authority",
+            "legacy-v1-compatibility",
+            "large-flow-bounded-layout",
+        }
+        self.assertTrue(expected <= set(by_id))
+        self.assertEqual(100, by_id["large-flow-bounded-layout"]["expect"]["node_count"])
+
     def test_render_replaces_tokens_and_escapes_text(self):
         document = {"project": {"title": "<Map>", "summary": "A & B"}}
         rendered = MODULE.render_html(
