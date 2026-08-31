@@ -526,6 +526,194 @@ def _validate_v2_colors(document: dict[str, Any], errors: list[str]) -> None:
             )
 
 
+def _require_v2_string(
+    value: Any, location: str, errors: list[str], non_empty: bool = False
+) -> bool:
+    if not isinstance(value, str) or (non_empty and not value.strip()):
+        requirement = "a non-empty string" if non_empty else "a string"
+        errors.append(f"{location} must be {requirement}")
+        return False
+    return True
+
+
+def _require_v2_string_array(
+    value: Any, location: str, errors: list[str]
+) -> bool:
+    if not isinstance(value, list):
+        errors.append(f"{location} must be an array")
+        return False
+    for index, entry in enumerate(value):
+        _require_v2_string(entry, f"{location}[{index}]", errors, non_empty=True)
+    return True
+
+
+def _require_v2_object_array(
+    value: Any, location: str, errors: list[str]
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        errors.append(f"{location} must be an array")
+        return []
+    objects: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            errors.append(f"{location}[{index}] must be an object")
+        else:
+            objects.append(entry)
+    return objects
+
+
+def _require_v2_references(
+    value: Any, location: str, allowed: set[str], errors: list[str]
+) -> bool:
+    if not _require_v2_string_array(value, location, errors):
+        return False
+    for index, entry in enumerate(value):
+        if isinstance(entry, str) and entry.strip() and entry not in allowed:
+            errors.append(
+                f"{location}[{index}] references unknown id '{entry}'"
+            )
+    return True
+
+
+def _validate_v2_base_fields(
+    document: dict[str, Any],
+    category_ids: set[str],
+    phase_ids: set[str],
+    node_ids: set[str],
+    edge_ids: set[str],
+    errors: list[str],
+) -> None:
+    sources = _require_v2_object_array(document.get("sources"), "sources", errors)
+    for index, source in enumerate(sources):
+        location = f"sources[{index}]"
+        _require_v2_string(source.get("path"), f"{location}.path", errors, True)
+        _require_v2_string(source.get("kind"), f"{location}.kind", errors, True)
+
+    categories = document.get("categories")
+    if isinstance(categories, list):
+        for index, category in enumerate(categories):
+            if not isinstance(category, dict):
+                continue
+            location = f"categories[{index}]"
+            _require_v2_string(category.get("label"), f"{location}.label", errors, True)
+            _require_v2_string(category.get("color"), f"{location}.color", errors, True)
+
+    phases = document.get("phases")
+    if isinstance(phases, list):
+        for index, phase in enumerate(phases):
+            if not isinstance(phase, dict):
+                continue
+            location = f"phases[{index}]"
+            _require_v2_string(phase.get("label"), f"{location}.label", errors, True)
+            _require_v2_string(phase.get("description"), f"{location}.description", errors)
+
+    nodes = document.get("nodes")
+    if isinstance(nodes, list):
+        for index, node in enumerate(nodes):
+            if not isinstance(node, dict):
+                continue
+            location = f"nodes[{index}]"
+            _require_v2_string(node.get("label"), f"{location}.label", errors, True)
+            category_valid = _require_v2_string(
+                node.get("category"), f"{location}.category", errors, True
+            )
+            phase_valid = _require_v2_string(
+                node.get("phase"), f"{location}.phase", errors, True
+            )
+            if category_valid and node.get("category") not in category_ids:
+                errors.append(
+                    f"{location}.category references unknown id '{node.get('category')}'"
+                )
+            if phase_valid and node.get("phase") not in phase_ids:
+                errors.append(
+                    f"{location}.phase references unknown id '{node.get('phase')}'"
+                )
+            _require_v2_string(node.get("status"), f"{location}.status", errors, True)
+            _require_v2_string(node.get("description"), f"{location}.description", errors)
+            for key in ("responsibilities", "inputs", "outputs", "sourcePaths"):
+                _require_v2_string_array(node.get(key), f"{location}.{key}", errors)
+            if "evidence" in node:
+                _require_v2_string_array(node["evidence"], f"{location}.evidence", errors)
+            if "coverageGap" in node:
+                _require_v2_string(node["coverageGap"], f"{location}.coverageGap", errors)
+
+    edges = document.get("edges")
+    if isinstance(edges, list):
+        for index, edge in enumerate(edges):
+            if not isinstance(edge, dict):
+                continue
+            location = f"edges[{index}]"
+            source_valid = _require_v2_string(
+                edge.get("source"), f"{location}.source", errors, True
+            )
+            target_valid = _require_v2_string(
+                edge.get("target"), f"{location}.target", errors, True
+            )
+            if source_valid and edge.get("source") not in node_ids:
+                errors.append(
+                    f"{location}.source references unknown node '{edge.get('source')}'"
+                )
+            if target_valid and edge.get("target") not in node_ids:
+                errors.append(
+                    f"{location}.target references unknown node '{edge.get('target')}'"
+                )
+            _require_v2_string(edge.get("label"), f"{location}.label", errors, True)
+            _require_v2_string(edge.get("contract"), f"{location}.contract", errors, True)
+
+    flows = document.get("flows")
+    if isinstance(flows, list):
+        for index, flow in enumerate(flows):
+            if not isinstance(flow, dict):
+                continue
+            location = f"flows[{index}]"
+            _require_v2_string(flow.get("label"), f"{location}.label", errors, True)
+            _require_v2_string(flow.get("description"), f"{location}.description", errors)
+            _require_v2_string(flow.get("actor"), f"{location}.actor", errors, True)
+            _require_v2_string(flow.get("trigger"), f"{location}.trigger", errors, True)
+            _require_v2_string(flow.get("outcome"), f"{location}.outcome", errors, True)
+            node_refs_valid = _require_v2_references(
+                flow.get("nodeIds"), f"{location}.nodeIds", node_ids, errors
+            )
+            _require_v2_references(
+                flow.get("edgeIds"), f"{location}.edgeIds", edge_ids, errors
+            )
+            stages = _require_v2_object_array(flow.get("stages"), f"{location}.stages", errors)
+            for key in ("outputs", "safety"):
+                _require_v2_string_array(flow.get(key), f"{location}.{key}", errors)
+            if "evidence" in flow:
+                _require_v2_string_array(flow["evidence"], f"{location}.evidence", errors)
+            if "coverageGap" in flow:
+                _require_v2_string(flow["coverageGap"], f"{location}.coverageGap", errors)
+
+            parent_node_ids = set(
+                node_id for node_id in _list(flow.get("nodeIds")) if isinstance(node_id, str)
+            )
+            for stage_index, stage in enumerate(stages):
+                stage_location = f"{location}.stages[{stage_index}]"
+                _require_v2_string(stage.get("id"), f"{stage_location}.id", errors, True)
+                _require_v2_string(
+                    stage.get("label"), f"{stage_location}.label", errors, True
+                )
+                _require_v2_string(
+                    stage.get("description"), f"{stage_location}.description", errors
+                )
+                stage_nodes_valid = _require_v2_references(
+                    stage.get("nodeIds"), f"{stage_location}.nodeIds", node_ids, errors
+                )
+                if node_refs_valid and stage_nodes_valid:
+                    for node_index, node_id in enumerate(stage["nodeIds"]):
+                        if isinstance(node_id, str) and node_id not in parent_node_ids:
+                            errors.append(
+                                f"{stage_location}.nodeIds[{node_index}] must occur in the parent flow.nodeIds"
+                            )
+                _require_v2_string(
+                    stage.get("backstage"), f"{stage_location}.backstage", errors
+                )
+                _require_v2_string_array(
+                    stage.get("produces"), f"{stage_location}.produces", errors
+                )
+
+
 def validate_document(document: dict[str, Any]) -> list[str]:
     """Return human-readable validation errors for a project-map document."""
     errors: list[str] = []
@@ -556,7 +744,8 @@ def validate_document(document: dict[str, Any]) -> list[str]:
         location = f"nodes[{index}]"
         _require_reference(node.get("category"), category_ids, f"{location}.category", errors)
         _require_reference(node.get("phase"), phase_ids, f"{location}.phase", errors)
-        if node.get("status") not in ALLOWED_STATUSES:
+        status = node.get("status")
+        if not isinstance(status, str) or status not in ALLOWED_STATUSES:
             errors.append(
                 f"{location}.status must be one of {sorted(ALLOWED_STATUSES)}"
             )
@@ -606,6 +795,14 @@ def validate_document(document: dict[str, Any]) -> list[str]:
 
     schema_version = document_schema_version(document, errors)
     if schema_version == 2:
+        _validate_v2_base_fields(
+            document,
+            category_ids,
+            phase_ids,
+            node_ids,
+            edge_ids,
+            errors,
+        )
         snapshot_ids = _validate_v2_snapshots(document, errors)
         if "currentSnapshotId" in document:
             current_snapshot_id = document["currentSnapshotId"]

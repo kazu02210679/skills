@@ -60,6 +60,182 @@ class ProjectMapValidationTests(unittest.TestCase):
             self.assertEqual(6, len(keys))
             self.assertTrue(all(isinstance(comparison[key], list) for key in keys))
 
+    def test_v2_base_shape_parity_rejects_browser_invalid_fields(self):
+        cases = (
+            ("project title", lambda d: d["project"].update(title=1), "project.title"),
+            ("sources array", lambda d: d.update(sources=None), "sources"),
+            (
+                "source object",
+                lambda d: d["sources"].__setitem__(0, []),
+                "sources[0]",
+            ),
+            (
+                "source path",
+                lambda d: d["sources"][0].update(path=1),
+                "sources[0].path",
+            ),
+            (
+                "source kind",
+                lambda d: d["sources"][0].update(kind=""),
+                "sources[0].kind",
+            ),
+            ("categories array", lambda d: d.update(categories=None), "categories"),
+            (
+                "category label",
+                lambda d: d["categories"][0].update(label=1),
+                "categories[0].label",
+            ),
+            (
+                "category color type",
+                lambda d: d["categories"][0].update(color=1),
+                "categories[0].color",
+            ),
+            ("phases array", lambda d: d.update(phases=None), "phases"),
+            (
+                "phase label",
+                lambda d: d["phases"][0].update(label=""),
+                "phases[0].label",
+            ),
+            (
+                "phase description",
+                lambda d: d["phases"][0].update(description=1),
+                "phases[0].description",
+            ),
+            ("nodes array", lambda d: d.update(nodes=None), "nodes"),
+            (
+                "node label",
+                lambda d: d["nodes"][0].update(label=1),
+                "nodes[0].label",
+            ),
+            (
+                "node description",
+                lambda d: d["nodes"][0].update(description=1),
+                "nodes[0].description",
+            ),
+            (
+                "node status type",
+                lambda d: d["nodes"][0].update(status=[]),
+                "nodes[0].status",
+            ),
+            (
+                "node responsibilities",
+                lambda d: d["nodes"][0].update(responsibilities=[1]),
+                "nodes[0].responsibilities",
+            ),
+            (
+                "node source paths",
+                lambda d: d["nodes"][0].update(sourcePaths="src/api.py"),
+                "nodes[0].sourcePaths",
+            ),
+            (
+                "node evidence entry",
+                lambda d: d["nodes"][0].update(evidence=[1]),
+                "nodes[0].evidence",
+            ),
+            (
+                "node coverage gap",
+                lambda d: d["nodes"][0].update(coverageGap=1),
+                "nodes[0].coverageGap",
+            ),
+            ("edges array", lambda d: d.update(edges=None), "edges"),
+            (
+                "edge source type",
+                lambda d: d["edges"][0].update(source=1),
+                "edges[0].source",
+            ),
+            (
+                "edge label",
+                lambda d: d["edges"][0].update(label=1),
+                "edges[0].label",
+            ),
+            (
+                "edge contract",
+                lambda d: d["edges"][0].update(contract=""),
+                "edges[0].contract",
+            ),
+            ("flows array", lambda d: d.update(flows=None), "flows"),
+            (
+                "flow label",
+                lambda d: d["flows"][0].update(label=1),
+                "flows[0].label",
+            ),
+            (
+                "flow description",
+                lambda d: d["flows"][0].update(description=1),
+                "flows[0].description",
+            ),
+            (
+                "flow actor",
+                lambda d: d["flows"][0].update(actor=""),
+                "flows[0].actor",
+            ),
+            (
+                "flow node references",
+                lambda d: d["flows"][0].update(nodeIds="api"),
+                "flows[0].nodeIds",
+            ),
+            (
+                "flow edge references",
+                lambda d: d["flows"][0].update(edgeIds="api-calls-ui"),
+                "flows[0].edgeIds",
+            ),
+            (
+                "flow stages",
+                lambda d: d["flows"][0].update(stages={}),
+                "flows[0].stages",
+            ),
+            (
+                "flow outputs",
+                lambda d: d["flows"][0].update(outputs="Result"),
+                "flows[0].outputs",
+            ),
+            (
+                "flow evidence entry",
+                lambda d: d["flows"][0].update(evidence=[1]),
+                "flows[0].evidence",
+            ),
+            (
+                "flow coverage gap",
+                lambda d: d["flows"][0].update(coverageGap=1),
+                "flows[0].coverageGap",
+            ),
+            (
+                "stage object",
+                lambda d: d["flows"][0]["stages"].__setitem__(0, []),
+                "flows[0].stages[0]",
+            ),
+            (
+                "stage id",
+                lambda d: d["flows"][0]["stages"][0].update(id=1),
+                "flows[0].stages[0].id",
+            ),
+            (
+                "stage description",
+                lambda d: d["flows"][0]["stages"][0].update(description=1),
+                "flows[0].stages[0].description",
+            ),
+            (
+                "stage node references",
+                lambda d: d["flows"][0]["stages"][0].update(nodeIds="api"),
+                "flows[0].stages[0].nodeIds",
+            ),
+            (
+                "stage backstage",
+                lambda d: d["flows"][0]["stages"][0].update(backstage=1),
+                "flows[0].stages[0].backstage",
+            ),
+            (
+                "stage produces",
+                lambda d: d["flows"][0]["stages"][0].update(produces="Command"),
+                "flows[0].stages[0].produces",
+            ),
+        )
+        for name, mutate, fragment in cases:
+            with self.subTest(name=name):
+                document = self.v2()
+                mutate(document)
+                self.assert_error(document, fragment)
+
     def test_rejects_future_schema_without_legacy_downgrade(self):
         document = self.v2()
         document["schemaVersion"] = 3
