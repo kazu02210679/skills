@@ -205,9 +205,10 @@
       let lastScrollBehavior = "";
       let activeLayout;
       let layoutGeneration = 0;
+      let lastFitPadding;
       const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
       const testMode = new URLSearchParams(location.search).get("test") === "1";
-      const byId = (items, id) => items.find((item) => item.id === id);
+      const byId = (items, id) => items.find((item) => item && item.id === id);
       const list = (title, values) => !values?.length ? "" :
         `<section class="detail-section"><h3>${escapeHtml(title)}</h3><ul>${values.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul></section>`;
 
@@ -215,15 +216,210 @@
       const assertShape = (condition, path, message) => {
         if (!condition) throw new Error(`${path} ${message}`);
       };
+      const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+      const V2_NODE_KINDS = new Set(["service", "ui", "worker", "data", "external", "contract", "decision", "actor"]);
+      const V2_EDGE_KINDS = new Set(["calls", "data", "event", "contains", "inherits", "depends-on", "replaces", "unknown"]);
+      const V2_CHANGE_TYPES = new Set(["existing", "inherited", "changed", "added", "replaced", "removed"]);
+      const V2_SNAPSHOT_KINDS = new Set(["version", "baseline", "release", "working"]);
+
+      function requireString(value, path, nonEmpty = false) {
+        assertShape(typeof value === "string" && (!nonEmpty || value.trim().length > 0), path,
+          nonEmpty ? "must be a non-empty string" : "must be a string");
+      }
+
+      function requireStringArray(value, path) {
+        assertShape(Array.isArray(value), path, "must be an array");
+        value.forEach((entry, index) => requireString(entry, `${path}[${index}]`, true));
+      }
+
+      function requireReferences(value, path, allowed) {
+        requireStringArray(value, path);
+        value.forEach((entry, index) => assertShape(allowed.has(entry), `${path}[${index}]`, `references unknown id '${entry}'`));
+      }
+
+      function requireObjectArray(value, path) {
+        assertShape(Array.isArray(value), path, "must be an array");
+        value.forEach((entry, index) => assertShape(isObject(entry), `${path}[${index}]`, "must be an object"));
+      }
+
+      function collectIds(items, path) {
+        requireObjectArray(items, path);
+        const ids = new Set();
+        items.forEach((item, index) => {
+          requireString(item.id, `${path}[${index}].id`, true);
+          assertShape(!ids.has(item.id), path, `contains duplicate id '${item.id}'`);
+          ids.add(item.id);
+        });
+        return ids;
+      }
+
+      function validateV2Snapshots(data) {
+        if (!hasOwn(data, "snapshots")) return new Set();
+        requireObjectArray(data.snapshots, "snapshots");
+        const snapshotIds = collectIds(data.snapshots, "snapshots");
+        data.snapshots.forEach((snapshot, index) => {
+          const path = `snapshots[${index}]`;
+          requireString(snapshot.label, `${path}.label`, true);
+          requireString(snapshot.kind, `${path}.kind`, true);
+          assertShape(V2_SNAPSHOT_KINDS.has(snapshot.kind), `${path}.kind`, "must be a recognized snapshot kind");
+          assertShape(hasOwn(snapshot, "parentId"), `${path}.parentId`, "must be present as null or a known snapshot id");
+          assertShape(snapshot.parentId === null || (typeof snapshot.parentId === "string" && snapshotIds.has(snapshot.parentId)),
+            `${path}.parentId`, "must be null or a known snapshot id");
+        });
+        return snapshotIds;
+      }
+
+      function validateAnnotations(items, path, allowedIds, allIds, snapshotIds, kindValues) {
+        items.forEach((item, index) => {
+          const itemPath = `${path}[${index}]`;
+          if (kindValues && hasOwn(item, "kind")) {
+            requireString(item.kind, `${itemPath}.kind`, true);
+            assertShape(kindValues.has(item.kind), `${itemPath}.kind`, "must be a recognized kind");
+          }
+          if (hasOwn(item, "changeType")) {
+            requireString(item.changeType, `${itemPath}.changeType`, true);
+            assertShape(V2_CHANGE_TYPES.has(item.changeType), `${itemPath}.changeType`, "must be a recognized change type");
+          }
+          if (hasOwn(item, "snapshotIds")) requireReferences(item.snapshotIds, `${itemPath}.snapshotIds`, snapshotIds);
+          if (hasOwn(item, "replacesId")) {
+            requireString(item.replacesId, `${itemPath}.replacesId`, true);
+            assertShape(allowedIds.has(item.replacesId), `${itemPath}.replacesId`, "must reference the same collection");
+            assertShape(item.changeType === "replaced", `${itemPath}.replacesId`, "is forbidden unless changeType is 'replaced'");
+          }
+          if (item.changeType === "replaced") {
+            assertShape(hasOwn(item, "replacesId"), `${itemPath}.replacesId`, "is required when changeType is 'replaced'");
+          }
+          if (hasOwn(item, "replacesId")) assertShape(allIds.has(item.replacesId), `${itemPath}.replacesId`, "must reference a known id");
+        });
+      }
+
+      function validateV2Comparisons(data, snapshotIds, collectionIds) {
+        if (!hasOwn(data, "comparisons")) return;
+        requireObjectArray(data.comparisons, "comparisons");
+        const comparisonIds = new Set();
+        const states = ["existing", "inherited", "changed", "added", "replaced", "removed"];
+        data.comparisons.forEach((comparison, index) => {
+          const path = `comparisons[${index}]`;
+          requireString(comparison.id, `${path}.id`, true);
+          assertShape(!comparisonIds.has(comparison.id), "comparisons", `contains duplicate id '${comparison.id}'`);
+          comparisonIds.add(comparison.id);
+          requireString(comparison.fromSnapshotId, `${path}.fromSnapshotId`, true);
+          requireString(comparison.toSnapshotId, `${path}.toSnapshotId`, true);
+          assertShape(snapshotIds.has(comparison.fromSnapshotId), `${path}.fromSnapshotId`, "references an unknown snapshot");
+          assertShape(snapshotIds.has(comparison.toSnapshotId), `${path}.toSnapshotId`, "references an unknown snapshot");
+          assertShape(comparison.fromSnapshotId !== comparison.toSnapshotId, path, "fromSnapshotId and toSnapshotId must differ");
+          if (hasOwn(comparison, "summary")) requireString(comparison.summary, `${path}.summary`);
+          [
+            ["nodes", "Node"],
+            ["edges", "Edge"],
+            ["flows", "Flow"],
+          ].forEach(([collection, suffix]) => {
+            const seen = new Set();
+            states.forEach((changeState) => {
+              const field = `${changeState}${suffix}Ids`;
+              requireReferences(comparison[field], `${path}.${field}`, collectionIds[collection]);
+              comparison[field].forEach((id, idIndex) => {
+                assertShape(!seen.has(id), `${path}.${field}[${idIndex}]`, `id '${id}' appears in more than one comparison state`);
+                seen.add(id);
+              });
+            });
+          });
+        });
+      }
 
       function validateModelShape(data) {
         assertShape(isObject(data), "document", "must be an object");
-        const isV2 = data.schemaVersion === 2;
+        const hasSchemaVersion = hasOwn(data, "schemaVersion");
+        const schemaVersion = hasSchemaVersion ? data.schemaVersion : 1;
+        assertShape(!hasSchemaVersion || (Number.isInteger(schemaVersion) && (schemaVersion === 1 || schemaVersion === 2)),
+          "schemaVersion", "must be absent, 1, or exact integer 2");
+        const isV2 = schemaVersion === 2;
         assertShape(isObject(data.project), "project", "must be an object");
         ["sources", "categories", "nodes", "edges", "flows", "phases"].forEach((key) => {
           assertShape(Array.isArray(data[key]), key, "must be an array");
         });
         if (!isV2) return;
+
+        ["id", "title", "summary"].forEach((key) => requireString(data.project[key], `project.${key}`, true));
+        requireObjectArray(data.sources, "sources");
+        data.sources.forEach((source, index) => {
+          requireString(source.path, `sources[${index}].path`, true);
+          requireString(source.kind, `sources[${index}].kind`, true);
+        });
+        const categoryIds = collectIds(data.categories, "categories");
+        data.categories.forEach((category, index) => {
+          const path = `categories[${index}]`;
+          requireString(category.label, `${path}.label`, true);
+          requireString(category.color, `${path}.color`, true);
+          assertShape(/^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(category.color), `${path}.color`, "must be a #RRGGBB or #RRGGBBAA value");
+        });
+        const phaseIds = collectIds(data.phases, "phases");
+        data.phases.forEach((phase, index) => {
+          requireString(phase.label, `phases[${index}].label`, true);
+          requireString(phase.description, `phases[${index}].description`);
+        });
+        const nodeIds = collectIds(data.nodes, "nodes");
+        const edgeIds = collectIds(data.edges, "edges");
+        const flowIds = collectIds(data.flows, "flows");
+        const snapshotIds = validateV2Snapshots(data);
+        const allIds = new Set([...nodeIds, ...edgeIds, ...flowIds]);
+
+        data.nodes.forEach((node, index) => {
+          const path = `nodes[${index}]`;
+          requireString(node.label, `${path}.label`, true);
+          requireString(node.category, `${path}.category`, true);
+          requireString(node.phase, `${path}.phase`, true);
+          assertShape(categoryIds.has(node.category), `${path}.category`, "references an unknown category");
+          assertShape(phaseIds.has(node.phase), `${path}.phase`, "references an unknown phase");
+          requireString(node.status, `${path}.status`, true);
+          assertShape(new Set(["planned", "implemented", "deprecated"]).has(node.status), `${path}.status`, "must be a recognized status");
+          requireString(node.description, `${path}.description`);
+          ["responsibilities", "inputs", "outputs", "sourcePaths", "evidence"].forEach((key) => requireStringArray(node[key], `${path}.${key}`));
+          requireString(node.coverageGap, `${path}.coverageGap`);
+          assertShape(isObject(node.position), `${path}.position`, "must be an object");
+          ["x", "y"].forEach((axis) => assertShape(typeof node.position[axis] === "number" && Number.isFinite(node.position[axis]), `${path}.position.${axis}`, "must be finite"));
+        });
+
+        data.edges.forEach((edge, index) => {
+          const path = `edges[${index}]`;
+          requireString(edge.source, `${path}.source`, true);
+          requireString(edge.target, `${path}.target`, true);
+          assertShape(nodeIds.has(edge.source), `${path}.source`, "references an unknown node");
+          assertShape(nodeIds.has(edge.target), `${path}.target`, "references an unknown node");
+          requireString(edge.label, `${path}.label`, true);
+          requireString(edge.contract, `${path}.contract`, true);
+        });
+        validateAnnotations(data.nodes, "nodes", nodeIds, allIds, snapshotIds, V2_NODE_KINDS);
+        validateAnnotations(data.edges, "edges", edgeIds, allIds, snapshotIds, V2_EDGE_KINDS);
+
+        data.flows.forEach((flow, index) => {
+          const path = `flows[${index}]`;
+          requireString(flow.label, `${path}.label`, true);
+          requireString(flow.description, `${path}.description`);
+          requireString(flow.actor, `${path}.actor`, true);
+          requireString(flow.trigger, `${path}.trigger`, true);
+          requireString(flow.outcome, `${path}.outcome`, true);
+          requireReferences(flow.nodeIds, `${path}.nodeIds`, nodeIds);
+          requireReferences(flow.edgeIds, `${path}.edgeIds`, edgeIds);
+          requireObjectArray(flow.stages, `${path}.stages`);
+          ["outputs", "safety", "evidence"].forEach((key) => requireStringArray(flow[key], `${path}.${key}`));
+          requireString(flow.coverageGap, `${path}.coverageGap`);
+          flow.stages.forEach((stage, stageIndex) => {
+            const stagePath = `${path}.stages[${stageIndex}]`;
+            requireString(stage.id, `${stagePath}.id`, true);
+            requireString(stage.label, `${stagePath}.label`, true);
+            requireString(stage.description, `${stagePath}.description`);
+            requireReferences(stage.nodeIds, `${stagePath}.nodeIds`, nodeIds);
+            stage.nodeIds.forEach((nodeId, nodeIndex) => assertShape(flow.nodeIds.includes(nodeId), `${stagePath}.nodeIds[${nodeIndex}]`, "must occur in the parent flow.nodeIds"));
+            requireString(stage.backstage, `${stagePath}.backstage`);
+            requireStringArray(stage.produces, `${stagePath}.produces`);
+          });
+          flow.edgeIds.forEach((edgeId, edgeIndex) => {
+            const edge = byId(data.edges, edgeId);
+            assertShape(flow.nodeIds.includes(edge.source) && flow.nodeIds.includes(edge.target), `${path}.edgeIds[${edgeIndex}]`, "edge source and target must both occur in flow.nodeIds");
+          });
+        });
+        validateAnnotations(data.flows, "flows", flowIds, allIds, snapshotIds);
 
         if ("view" in data) {
           assertShape(isObject(data.view), "view", "must be an object");
@@ -269,8 +465,7 @@
           assertShape((data.snapshots || []).some((snapshot) => isObject(snapshot) && snapshot.id === data.currentSnapshotId), "currentSnapshotId", "must reference a known snapshot");
         }
         if ("comparisons" in data) {
-          assertShape(Array.isArray(data.comparisons), "comparisons", "must be an array");
-          data.comparisons.forEach((comparison, index) => assertShape(isObject(comparison), `comparisons[${index}]`, "must be an object"));
+          validateV2Comparisons(data, snapshotIds, {nodes: nodeIds, edges: edgeIds, flows: flowIds});
         }
       }
 
@@ -325,6 +520,8 @@
           flowId = requestedFlow;
         } else if (model.isV2 && mode === "flow" && model.flows.length > 0 && model.view.defaultFlowId && byId(model.flows, model.view.defaultFlowId)) {
           flowId = model.view.defaultFlowId;
+        } else if (model.isV2 && mode === "flow" && model.flows.length > 0) {
+          flowId = model.flows[0].id;
         }
         state = {
           ...state,
@@ -336,9 +533,14 @@
         };
       }
 
+      function safeCategoryColor(category) {
+        const color = typeof category?.color === "string" ? category.color : "";
+        return /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(color) ? color : "#626878";
+      }
+
       function renderLegend() {
         $("#legend").innerHTML = model.categories.map((category) =>
-          `<span><i style="--color:${escapeHtml(category.color)}"></i>${escapeHtml(category.label)}</span>`
+          `<span><i style="--color:${safeCategoryColor(category)}"></i>${escapeHtml(category.label)}</span>`
         ).join("");
       }
 
@@ -529,7 +731,8 @@
         if (!cy) return;
         fitCalls += 1;
         if (!automatic) fitCallsAfterSelection += 1;
-        cy.fit(target.nonempty() ? target : cy.elements(), innerWidth <= 900 ? 38 : 76);
+        lastFitPadding = model?.isV2 ? (innerWidth <= 900 ? 38 : 76) : 90;
+        cy.fit(target.nonempty() ? target : cy.elements(), lastFitPadding);
       }
 
       function focusCurrent(automatic = false) {
@@ -540,8 +743,8 @@
 
       function refreshGraph() {
         if (!cy) return;
-        activeLayout?.stop();
         const generation = ++layoutGeneration;
+        activeLayout?.stop();
         const elements = graphElementsForState(model, state);
         const cytoscapeElements = [
           ...elements.nodes.map((node) => ({group: "nodes", data: {...node}, position: {...node.position}})),
@@ -549,6 +752,10 @@
         ];
         cy.elements().remove();
         cy.add(cytoscapeElements);
+        cy.nodes().forEach((node) => {
+          const category = byId(model.categories, node.data("category"));
+          node.style("border-color", safeCategoryColor(category));
+        });
         applyFlowClasses();
         const largeFlow = model.isV2 && state.mode === "flow" && elements.nodes.length > 40;
         updateTelemetry(elements, largeFlow);
@@ -582,8 +789,10 @@
       function chooseMode(mode) {
         if (!model?.isV2 || !model.view.availableModes.includes(mode)) return;
         if (mode === "flow" && model.flows.length === 0) mode = "dependency";
-        if (mode === "flow" && state.flowId === "all" && model.view.defaultFlowId && byId(model.flows, model.view.defaultFlowId)) {
-          state.flowId = model.view.defaultFlowId;
+        if (mode === "flow" && state.flowId === "all" && model.flows.length > 0) {
+          state.flowId = (model.view.defaultFlowId && byId(model.flows, model.view.defaultFlowId))
+            ? model.view.defaultFlowId
+            : model.flows[0].id;
         }
         state.mode = mode;
         state.selectedNode = "";
@@ -630,11 +839,6 @@
 
       function initializeGraph() {
         if (typeof cytoscape !== "function") throw new Error("Cytoscape.js is unavailable");
-        const colorFor = (category) => /^#[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(category.color || "") ? category.color : "#626878";
-        const categoryStyles = model.categories.map((category) => ({
-          selector: `node[category = "${category.id}"]`,
-          style: {"border-color": colorFor(category)}
-        }));
         cy = cytoscape({
           container: $("#cy"),
           elements: [],
@@ -644,7 +848,6 @@
           boxSelectionEnabled: false,
           style: [
             {selector: "node", style: {shape:"roundrectangle", width:120, height:34, padding:"10px", "background-color":"#171922", "border-width":1.5, label:"data(label)", color:"#e5e6eb", "font-size":11, "text-wrap":"wrap", "text-max-width":150, "text-valign":"center", "text-halign":"center"}},
-            ...categoryStyles,
             {selector: "edge", style: {"curve-style":"bezier", width:1, "line-color":"#3b3f4b", "target-arrow-color":"#585e6e", "target-arrow-shape":"triangle", "arrow-scale":.72, label:"data(label)", color:"#747987", "font-size":8, "text-background-color":"#090a0f", "text-background-opacity":.82, "text-background-padding":3, "text-rotation":"autorotate"}},
             {selector: ".dimmed", style: {opacity:.07}},
             {selector: "node.flow", style: {opacity:1, "background-color":"#1d1f27"}},
@@ -722,6 +925,7 @@
           zoom: cy ? cy.zoom() : 0,
           fitCalls,
           fitCallsAfterSelection,
+          fitPadding: lastFitPadding,
           rootMeanY: reportedRootMeanY,
           downstreamMeanY: reportedDownstreamMeanY,
           lastScrollBehavior,
@@ -732,13 +936,6 @@
         if (!testMode) return;
         window.__projectMapTestHooks = {
           getState: testState,
-          normalizeModel,
-          graphElementsForState,
-          layoutForMode,
-          orientFlowLayers,
-          chooseMode,
-          chooseFlow,
-          focusCurrent,
         };
       }
 
