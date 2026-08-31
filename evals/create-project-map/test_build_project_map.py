@@ -1,5 +1,8 @@
+import copy
 import importlib.util
+import json
 import pathlib
+import tempfile
 import unittest
 
 
@@ -33,6 +36,52 @@ class ProjectMapBuildTests(unittest.TestCase):
         )
         for marker in ('id="cy"', 'id="flowNav"', 'id="nodeSearch"', 'id="fitButton"'):
             self.assertIn(marker, rendered)
+
+    def test_v2_metadata_is_not_embedded_as_html_or_javascript(self):
+        document = {
+            "schemaVersion": 2,
+            "project": {
+                "title": "</title><script>alert(1)</script>",
+                "summary": "</script><script>owned()</script>",
+            },
+            "comparisons": [{"summary": "<img src=x onerror=owned()>"}],
+        }
+        before = copy.deepcopy(document)
+        rendered = MODULE.render_html(
+            document,
+            "<title>{{PROJECT_TITLE}}</title><p>{{PROJECT_SUMMARY}}</p><a href=\"{{DATA_FILENAME}}\">JSON</a>",
+            "../data/architecture-map.json",
+        )
+        self.assertEqual(before, document)
+        self.assertNotIn("</script>", rendered.lower())
+        self.assertNotIn("<script>", rendered.lower())
+        self.assertNotIn("<img", rendered.lower())
+        self.assertIn("../data/architecture-map.json", rendered)
+
+    def test_relative_data_filename_uses_posix_relative_path(self):
+        data = pathlib.Path("C:/repo/maps/architecture-map.json")
+        output = pathlib.Path("C:/repo/maps/html/architecture-map.html")
+        self.assertEqual(
+            "../architecture-map.json",
+            MODULE.relative_data_filename(data, output),
+        )
+
+    def test_invalid_document_does_not_overwrite_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            data = root / "invalid.json"
+            template = root / "template.html"
+            output = root / "architecture-map.html"
+            data.write_text(json.dumps({"schemaVersion": 2}), encoding="utf-8")
+            template.write_text("<html>{{PROJECT_TITLE}}</html>", encoding="utf-8")
+            output.write_text("old rendered map", encoding="utf-8")
+            result = MODULE.main([
+                "--data", str(data),
+                "--template", str(template),
+                "--output", str(output),
+            ])
+            self.assertEqual(1, result)
+            self.assertEqual("old rendered map", output.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

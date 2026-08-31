@@ -38,6 +38,13 @@ def render_html(
     return rendered
 
 
+def relative_data_filename(data_path: pathlib.Path, output_path: pathlib.Path) -> str:
+    relative = pathlib.Path(
+        os.path.relpath(data_path.resolve(), output_path.parent.resolve())
+    )
+    return relative.as_posix()
+
+
 def _load_validator(script_path: pathlib.Path):
     spec = importlib.util.spec_from_file_location("project_map_validator", script_path)
     if spec is None or spec.loader is None:
@@ -65,9 +72,7 @@ def main(argv: list[str] | None = None) -> int:
             for error in errors:
                 print(f"- {error}", file=sys.stderr)
             return 1
-        data_filename = pathlib.PurePosixPath(
-            pathlib.Path(os.path.relpath(args.data.resolve(), args.output.parent.resolve()))
-        ).as_posix()
+        data_filename = relative_data_filename(args.data, args.output)
         rendered = render_html(document, template, data_filename)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered, encoding="utf-8")
