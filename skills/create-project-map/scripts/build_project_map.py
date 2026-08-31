@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import sys
 from typing import Any
 from urllib.parse import quote
@@ -22,6 +23,7 @@ TOKENS = {
     "data_url": "{{DATA_FILENAME_URL}}",
     "data_js": "{{DATA_FILENAME_JS}}",
 }
+TOKEN_PATTERN = re.compile("|".join(re.escape(token) for token in TOKENS.values()))
 
 
 def render_html(
@@ -42,10 +44,7 @@ def render_html(
         TOKENS["data_url"]: data_url,
         TOKENS["data_js"]: data_js,
     }
-    rendered = template
-    for token, value in replacements.items():
-        rendered = rendered.replace(token, value)
-    return rendered
+    return TOKEN_PATTERN.sub(lambda match: replacements[match.group(0)], template)
 
 
 def _javascript_string_literal(value: str) -> str:

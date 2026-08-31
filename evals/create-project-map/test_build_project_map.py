@@ -1,4 +1,5 @@
 import copy
+import html
 from html.parser import HTMLParser
 import importlib.util
 import json
@@ -171,6 +172,27 @@ class ProjectMapBuildTests(unittest.TestCase):
                 javascript_match = re.search(r"const DATA_URL = (.+);", rendered)
                 self.assertIsNotNone(javascript_match)
                 self.assertEqual(expected_url, json.loads(javascript_match.group(1)))
+
+    def test_placeholder_literals_in_replacements_are_substituted_once(self):
+        data_filename = "map#&{{DATA_FILENAME_URL}}/{{DATA_FILENAME_JS}}.json"
+        title = "Title {{DATA_FILENAME_URL}}"
+        summary = "Summary {{DATA_FILENAME_JS}}"
+        expected_url = quote(data_filename, safe="/")
+        rendered = MODULE.render_html(
+            {"project": {"title": title, "summary": summary}},
+            '<h1>{{PROJECT_TITLE}}</h1><p>{{PROJECT_SUMMARY}}</p><a href="{{DATA_FILENAME_URL}}">{{DATA_FILENAME_TEXT}}</a><script>const DATA_URL = {{DATA_FILENAME_JS}};</script>',
+            data_filename,
+        )
+
+        parser = _AnchorHrefParser()
+        parser.feed(rendered)
+        self.assertEqual(data_filename, "".join(parser.text))
+        self.assertEqual(expected_url, parser.href)
+        self.assertIn(f"<h1>{html.escape(title)}</h1>", rendered)
+        self.assertIn(f"<p>{html.escape(summary)}</p>", rendered)
+        javascript_match = re.search(r"const DATA_URL = (.+);", rendered)
+        self.assertIsNotNone(javascript_match)
+        self.assertEqual(expected_url, json.loads(javascript_match.group(1)))
 
 
 if __name__ == "__main__":
