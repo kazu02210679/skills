@@ -1195,7 +1195,6 @@
           && !filtered.flows.some((flow) => flow.id === state.flowId);
         if (flowWasHidden) {
           state.flowId = "all";
-          state.selectedNode = "";
           history.replaceState(null, "", `#mode=${encodeURIComponent(state.mode)}&flow=all`);
         }
         if (state.selectedNode && !filtered.nodes.some((node) => node.id === state.selectedNode)) {
