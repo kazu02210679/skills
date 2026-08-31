@@ -169,7 +169,7 @@
         <label for="nodeSearch" hidden>Search nodes</label>
         <input id="nodeSearch" type="search" placeholder="Search nodes, responsibilities, paths">
         <button id="fitButton" type="button">Fit map</button>
-        <a class="button-link" href="{{DATA_FILENAME}}">JSON</a>
+        <a class="button-link" href="{{DATA_FILENAME_HTML}}">JSON</a>
       </div>
     </header>
     <main class="workspace">
@@ -241,7 +241,7 @@
   </div>
   <script>
     (() => {
-      const DATA_URL = "{{DATA_FILENAME}}";
+      const DATA_URL = {{DATA_FILENAME_JS}};
       const $ = (selector) => document.querySelector(selector);
       const escapeHtml = (value) => String(value ?? "")
         .replaceAll("&", "&amp;").replaceAll("<", "&lt;")

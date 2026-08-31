@@ -1,7 +1,9 @@
 import copy
+from html.parser import HTMLParser
 import importlib.util
 import json
 import pathlib
+import re
 import tempfile
 import unittest
 
@@ -13,6 +15,16 @@ SPEC = importlib.util.spec_from_file_location("build_project_map", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
+
+
+class _AnchorHrefParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.href = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self.href = dict(attrs).get("href")
 
 
 class ProjectMapBuildTests(unittest.TestCase):
@@ -96,6 +108,26 @@ class ProjectMapBuildTests(unittest.TestCase):
             ])
             self.assertEqual(1, result)
             self.assertEqual("old rendered map", output.read_text(encoding="utf-8"))
+
+    def test_data_filename_escaping_matches_html_and_javascript_contexts(self):
+        data_filename = 'folder/& "日本語"/</script>\u2028\u2029.json'
+        rendered = MODULE.render_html(
+            {"project": {"title": "Map", "summary": "Summary"}},
+            '<a href="{{DATA_FILENAME_HTML}}">JSON</a><script>const DATA_URL = {{DATA_FILENAME_JS}};</script>',
+            data_filename,
+        )
+
+        parser = _AnchorHrefParser()
+        parser.feed(rendered)
+        self.assertEqual(data_filename, parser.href)
+        javascript_match = re.search(r"const DATA_URL = (.+);", rendered)
+        self.assertIsNotNone(javascript_match)
+        javascript_literal = javascript_match.group(1)
+        self.assertEqual(data_filename, json.loads(javascript_literal))
+        self.assertNotIn("</script>", javascript_literal.lower())
+        self.assertNotIn("<", javascript_literal)
+        self.assertNotIn(">", javascript_literal)
+        self.assertNotIn("&", javascript_literal)
 
 
 if __name__ == "__main__":

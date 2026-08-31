@@ -17,6 +17,8 @@ TOKENS = {
     "title": "{{PROJECT_TITLE}}",
     "summary": "{{PROJECT_SUMMARY}}",
     "data": "{{DATA_FILENAME}}",
+    "data_html": "{{DATA_FILENAME_HTML}}",
+    "data_js": "{{DATA_FILENAME_JS}}",
 }
 
 
@@ -27,15 +29,32 @@ def render_html(
 ) -> str:
     """Render escaped project metadata and a relative JSON path into the template."""
     project = document.get("project", {})
+    data_html = html.escape(data_filename, quote=True)
+    data_js = _javascript_string_literal(data_filename)
     replacements = {
         TOKENS["title"]: html.escape(str(project.get("title", "Project Map"))),
         TOKENS["summary"]: html.escape(str(project.get("summary", ""))),
-        TOKENS["data"]: html.escape(data_filename, quote=True),
+        TOKENS["data"]: data_html,
+        TOKENS["data_html"]: data_html,
+        TOKENS["data_js"]: data_js,
     }
     rendered = template
     for token, value in replacements.items():
         rendered = rendered.replace(token, value)
     return rendered
+
+
+def _javascript_string_literal(value: str) -> str:
+    literal = json.dumps(value, ensure_ascii=False)
+    for character, replacement in (
+        ("<", r"\u003C"),
+        (">", r"\u003E"),
+        ("&", r"\u0026"),
+        ("\u2028", r"\u2028"),
+        ("\u2029", r"\u2029"),
+    ):
+        literal = literal.replace(character, replacement)
+    return literal
 
 
 def relative_data_filename(data_path: pathlib.Path, output_path: pathlib.Path) -> str:
