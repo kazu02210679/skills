@@ -42,7 +42,8 @@ creating a map per plan.
    flow, dependency, combined, snapshots/comparisons, search and lifecycle/
    category/change filters, inventory and relationship navigation, keyboard
    focus, responsive layout, reduced motion, large-flow behavior, pan/zoom,
-   explicit Fit, and missing-JSON/invalid-JSON/CDN console recovery.
+   explicit Fit, direct malformed-v2 recovery, and missing-JSON/invalid-JSON/
+   CDN console recovery.
 8. Report both artifact paths, validation, evidence-backed status changes,
    comparison/coverage gaps, and any browser block.
 
@@ -51,5 +52,6 @@ creating a map per plan.
 The Skill writes only repository-root `architecture-map.json` and
 `architecture-map.html`. It uses the pinned Cytoscape CDN and same-origin JSON
 fetch at runtime, requires the local HTTP server for interactive verification,
-and never commits, pushes, publishes, deploys, migrates, deletes, or persists
-browser state.
+and never commits, pushes, publishes, deploys, migrates, or deletes. URL
+hash/history may reflect the current mode or selection, but browser state is
+never persisted into artifacts/JSON or committed.

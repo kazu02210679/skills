@@ -238,10 +238,10 @@ does not remove the edge and preserves the neutral v1 style for legacy data.
 
 In v2, `categories[].color` must match `^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$`:
 exactly `#RRGGBB` or `#RRGGBBAA`. CSS functions, `url()`, and style fragments
-are rejected. Schema 1 retains previously accepted color strings. When a v1
-color is unsafe as a CSS token, the renderer uses neutral border `#626878` and
-fill `#171922`, retains the category text, and never interpolates the unsafe
-value.
+are rejected. Schema 1 conservatively validates safe CSS colors, including
+valid named, short-hex, and `rgb` forms. Unsafe tokens or fragments fall back
+to neutral border `#626878` and fill `#171922`, retain the category text, and
+are never interpolated.
 
 ## v2 flow and view rules
 
@@ -285,7 +285,8 @@ Normalization is in memory only; opening a map never rewrites its JSON.
   fit, and inspector. It has no v2 mode controls or comparison claim.
 - In v2, missing `view.defaultMode` means `dependency`; missing
   `defaultFlowId` selects the first flow only when flow mode is selected. An
-  empty flow list falls back to dependency. Missing layout entries receive the
+  empty flow list falls back to `dependency` when flow mode is selected; other
+  selected modes keep their selected mode. Missing layout entries receive the
   defaults above.
 - Missing `changeType` or `snapshotIds` shows no change badge and treats an
   item as `existing` for filters. Missing node `kind` uses `service` in v2;
@@ -293,7 +294,8 @@ Normalization is in memory only; opening a map never rewrites its JSON.
   remains required.
 - Selecting a snapshot filters elements whose `snapshotIds` include it.
   Elements without `snapshotIds` remain visible and are labeled `snapshot
-  coverage unknown`; no diff is invented. An unavailable snapshot or
+  coverage unknown` on graph labels, node inventory, inspector, edge/flow
+  navigation, and details; no diff is invented. An unavailable snapshot or
   comparison falls back to Current and announces the fallback.
 - With an active comparison, its state arrays take precedence over the
   element's own `changeType`. Without one, the element annotation is the
@@ -331,6 +333,13 @@ remains readable. At widths ≤900px the inspector moves below a map at least
 450px tall; at ≤560px controls wrap or scroll horizontally. Reduced-motion
 users receive immediate scrolling and layout changes.
 
+For an annotated node, the change border style and width override the lifecycle
+border, while lifecycle status remains in text, ARIA, dimming, and telemetry.
+For an edge, the arrow always comes from its kind; an active annotated change
+supplies the line style, otherwise the kind supplies it. Edge width is the
+maximum of kind and change width, so a `replaces` edge with a `changed`
+annotation remains 3px.
+
 ## Security and runtime boundary
 
 Project title, summary, data filename, labels, IDs, descriptions, evidence,
@@ -343,6 +352,12 @@ link is a relative path computed from output to data; source paths do not
 become external navigation. The pinned Cytoscape.js CDN and same-origin JSON
 are the only runtime fetches.
 
+The served template repeats v2 validation for direct JSON loads, including
+snapshot parent cycles and same-collection replacement, removed/deprecated,
+and comparison reciprocity violations; recognized malformed v2 data recovers
+with a visible error. The Python builder/validator remains authoritative before
+an output is written.
+
 Serve the repository over a local HTTP server for interactive verification;
 opening the file directly cannot satisfy same-origin fetch. Confirm the pinned
 CDN and JSON are reachable, then check legacy, flow/dependency/combined modes,
@@ -354,5 +369,7 @@ with local-server recovery instructions.
 
 The Skill writes only repository-root `architecture-map.json` and
 `architecture-map.html`. It does not add a runtime service, dependencies,
-layout plugins, or browser state; it never commits, pushes, publishes,
-deploys, migrates, or deletes an existing map.
+layout plugins, or browser state. URL hash/history may reflect the current
+mode or selection, but browser state is never persisted into artifacts/JSON or
+committed; it never pushes, publishes, deploys, migrates, or deletes an
+existing map.
