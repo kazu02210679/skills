@@ -6,6 +6,7 @@ import pathlib
 import re
 import tempfile
 import unittest
+from urllib.parse import quote, unquote
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -21,10 +22,21 @@ class _AnchorHrefParser(HTMLParser):
     def __init__(self):
         super().__init__()
         self.href = None
+        self._in_anchor = False
+        self.text = []
 
     def handle_starttag(self, tag, attrs):
         if tag == "a":
             self.href = dict(attrs).get("href")
+            self._in_anchor = True
+
+    def handle_endtag(self, tag):
+        if tag == "a":
+            self._in_anchor = False
+
+    def handle_data(self, data):
+        if self._in_anchor:
+            self.text.append(data)
 
 
 class ProjectMapBuildTests(unittest.TestCase):
@@ -111,23 +123,54 @@ class ProjectMapBuildTests(unittest.TestCase):
 
     def test_data_filename_escaping_matches_html_and_javascript_contexts(self):
         data_filename = 'folder/& "日本語"/</script>\u2028\u2029.json'
+        expected_url = quote(data_filename, safe="/")
         rendered = MODULE.render_html(
             {"project": {"title": "Map", "summary": "Summary"}},
-            '<a href="{{DATA_FILENAME_HTML}}">JSON</a><script>const DATA_URL = {{DATA_FILENAME_JS}};</script>',
+            '<a href="{{DATA_FILENAME_URL}}">{{DATA_FILENAME_TEXT}}</a><script>const DATA_URL = {{DATA_FILENAME_JS}};</script>',
             data_filename,
         )
 
         parser = _AnchorHrefParser()
         parser.feed(rendered)
-        self.assertEqual(data_filename, parser.href)
+        self.assertEqual(data_filename, "".join(parser.text))
+        self.assertEqual(expected_url, parser.href)
+        self.assertEqual(data_filename, unquote(parser.href))
         javascript_match = re.search(r"const DATA_URL = (.+);", rendered)
         self.assertIsNotNone(javascript_match)
         javascript_literal = javascript_match.group(1)
-        self.assertEqual(data_filename, json.loads(javascript_literal))
+        self.assertEqual(expected_url, json.loads(javascript_literal))
         self.assertNotIn("</script>", javascript_literal.lower())
         self.assertNotIn("<", javascript_literal)
         self.assertNotIn(">", javascript_literal)
         self.assertNotIn("&", javascript_literal)
+
+    def test_data_filename_url_encoding_preserves_names_and_separators(self):
+        names = (
+            "architecture-map.json",
+            "../architecture-map.json",
+            "map#v2.json",
+            "map%v2.json",
+            "map?v2.json",
+            "folder/space name_日本.json",
+            "folder/a&b.json",
+        )
+        template = '<a href="{{DATA_FILENAME_URL}}">{{DATA_FILENAME_TEXT}}</a><script>const DATA_URL = {{DATA_FILENAME_JS}};</script>'
+        for data_filename in names:
+            with self.subTest(data_filename=data_filename):
+                rendered = MODULE.render_html(
+                    {"project": {"title": "Map", "summary": "Summary"}},
+                    template,
+                    data_filename,
+                )
+                parser = _AnchorHrefParser()
+                parser.feed(rendered)
+                expected_url = quote(data_filename, safe="/")
+                self.assertEqual(data_filename, "".join(parser.text))
+                self.assertEqual(expected_url, parser.href)
+                self.assertEqual(data_filename, unquote(parser.href))
+                javascript_match = re.search(r"const DATA_URL = (.+);", rendered)
+                self.assertIsNotNone(javascript_match)
+                self.assertEqual(expected_url, json.loads(javascript_match.group(1)))
 
 
 if __name__ == "__main__":

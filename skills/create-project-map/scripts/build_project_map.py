@@ -11,13 +11,15 @@ import os
 import pathlib
 import sys
 from typing import Any
+from urllib.parse import quote
 
 
 TOKENS = {
     "title": "{{PROJECT_TITLE}}",
     "summary": "{{PROJECT_SUMMARY}}",
     "data": "{{DATA_FILENAME}}",
-    "data_html": "{{DATA_FILENAME_HTML}}",
+    "data_text": "{{DATA_FILENAME_TEXT}}",
+    "data_url": "{{DATA_FILENAME_URL}}",
     "data_js": "{{DATA_FILENAME_JS}}",
 }
 
@@ -29,13 +31,15 @@ def render_html(
 ) -> str:
     """Render escaped project metadata and a relative JSON path into the template."""
     project = document.get("project", {})
-    data_html = html.escape(data_filename, quote=True)
-    data_js = _javascript_string_literal(data_filename)
+    data_text = html.escape(data_filename)
+    data_url = html.escape(quote(data_filename, safe="/"), quote=True)
+    data_js = _javascript_string_literal(quote(data_filename, safe="/"))
     replacements = {
         TOKENS["title"]: html.escape(str(project.get("title", "Project Map"))),
         TOKENS["summary"]: html.escape(str(project.get("summary", ""))),
-        TOKENS["data"]: data_html,
-        TOKENS["data_html"]: data_html,
+        TOKENS["data"]: data_text,
+        TOKENS["data_text"]: data_text,
+        TOKENS["data_url"]: data_url,
         TOKENS["data_js"]: data_js,
     }
     rendered = template
