@@ -679,11 +679,20 @@
         return hasChangeAnnotation(collection, item) ? comparisonState(model, collection, item.id) : "";
       }
 
+      function snapshotCoverageUnknown(item) {
+        return Boolean(model?.isV2 && state.snapshotId !== "current" && item && !hasOwn(item, "snapshotIds"));
+      }
+
+      function snapshotCoverageSuffix(collection, item) {
+        return collection !== "nodes" && snapshotCoverageUnknown(item) ? " [snapshot coverage unknown]" : "";
+      }
+
       function displayLabel(collection, item) {
         const change = displayChange(collection, item);
-        if (!change) return item.label;
-        const style = CHANGE_STYLES[change] || CHANGE_STYLES.existing;
-        return `${style.glyph} ${item.label} [${change}]`;
+        const label = change
+          ? `${(CHANGE_STYLES[change] || CHANGE_STYLES.existing).glyph} ${item.label} [${change}]`
+          : item.label;
+        return `${label}${snapshotCoverageSuffix(collection, item)}`;
       }
 
       function nodeStyleState(node) {
@@ -692,12 +701,16 @@
         const change = comparisonState(model, "nodes", node.id);
         const annotated = hasChangeAnnotation("nodes", node);
         const changeStyle = CHANGE_STYLES[change] || CHANGE_STYLES.existing;
-        let borderStyle = status.borderStyle;
-        if (annotated && node.status === "implemented") borderStyle = changeStyle.borderStyle;
+        const borderStyle = annotated ? changeStyle.borderStyle : status.borderStyle;
+        const borderWidth = annotated ? changeStyle.borderWidth : status.borderWidth;
         return {
           shape: NODE_KIND_SHAPES[node.kind] || NODE_KIND_SHAPES.service,
           borderStyle,
-          borderWidth: Math.max(status.borderWidth, annotated ? changeStyle.borderWidth : 0),
+          borderWidth,
+          statusBorderStyle: status.borderStyle,
+          statusBorderWidth: status.borderWidth,
+          changeBorderStyle: annotated ? changeStyle.borderStyle : "",
+          changeBorderWidth: annotated ? changeStyle.borderWidth : 0,
           status: node.status || "implemented",
           changeType: change,
           changeBadge: annotated,
@@ -717,8 +730,11 @@
         const change = comparisonState(model, "edges", edge.id);
         const annotated = hasChangeAnnotation("edges", edge);
         const changeStyle = CHANGE_EDGE_STYLES[change] || CHANGE_EDGE_STYLES.existing;
+        // An explicit diff line treatment wins; kind arrows and the wider kind/diff width remain authoritative.
+        const lineStyle = annotated ? changeStyle.lineStyle : kindStyle.lineStyle;
         return {
-          lineStyle: kindStyle.lineStyle,
+          lineStyle,
+          kindLineStyle: kindStyle.lineStyle,
           changeLineStyle: annotated ? changeStyle.lineStyle : "",
           arrow: kindStyle.arrow,
           width: Math.max(kindStyle.width, annotated ? changeStyle.width : 0),
@@ -727,7 +743,7 @@
           changeBadge: annotated,
           glyph: annotated ? (CHANGE_STYLES[change] || CHANGE_STYLES.existing).glyph : "",
           displayLabel: displayLabel("edges", edge),
-          ariaLabel: `${edge.label}, ${edge.source} to ${edge.target}${annotated ? `, change ${change}` : ""}`,
+          ariaLabel: `${edge.label}, ${edge.source} to ${edge.target}${annotated ? `, change ${change}` : ""}${snapshotCoverageUnknown(edge) ? ", snapshot coverage unknown" : ""}`,
         };
       }
 
@@ -868,7 +884,11 @@
           ...visibleFlows
         ];
         $("#flowViews").innerHTML = `<p class="section-label">Flow views</p><div class="flow-grid">${
-          views.map((flow) => `<button class="flow-button" type="button" data-flow-id="${escapeHtml(flow.id)}" aria-pressed="${flow.id === state.flowId}"><strong>${escapeHtml(flow.label)}</strong><span>${escapeHtml(flow.description)}</span></button>`).join("")
+          views.map((flow) => {
+            const label = flow.id === "all" ? flow.label : displayLabel("flows", flow);
+            const description = `${flow.description}${flow.id !== "all" && snapshotCoverageUnknown(flow) ? " · snapshot coverage unknown" : ""}`;
+            return `<button class="flow-button" type="button" data-flow-id="${escapeHtml(flow.id)}" aria-pressed="${flow.id === state.flowId}"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(description)}</span></button>`;
+          }).join("")
         }</div>`;
       }
 
@@ -898,9 +918,10 @@
           `<article class="stage"><strong>${String(index + 1).padStart(2, "0")} · ${escapeHtml(stage.label)}</strong><p>${escapeHtml(stage.description)}</p><p><b>Backstage:</b> ${escapeHtml(stage.backstage)}</p><p><b>Produces:</b> ${escapeHtml((stage.produces || []).join(", "))}</p></article>`
         ).join("");
         const change = displayChange("flows", flow);
-        setDetail("Flow / service blueprint", flow.label,
+        const coverage = snapshotCoverageUnknown(flow);
+        setDetail("Flow / service blueprint", displayLabel("flows", flow),
           [`${flow.stages?.length || 0} stages`, `${flow.nodeIds?.length || 0} modules`, ...(change ? [`change: ${change}`] : [])],
-          detailNotice() + `<p class="description">${escapeHtml(flow.description)}</p>` +
+          detailNotice() + (coverage ? `<p class="coverage-unknown">snapshot coverage unknown</p>` : "") + `<p class="description">${escapeHtml(flow.description)}</p>` +
           list("Contract", [`Actor: ${flow.actor}`, `Trigger: ${flow.trigger}`, `Outcome: ${flow.outcome}`]) +
           `<section class="detail-section"><h3>Journey stages</h3>${stages}</section>` +
           list("Outputs", flow.outputs) + list("Safety & recovery", flow.safety) +
@@ -939,7 +960,8 @@
           .map((edge) => {
             const otherId = edge.source === node.id ? edge.target : edge.source;
             const other = byId(model.nodes, otherId);
-            return `<button class="relation" type="button" data-node-id="${escapeHtml(otherId)}" aria-label="Inspect ${escapeHtml(other?.label || otherId)} via ${escapeHtml(edge.label)}"><span>${escapeHtml(other?.label || otherId)}</span><small>${escapeHtml(edge.label)}</small></button>`;
+            const edgeLabel = displayLabel("edges", edge);
+            return `<button class="relation" type="button" data-node-id="${escapeHtml(otherId)}" aria-label="Inspect ${escapeHtml(other?.label || otherId)} via ${escapeHtml(edgeLabel)}"><span>${escapeHtml(other?.label || otherId)}</span><small>${escapeHtml(edgeLabel)}</small></button>`;
           }).join("");
         const change = displayChange("nodes", node);
         setDetail("Node inspector", displayLabel("nodes", node),
@@ -1116,9 +1138,40 @@
       }
 
       function styleTelemetry() {
+        const edges = Object.fromEntries(model.edges.map((edge) => {
+          const style = edgeStyleState(edge);
+          const element = cy?.getElementById(edge.id);
+          if (!element?.nonempty()) return [edge.id, {
+            ...style,
+            renderedLineStyle: style.lineStyle,
+            renderedArrow: style.arrow,
+            renderedWidth: style.width,
+            renderedOpacity: null,
+            renderedAvailable: false,
+            rendered: null,
+          }];
+          const renderedWidth = Number.parseFloat(element.style("width"));
+          const rendered = {
+            lineStyle: element.style("line-style") || style.lineStyle,
+            arrow: element.style("target-arrow-shape") || style.arrow,
+            width: Number.isFinite(renderedWidth) ? renderedWidth : style.width,
+            opacity: Number.parseFloat(element.style("opacity")),
+          };
+          return [edge.id, {
+            ...style,
+            lineStyle: rendered.lineStyle,
+            arrow: rendered.arrow,
+            renderedLineStyle: rendered.lineStyle,
+            renderedArrow: rendered.arrow,
+            renderedWidth: rendered.width,
+            renderedOpacity: rendered.opacity,
+            renderedAvailable: true,
+            rendered,
+          }];
+        }));
         return {
           nodes: Object.fromEntries(model.nodes.map((node) => [node.id, {...nodeStyleState(node)}])),
-          edges: Object.fromEntries(model.edges.map((edge) => [edge.id, {...edgeStyleState(edge)}])),
+          edges,
         };
       }
 
@@ -1138,6 +1191,13 @@
 
       function refreshFilteredView() {
         const filtered = applyFilters(model, state);
+        const flowWasHidden = model.isV2 && state.flowId !== "all"
+          && !filtered.flows.some((flow) => flow.id === state.flowId);
+        if (flowWasHidden) {
+          state.flowId = "all";
+          state.selectedNode = "";
+          history.replaceState(null, "", `#mode=${encodeURIComponent(state.mode)}&flow=all`);
+        }
         if (state.selectedNode && !filtered.nodes.some((node) => node.id === state.selectedNode)) {
           state.selectedNode = "";
           cy?.$(':selected').unselect();
